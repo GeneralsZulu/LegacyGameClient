@@ -54,6 +54,10 @@ public:
 	TacticalPhase				m_phase;				///< which slot this strategy fills
 	AsciiString					m_ownSide;				///< empty = wildcard
 	AsciiString					m_enemySide;			///< empty = wildcard
+	// If non-empty, disqualifies the matchup when the enemy player's
+	// PlayerTemplate name contains this substring. Use case: "AirForce"
+	// to exclude the Air Force General as an enemy when targeting USA.
+	AsciiString					m_enemyTemplateExcludeContains;
 	Int							m_minNumPlayers;
 	Int							m_maxNumPlayers;
 
@@ -71,8 +75,20 @@ public:
 	// reusable script body) and as the legacy path for placeholder strategies.
 	TacticalStrategyApplyFunc	m_apply;
 
-	// True if every condition is satisfied by the given context.
-	Bool matches(const AsciiString &ownSide, const AsciiString &enemySide, Int numPlayers) const;
+	// Optional: invoked every AISkirmishPlayer::update() while this strategy
+	// remains the active pick for its phase. Use for state-machine driven
+	// strategies where polling game state is easier than wiring scripts.
+	// Set m_phaseAssigned[phase] = false from inside the callback to retire
+	// the strategy and free the slot for re-rolling.
+	TacticalStrategyApplyFunc	m_perFrameUpdate;
+
+	// True if every condition is satisfied by the given context. enemyTemplateName
+	// is the name of the enemy's PlayerTemplate (e.g. "FactionAmericaAirForceGeneral");
+	// pass empty if not available.
+	Bool matches(const AsciiString &ownSide,
+				 const AsciiString &enemySide,
+				 const AsciiString &enemyTemplateName,
+				 Int numPlayers) const;
 
 	// Apply this strategy to the given AI: load m_scriptFile (if any), then
 	// invoke m_apply (if any). Order matters — scripts attach first so any
@@ -94,6 +110,7 @@ public:
 	AsciiString pickForContext(TacticalPhase phase,
 							   const AsciiString &ownSide,
 							   const AsciiString &enemySide,
+							   const AsciiString &enemyTemplateName,
 							   Int numPlayers) const;
 
 	const TacticalStrategy *findByName(const AsciiString &name) const;

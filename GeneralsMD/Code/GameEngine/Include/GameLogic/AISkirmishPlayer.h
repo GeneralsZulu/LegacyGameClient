@@ -109,6 +109,9 @@ protected:
 	// most once per AI lifetime.
 	void rollTacticalStrategiesIfNeeded();
 	void pickAndApplyStrategyForPhase(Int phase);
+	// Dispatches to each active strategy's optional per-frame update hook.
+	// Used by state-machine driven strategies (e.g. the USA patriot drop).
+	void tickActiveTacticalStrategies();
 
 protected:
 	Int m_curFrontBaseDefense; // First is 0.

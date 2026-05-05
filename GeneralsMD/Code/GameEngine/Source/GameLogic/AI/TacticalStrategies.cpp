@@ -12,6 +12,9 @@
 
 #include "PreRTS.h"
 
+#include <map>
+#include <string.h>
+
 #include "Common/DataChunk.h"
 #include "Common/GameMemory.h"
 #include "Common/GlobalData.h"
@@ -20,10 +23,16 @@
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/Team.h"
+#include "Common/ThingFactory.h"
+#include "Common/ThingTemplate.h"
 #include "GameClient/InGameUI.h"
 #include "GameLogic/AISkirmishPlayer.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/LogicRandomValue.h"
+#include "GameLogic/Module/AIUpdate.h"
+#include "GameLogic/Module/DozerAIUpdate.h"
+#include "GameLogic/Module/ProductionUpdate.h"
+#include "GameLogic/Object.h"
 #include "GameLogic/Scripts.h"
 #include "GameLogic/ScriptEngine.h"
 #include "GameLogic/SidesList.h"
@@ -150,12 +159,21 @@ void TacticalStrategy::applyTo(AISkirmishPlayer *ai) const
 //-------------------------------------------------------------------------------------------------
 Bool TacticalStrategy::matches(const AsciiString &ownSide,
 							   const AsciiString &enemySide,
+							   const AsciiString &enemyTemplateName,
 							   Int numPlayers) const
 {
 	if (!m_ownSide.isEmpty() && m_ownSide.compareNoCase(ownSide) != 0)
 		return false;
 	if (!m_enemySide.isEmpty() && m_enemySide.compareNoCase(enemySide) != 0)
 		return false;
+	if (!m_enemyTemplateExcludeContains.isEmpty() && !enemyTemplateName.isEmpty())
+	{
+		// Substring match against the PlayerTemplate name (e.g. "AirForce"
+		// matches "FactionAmericaAirForceGeneral"). AsciiString lacks a
+		// contains() helper so we walk the underlying char* with strstr.
+		if (strstr(enemyTemplateName.str(), m_enemyTemplateExcludeContains.str()) != nullptr)
+			return false;
+	}
 	if (numPlayers < m_minNumPlayers) return false;
 	if (numPlayers > m_maxNumPlayers) return false;
 	return true;
@@ -192,6 +210,7 @@ const TacticalStrategy *TacticalStrategyStore::findByName(const AsciiString &nam
 AsciiString TacticalStrategyStore::pickForContext(TacticalPhase phase,
 												  const AsciiString &ownSide,
 												  const AsciiString &enemySide,
+												  const AsciiString &enemyTemplateName,
 												  Int numPlayers) const
 {
 	// Lazy init via const accessor — cast away const because population is
@@ -204,7 +223,7 @@ AsciiString TacticalStrategyStore::pickForContext(TacticalPhase phase,
 	{
 		const TacticalStrategy &s = m_strategies[i];
 		if (s.m_phase != phase) continue;
-		if (!s.matches(ownSide, enemySide, numPlayers)) continue;
+		if (!s.matches(ownSide, enemySide, enemyTemplateName, numPlayers)) continue;
 		if (s.m_weight <= 0.0f) continue;
 		totalWeight += s.m_weight;
 	}
@@ -219,7 +238,7 @@ AsciiString TacticalStrategyStore::pickForContext(TacticalPhase phase,
 	{
 		const TacticalStrategy &s = m_strategies[i];
 		if (s.m_phase != phase) continue;
-		if (!s.matches(ownSide, enemySide, numPlayers)) continue;
+		if (!s.matches(ownSide, enemySide, enemyTemplateName, numPlayers)) continue;
 		if (s.m_weight <= 0.0f) continue;
 		running += s.m_weight;
 		if (roll <= running)
@@ -230,7 +249,7 @@ AsciiString TacticalStrategyStore::pickForContext(TacticalPhase phase,
 	{
 		const TacticalStrategy &s = m_strategies[i - 1];
 		if (s.m_phase != phase) continue;
-		if (!s.matches(ownSide, enemySide, numPlayers)) continue;
+		if (!s.matches(ownSide, enemySide, enemyTemplateName, numPlayers)) continue;
 		if (s.m_weight <= 0.0f) continue;
 		return s.m_name;
 	}
@@ -243,6 +262,448 @@ void TacticalStrategyStore::ensureInitialized()
 	if (m_initialized) return;
 	m_initialized = true;
 	registerBuiltinStrategies();
+}
+
+//-------------------------------------------------------------------------------------------------
+// USA Patriot Drop strategy — first real Tactical AI behavior.
+//
+// Implemented as a C++ state machine rather than scripts because (a) the
+// chinook->dozer->patriot sequence references specific unit object IDs that
+// scripts can't easily plumb, and (b) "build at arbitrary position" isn't
+// in the script vocabulary. Per-player state lives in a static map keyed
+// by player index — saves do not preserve mid-strategy state for now.
+//
+// Phases (named, not strictly sequential — failure aborts to DONE):
+//   INIT           : announce, capture target position.
+//   WAIT_PREREQS   : poll until power + barracks + supply exist.
+//   BUILD_SQUAD    : (stub — relies on AI's normal team-build pipeline to
+//                    train MDs and dozer; scans for them).
+//   WAIT_SQUAD     : poll until 2 MDs + dozer + chinook all present.
+//   LOAD_CHINOOK   : (stub) issue load orders.
+//   MOVE_TO_DROP   : (stub) fly chinook to enemy supply centroid.
+//   UNLOAD         : (stub) evacuate cargo.
+//   BUILD_PATRIOT  : (stub) dozer constructs PatriotBattery at drop point.
+//   DISBAND        : team disbands so commitIdleArmy() picks units up.
+//   DONE           : strategy retires.
+//
+// "Stub" phases currently advance after a fixed timer + announcement so the
+// state machine progression is observable end-to-end. Replacing each stub
+// with real unit-command code is the follow-up.
+//-------------------------------------------------------------------------------------------------
+namespace
+{
+	enum PatriotDropPhase
+	{
+		PD_PHASE_INIT = 0,
+		PD_PHASE_WAIT_PREREQS,
+		PD_PHASE_BUILD_SQUAD,
+		PD_PHASE_WAIT_SQUAD,
+		PD_PHASE_LOAD_CHINOOK,
+		PD_PHASE_MOVE_TO_DROP,
+		PD_PHASE_UNLOAD,
+		PD_PHASE_BUILD_PATRIOT,
+		PD_PHASE_DISBAND,
+		PD_PHASE_DONE,
+		PD_PHASE_ABORTED
+	};
+
+	struct PatriotDropState
+	{
+		Int phase;
+		Bool phaseInitialized;	///< false on phase entry, set true after issuing one-shot orders
+		UnsignedInt phaseStartFrame;
+		Coord3D dropTarget;
+		ObjectID chinookID;
+		ObjectID dozerID;
+		ObjectID md1ID;
+		ObjectID md2ID;
+		PatriotDropState() : phase(PD_PHASE_INIT), phaseInitialized(false), phaseStartFrame(0),
+			chinookID(INVALID_ID), dozerID(INVALID_ID), md1ID(INVALID_ID), md2ID(INVALID_ID)
+		{
+			dropTarget.zero();
+		}
+	};
+
+	// Keyed by Player::getPlayerIndex(). Map rather than array so we don't
+	// need to size for MAX_PLAYER_COUNT and can iterate sparsely.
+	static std::map<Int, PatriotDropState> g_patriotDropState;
+}
+
+static PatriotDropState *patriotDropStateFor(AISkirmishPlayer *ai, Bool createIfMissing)
+{
+	if (!ai || !ai->getPlayer()) return nullptr;
+	Int idx = ai->getPlayer()->getPlayerIndex();
+	std::map<Int, PatriotDropState>::iterator it = g_patriotDropState.find(idx);
+	if (it != g_patriotDropState.end()) return &it->second;
+	if (!createIfMissing) return nullptr;
+	g_patriotDropState[idx] = PatriotDropState();
+	return &g_patriotDropState[idx];
+}
+
+static void patriotDropAdvance(PatriotDropState *st, Int newPhase)
+{
+	st->phase = newPhase;
+	st->phaseInitialized = false;
+	st->phaseStartFrame = TheGameLogic ? TheGameLogic->getFrame() : 0;
+}
+
+// Walk player teams looking for an alive (non-construction) object whose
+// template matches the given name. Optional excludes for already-claimed IDs.
+static Object *patriotDropFindOwned(Player *p, const char *templateName,
+	ObjectID excludeA = INVALID_ID, ObjectID excludeB = INVALID_ID)
+{
+	if (!p || !templateName) return nullptr;
+	const ThingTemplate *want = TheThingFactory->findTemplate(templateName);
+	if (!want) return nullptr;
+	Player::PlayerTeamList::const_iterator pti;
+	for (pti = p->getPlayerTeams()->begin(); pti != p->getPlayerTeams()->end(); ++pti)
+	{
+		DLINK_ITERATOR<Team> ti = (*pti)->iterate_TeamInstanceList();
+		for (; !ti.done(); ti.advance())
+		{
+			Team *t = ti.cur();
+			if (!t) continue;
+			DLINK_ITERATOR<Object> oi = t->iterate_TeamMemberList();
+			for (; !oi.done(); oi.advance())
+			{
+				Object *o = oi.cur();
+				if (!o) continue;
+				if (o->isEffectivelyDead()) continue;
+				if (o->getStatusBits().test(OBJECT_STATUS_UNDER_CONSTRUCTION)) continue;
+				if (o->getID() == excludeA || o->getID() == excludeB) continue;
+				if (o->getTemplate() && o->getTemplate()->isEquivalentTo(want))
+					return o;
+			}
+		}
+	}
+	return nullptr;
+}
+
+static Object *lookupObjectByID(ObjectID id)
+{
+	if (id == INVALID_ID || !TheGameLogic) return nullptr;
+	return TheGameLogic->findObjectByID(id);
+}
+
+// True if the unit is currently inside the given transport.
+static Bool patriotDropIsContainedBy(ObjectID unitID, ObjectID transportID)
+{
+	Object *u = lookupObjectByID(unitID);
+	Object *t = lookupObjectByID(transportID);
+	if (!u || !t) return false;
+	return u->getContainedBy() == t;
+}
+
+// True if the player owns at least one of the given templates that's not
+// under construction. Walks team membership; cheap because there are
+// typically <100 units on a player.
+static Bool patriotDropPlayerHasBuilding(Player *p, const char *templateName)
+{
+	if (!p || !templateName) return false;
+	const ThingTemplate *want = TheThingFactory->findTemplate(templateName);
+	if (!want) return false;
+	Player::PlayerTeamList::const_iterator pti;
+	for (pti = p->getPlayerTeams()->begin(); pti != p->getPlayerTeams()->end(); ++pti)
+	{
+		DLINK_ITERATOR<Team> ti = (*pti)->iterate_TeamInstanceList();
+		for (; !ti.done(); ti.advance())
+		{
+			Team *t = ti.cur();
+			if (!t) continue;
+			DLINK_ITERATOR<Object> oi = t->iterate_TeamMemberList();
+			for (; !oi.done(); oi.advance())
+			{
+				Object *o = oi.cur();
+				if (!o) continue;
+				if (o->isEffectivelyDead()) continue;
+				if (o->getStatusBits().test(OBJECT_STATUS_UNDER_CONSTRUCTION)) continue;
+				if (o->getTemplate() && o->getTemplate()->isEquivalentTo(want))
+					return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void apply_USAPatriotDrop(AISkirmishPlayer *ai)
+{
+	announceTactical(ai, "Patriot drop: strategy active");
+	PatriotDropState *st = patriotDropStateFor(ai, true);
+	if (!st) return;
+	patriotDropAdvance(st, PD_PHASE_INIT);
+	// Capture drop target now (enemy structure centroid) so the goal is
+	// stable even as the enemy's bounds shift mid-game.
+	Player *enemy = ai->getAiEnemy();
+	if (enemy)
+	{
+		Region2D bounds;
+		Coord2D mean;
+		AIPlayer::getPlayerStructureBounds(&bounds, enemy->getPlayerIndex(), FALSE, &mean);
+		st->dropTarget.x = mean.x;
+		st->dropTarget.y = mean.y;
+		st->dropTarget.z = 0;
+	}
+}
+
+static void tick_USAPatriotDrop(AISkirmishPlayer *ai)
+{
+	PatriotDropState *st = patriotDropStateFor(ai, false);
+	if (!st) return;
+	if (st->phase == PD_PHASE_DONE) return;
+
+	UnsignedInt curFrame = TheGameLogic ? TheGameLogic->getFrame() : 0;
+	UnsignedInt phaseAge = curFrame - st->phaseStartFrame;
+
+	switch (st->phase)
+	{
+		case PD_PHASE_INIT:
+			announceTactical(ai, "Patriot drop: waiting for prereqs (power+barracks+supply)");
+			patriotDropAdvance(st, PD_PHASE_WAIT_PREREQS);
+			break;
+
+		case PD_PHASE_WAIT_PREREQS:
+		{
+			Player *p = ai->getPlayer();
+			Bool havePower    = patriotDropPlayerHasBuilding(p, "AmericaPowerPlant");
+			Bool haveBarracks = patriotDropPlayerHasBuilding(p, "AmericaBarracks");
+			Bool haveSupply   = patriotDropPlayerHasBuilding(p, "AmericaSupplyCenter");
+			if (havePower && haveBarracks && haveSupply)
+			{
+				announceTactical(ai, "Patriot drop: prereqs met, queueing squad");
+				patriotDropAdvance(st, PD_PHASE_BUILD_SQUAD);
+			}
+			break;
+		}
+
+		case PD_PHASE_BUILD_SQUAD:
+		{
+			// Queue 2 Missile Defenders at the barracks. Dozer and Chinook
+			// are expected to already exist (every faction starts with a
+			// dozer; Chinooks are auto-spawned with the Supply Center).
+			if (!st->phaseInitialized)
+			{
+				Player *p = ai->getPlayer();
+				Object *barracks = patriotDropFindOwned(p, "AmericaBarracks");
+				const ThingTemplate *mdT = TheThingFactory->findTemplate("AmericaInfantryMissileDefender");
+				if (barracks && mdT)
+				{
+					ProductionUpdateInterface *pu = barracks->getProductionUpdateInterface();
+					if (pu)
+					{
+						// queueCreateUnit takes a unique ProductionID — request one per unit.
+						pu->queueCreateUnit(mdT, pu->requestUniqueUnitID());
+						pu->queueCreateUnit(mdT, pu->requestUniqueUnitID());
+						announceTactical(ai, "Patriot drop: queued 2 Missile Defenders");
+					}
+					else
+					{
+						announceTactical(ai, "Patriot drop: barracks has no production interface — abort");
+						patriotDropAdvance(st, PD_PHASE_ABORTED);
+						break;
+					}
+				}
+				else
+				{
+					announceTactical(ai, "Patriot drop: missing barracks or MD template — abort");
+					patriotDropAdvance(st, PD_PHASE_ABORTED);
+					break;
+				}
+				st->phaseInitialized = true;
+			}
+			patriotDropAdvance(st, PD_PHASE_WAIT_SQUAD);
+			break;
+		}
+
+		case PD_PHASE_WAIT_SQUAD:
+		{
+			Player *p = ai->getPlayer();
+			// Look for: 2 distinct Missile Defenders, 1 Dozer, 1 Chinook, all
+			// owned, alive, fully built, not yet claimed by us.
+			Object *md1 = patriotDropFindOwned(p, "AmericaInfantryMissileDefender");
+			Object *md2 = md1
+				? patriotDropFindOwned(p, "AmericaInfantryMissileDefender", md1->getID())
+				: nullptr;
+			Object *dozer = patriotDropFindOwned(p, "AmericaVehicleDozer");
+			Object *chinook = patriotDropFindOwned(p, "AmericaVehicleChinook");
+			if (md1 && md2 && dozer && chinook)
+			{
+				st->md1ID = md1->getID();
+				st->md2ID = md2->getID();
+				st->dozerID = dozer->getID();
+				st->chinookID = chinook->getID();
+				announceTactical(ai, "Patriot drop: squad ready, loading chinook");
+				patriotDropAdvance(st, PD_PHASE_LOAD_CHINOOK);
+			}
+			else if (phaseAge > 90 * LOGICFRAMES_PER_SECOND)
+			{
+				// 90s without a full squad — give up.
+				announceTactical(ai, "Patriot drop: squad never assembled — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+			}
+			break;
+		}
+
+		case PD_PHASE_LOAD_CHINOOK:
+		{
+			if (!st->phaseInitialized)
+			{
+				Object *chinook = lookupObjectByID(st->chinookID);
+				Object *md1 = lookupObjectByID(st->md1ID);
+				Object *md2 = lookupObjectByID(st->md2ID);
+				Object *dozer = lookupObjectByID(st->dozerID);
+				if (!chinook || !md1 || !md2 || !dozer)
+				{
+					announceTactical(ai, "Patriot drop: lost a unit before load — abort");
+					patriotDropAdvance(st, PD_PHASE_ABORTED);
+					break;
+				}
+				if (md1->getAI()) md1->getAI()->aiEnter(chinook, CMD_FROM_AI);
+				if (md2->getAI()) md2->getAI()->aiEnter(chinook, CMD_FROM_AI);
+				if (dozer->getAI()) dozer->getAI()->aiEnter(chinook, CMD_FROM_AI);
+				announceTactical(ai, "Patriot drop: load orders issued");
+				st->phaseInitialized = true;
+			}
+			// Poll: all three must report they're inside the chinook.
+			if (patriotDropIsContainedBy(st->md1ID, st->chinookID)
+				&& patriotDropIsContainedBy(st->md2ID, st->chinookID)
+				&& patriotDropIsContainedBy(st->dozerID, st->chinookID))
+			{
+				announceTactical(ai, "Patriot drop: all loaded, en route to drop");
+				patriotDropAdvance(st, PD_PHASE_MOVE_TO_DROP);
+			}
+			else if (phaseAge > 60 * LOGICFRAMES_PER_SECOND)
+			{
+				announceTactical(ai, "Patriot drop: load timed out — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+			}
+			break;
+		}
+
+		case PD_PHASE_MOVE_TO_DROP:
+		{
+			Object *chinook = lookupObjectByID(st->chinookID);
+			if (!chinook)
+			{
+				announceTactical(ai, "Patriot drop: chinook lost in transit — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+				break;
+			}
+			if (!st->phaseInitialized)
+			{
+				if (chinook->getAI())
+					chinook->getAI()->aiMoveToPosition(&st->dropTarget, CMD_FROM_AI);
+				AsciiString msg;
+				msg.format("Patriot drop: moving to (%.0f, %.0f)",
+					st->dropTarget.x, st->dropTarget.y);
+				announceTactical(ai, msg.str());
+				st->phaseInitialized = true;
+			}
+			// Poll arrival within ~150 game units of the drop target.
+			Coord3D pos = *chinook->getPosition();
+			Real dx = pos.x - st->dropTarget.x;
+			Real dy = pos.y - st->dropTarget.y;
+			Real distSq = dx * dx + dy * dy;
+			const Real ARRIVAL_RADIUS_SQ = 150.0f * 150.0f;
+			if (distSq <= ARRIVAL_RADIUS_SQ)
+			{
+				announceTactical(ai, "Patriot drop: arrived at drop, evacuating");
+				patriotDropAdvance(st, PD_PHASE_UNLOAD);
+			}
+			else if (phaseAge > 90 * LOGICFRAMES_PER_SECOND)
+			{
+				announceTactical(ai, "Patriot drop: travel timeout — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+			}
+			break;
+		}
+
+		case PD_PHASE_UNLOAD:
+		{
+			Object *chinook = lookupObjectByID(st->chinookID);
+			if (!chinook)
+			{
+				announceTactical(ai, "Patriot drop: chinook lost during unload — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+				break;
+			}
+			if (!st->phaseInitialized)
+			{
+				if (chinook->getAI())
+					chinook->getAI()->aiEvacuate(false, CMD_FROM_AI);
+				announceTactical(ai, "Patriot drop: evacuate issued");
+				st->phaseInitialized = true;
+			}
+			// Wait until at least the dozer is out — patriot construct needs it on the ground.
+			Object *dozer = lookupObjectByID(st->dozerID);
+			if (dozer && dozer->getContainedBy() != chinook)
+			{
+				announceTactical(ai, "Patriot drop: dozer on ground, building patriot");
+				patriotDropAdvance(st, PD_PHASE_BUILD_PATRIOT);
+			}
+			else if (phaseAge > 30 * LOGICFRAMES_PER_SECOND)
+			{
+				announceTactical(ai, "Patriot drop: unload timeout — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+			}
+			break;
+		}
+
+		case PD_PHASE_BUILD_PATRIOT:
+		{
+			Object *dozer = lookupObjectByID(st->dozerID);
+			if (!dozer)
+			{
+				announceTactical(ai, "Patriot drop: dozer lost — abort");
+				patriotDropAdvance(st, PD_PHASE_ABORTED);
+				break;
+			}
+			if (!st->phaseInitialized)
+			{
+				const ThingTemplate *patriotT = TheThingFactory->findTemplate("AmericaPatriotBattery");
+				DozerAIInterface *dozerAI = dozer->getAI() ? dozer->getAI()->getDozerAIInterface() : nullptr;
+				if (patriotT && dozerAI)
+				{
+					Coord3D buildPos = *dozer->getPosition();
+					dozerAI->construct(patriotT, &buildPos, 0.0f, ai->getPlayer(), false);
+					announceTactical(ai, "Patriot drop: dozer constructing PatriotBattery");
+				}
+				else
+				{
+					announceTactical(ai, "Patriot drop: missing patriot template or dozer interface — abort");
+					patriotDropAdvance(st, PD_PHASE_ABORTED);
+					break;
+				}
+				st->phaseInitialized = true;
+			}
+			// 30s after issuing, declare done. The actual building progress is owned
+			// by the dozer; commitIdleArmy() picks the surviving units up.
+			if (phaseAge > 30 * LOGICFRAMES_PER_SECOND)
+			{
+				announceTactical(ai, "Patriot drop: build window closed");
+				patriotDropAdvance(st, PD_PHASE_DISBAND);
+			}
+			break;
+		}
+
+		case PD_PHASE_DISBAND:
+			// No explicit team to disband (we never formed a TeamPrototype-based
+			// team — units stayed on the player's default team throughout).
+			// Idle units fall through to commitIdleArmy() naturally.
+			announceTactical(ai, "Patriot drop: complete");
+			patriotDropAdvance(st, PD_PHASE_DONE);
+			break;
+
+		case PD_PHASE_ABORTED:
+			// Settle into PD_PHASE_DONE so the tick early-returns going forward.
+			// All units (or what's left of them) stay on the default team and
+			// commitIdleArmy() will collect them on its next sweep.
+			patriotDropAdvance(st, PD_PHASE_DONE);
+			break;
+
+		case PD_PHASE_DONE:
+		default:
+			break;
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -310,6 +771,21 @@ void TacticalStrategyStore::registerBuiltinStrategies()
 	s.m_phase = TACTICAL_PHASE_OPENING;
 	s.m_ownSide = "America";
 	s.m_apply = &apply_OpeningAmericaPatriotRush;
+	registerStrategy(s);
+
+	// Real Patriot Drop strategy: USA mirror (any general) but skip when
+	// the enemy is Air Force, who wakes up Comanches early enough to
+	// shred the chinook in transit. Heavy weight so it dominates other
+	// USA opening picks during testing.
+	s = TacticalStrategy();
+	s.m_name = "Opening_USA_PatriotDrop";
+	s.m_weight = 5.0f;
+	s.m_phase = TACTICAL_PHASE_OPENING;
+	s.m_ownSide = "America";
+	s.m_enemySide = "America";
+	s.m_enemyTemplateExcludeContains = "AirForce";
+	s.m_apply = &apply_USAPatriotDrop;
+	s.m_perFrameUpdate = &tick_USAPatriotDrop;
 	registerStrategy(s);
 
 	s = TacticalStrategy();

@@ -33,6 +33,7 @@
 #include "Common/GlobalData.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#include "Common/PlayerTemplate.h"
 #include "Common/Team.h"
 #include "Common/ThingFactory.h"
 #include "Common/BuildAssistant.h"
@@ -967,6 +968,7 @@ void AISkirmishPlayer::update()
 {
 	AIPlayer::update();
 	rollTacticalStrategiesIfNeeded();
+	tickActiveTacticalStrategies();
 	commitIdleArmy();
 }
 
@@ -1009,11 +1011,14 @@ void AISkirmishPlayer::pickAndApplyStrategyForPhase(Int phase)
 
 	AsciiString ownSide = m_player->getSide();
 	AsciiString enemySide = enemy->getSide();
+	AsciiString enemyTemplateName;
+	if (enemy->getPlayerTemplate())
+		enemyTemplateName = enemy->getPlayerTemplate()->getName();
 	Int numPlayers = ThePlayerList ? ThePlayerList->getPlayerCount() : 0;
 
 	TacticalStrategyStore *store = TacticalStrategyStore::getInstance();
 	AsciiString picked = store->pickForContext(
-		(TacticalPhase)phase, ownSide, enemySide, numPlayers);
+		(TacticalPhase)phase, ownSide, enemySide, enemyTemplateName, numPlayers);
 
 	m_strategyName[phase] = picked;
 	m_strategyAssigned[phase] = true;
@@ -1022,6 +1027,30 @@ void AISkirmishPlayer::pickAndApplyStrategyForPhase(Int phase)
 	{
 		const TacticalStrategy *s = store->findByName(picked);
 		if (s) s->applyTo(this);
+	}
+}
+
+//----------------------------------------------------------------------------------------------------------
+// Walks each phase slot and dispatches to the picked strategy's optional
+// per-frame update callback. Strategy-driven state machines hang off this
+// hook; the simple announce-style strategies leave m_perFrameUpdate null
+// and incur no work.
+//----------------------------------------------------------------------------------------------------------
+void AISkirmishPlayer::tickActiveTacticalStrategies()
+{
+	if (!isTacticalAI()) return;
+	if (TheRecorder
+		&& !TheRecorder->isAIFeatureEnabled(RecorderClass::ZULU_AI_FEATURE_TACTICAL_STRATEGIES))
+		return;
+
+	TacticalStrategyStore *store = TacticalStrategyStore::getInstance();
+	for (Int phase = 0; phase < TACTICAL_PHASE_SLOTS; ++phase)
+	{
+		if (!m_strategyAssigned[phase]) continue;
+		if (m_strategyName[phase].isEmpty()) continue;
+		const TacticalStrategy *s = store->findByName(m_strategyName[phase]);
+		if (s && s->m_perFrameUpdate)
+			s->m_perFrameUpdate(this);
 	}
 }
 
