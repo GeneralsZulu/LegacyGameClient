@@ -709,6 +709,12 @@ Int parseScriptDebug(char *args[], int)
 	return 1;
 }
 
+Int parseDebugAITactical(char *args[], int)
+{
+	TheWritableGlobalData->m_debugAITactical = TRUE;
+	return 1;
+}
+
 Int parseParticleEdit(char *args[], int)
 {
 	TheWritableGlobalData->m_particleEdit = TRUE;
@@ -1262,6 +1268,7 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-fullVersion", parseFullVersion },
 	{ "-particleEdit", parseParticleEdit },
 	{ "-scriptDebug", parseScriptDebug },
+	{ "-debugAITactical", parseDebugAITactical },
 	{ "-playStats", parsePlayStats },
 	{ "-mod", parseMod },
 	{ "-noshaders", parseNoShaders },
