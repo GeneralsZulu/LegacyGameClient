@@ -104,6 +104,11 @@ protected:
 	// current enemy. Backstops the script-driven team flow so accumulated idle
 	// units don't sit in base late game.
 	void commitIdleArmy();
+	// Per-phase strategy rolling. Opening fires when the enemy is first known;
+	// midgame and lategame fire at fixed frame thresholds. Each phase rolls at
+	// most once per AI lifetime.
+	void rollTacticalStrategiesIfNeeded();
+	void pickAndApplyStrategyForPhase(Int phase);
 
 protected:
 	Int m_curFrontBaseDefense; // First is 0.
@@ -119,5 +124,14 @@ protected:
 	Player			*m_currentEnemy;
 
 	UnsignedInt m_nextIdleSweepFrame;
+
+public:
+	// Per-phase strategy state. Index by TacticalPhase enum (TACTICAL_PHASE_COUNT
+	// entries). Sized as raw arrays so the header doesn't have to pull in
+	// TacticalStrategies.h; matched in size at static-assert time in the .cpp.
+	enum { TACTICAL_PHASE_SLOTS = 4 };
+protected:
+	Bool			m_strategyAssigned[TACTICAL_PHASE_SLOTS];
+	AsciiString		m_strategyName[TACTICAL_PHASE_SLOTS];
 
 };

@@ -47,6 +47,7 @@
 #include "Common/Recorder.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/AIPathfind.h"
+#include "GameLogic/TacticalStrategies.h"
 #include "GameLogic/TerrainLogic.h"
 #include "GameLogic/Weapon.h"
 #include "GameLogic/Module/AIUpdate.h"
@@ -61,6 +62,11 @@
 
 #define USE_DOZER 1
 
+// Header keeps a raw array sized by AISkirmishPlayer::TACTICAL_PHASE_SLOTS so
+// it doesn't have to drag in TacticalStrategies.h. Verify that constant still
+// matches the actual enum.
+typedef char tactical_phase_slot_count_check[
+	(AISkirmishPlayer::TACTICAL_PHASE_SLOTS == TACTICAL_PHASE_COUNT) ? 1 : -1];
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -83,6 +89,9 @@ m_nextIdleSweepFrame(0)
 {
 	m_frameLastBuildingBuilt = TheGameLogic->getFrame();
 	p->setCanBuildUnits(true); // turn on ai production by default.
+
+	for (Int i = 0; i < TACTICAL_PHASE_SLOTS; ++i)
+		m_strategyAssigned[i] = false;
 }
 
 AISkirmishPlayer::~AISkirmishPlayer()
@@ -957,7 +966,63 @@ void AISkirmishPlayer::doTeamBuilding()
 void AISkirmishPlayer::update()
 {
 	AIPlayer::update();
+	rollTacticalStrategiesIfNeeded();
 	commitIdleArmy();
+}
+
+//----------------------------------------------------------------------------------------------------------
+// Per-phase strategy roller. Each phase rolls at most once per AI lifetime.
+// Triggers:
+//   OPENING:  enemy first known.
+//   MIDGAME:  >= 5 minutes of game time.
+//   LATEGAME: >= 15 minutes of game time.
+// REACTIVE is reserved (event-driven; not used in v1).
+// Gated behind SLOT_TACTICAL_AI and the replay feature flag so vanilla AIs
+// and pre-feature replays stay deterministic.
+//----------------------------------------------------------------------------------------------------------
+void AISkirmishPlayer::rollTacticalStrategiesIfNeeded()
+{
+	if (!isTacticalAI()) return;
+	if (TheRecorder
+		&& !TheRecorder->isAIFeatureEnabled(RecorderClass::ZULU_AI_FEATURE_TACTICAL_STRATEGIES))
+		return;
+
+	pickAndApplyStrategyForPhase(TACTICAL_PHASE_OPENING);
+
+	UnsignedInt curFrame = TheGameLogic->getFrame();
+	const UnsignedInt midGameFrame  =  5 * 60 * LOGICFRAMES_PER_SECOND;
+	const UnsignedInt lateGameFrame = 15 * 60 * LOGICFRAMES_PER_SECOND;
+
+	if (curFrame >= midGameFrame)
+		pickAndApplyStrategyForPhase(TACTICAL_PHASE_MIDGAME);
+	if (curFrame >= lateGameFrame)
+		pickAndApplyStrategyForPhase(TACTICAL_PHASE_LATEGAME);
+}
+
+void AISkirmishPlayer::pickAndApplyStrategyForPhase(Int phase)
+{
+	if (phase < 0 || phase >= TACTICAL_PHASE_SLOTS) return;
+	if (m_strategyAssigned[phase]) return;
+
+	Player *enemy = getAiEnemy();
+	if (!enemy) return; // wait for acquireEnemy to settle (matters for OPENING)
+
+	AsciiString ownSide = m_player->getSide();
+	AsciiString enemySide = enemy->getSide();
+	Int numPlayers = ThePlayerList ? ThePlayerList->getPlayerCount() : 0;
+
+	TacticalStrategyStore *store = TacticalStrategyStore::getInstance();
+	AsciiString picked = store->pickForContext(
+		(TacticalPhase)phase, ownSide, enemySide, numPlayers);
+
+	m_strategyName[phase] = picked;
+	m_strategyAssigned[phase] = true;
+
+	if (!picked.isEmpty())
+	{
+		const TacticalStrategy *s = store->findByName(picked);
+		if (s) s->applyTo(this);
+	}
 }
 
 //----------------------------------------------------------------------------------------------------------
@@ -1339,13 +1404,15 @@ void AISkirmishPlayer::crc( Xfer *xfer )
 /** Xfer method
 	* Version Info;
 	* 1: Initial version
-	* 2: Added m_nextIdleSweepFrame */
+	* 2: Added m_nextIdleSweepFrame
+	* 3: Added m_openingStrategyAssigned + m_openingStrategyName (transient, never shipped)
+	* 4: Replaced opening fields with per-phase m_strategyAssigned[]/m_strategyName[] */
 // ------------------------------------------------------------------------------------------------
 void AISkirmishPlayer::xfer( Xfer *xfer )
 {
 
 	// version
-	XferVersion currentVersion = 2;
+	XferVersion currentVersion = 4;
 	XferVersion version = currentVersion;
 	xfer->xferVersion( &version, currentVersion );
 
@@ -1379,6 +1446,15 @@ void AISkirmishPlayer::xfer( Xfer *xfer )
 	if (version >= 2)
 	{
 		xfer->xferUnsignedInt( &m_nextIdleSweepFrame );
+	}
+
+	if (version >= 4)
+	{
+		for (Int p = 0; p < TACTICAL_PHASE_SLOTS; ++p)
+		{
+			xfer->xferBool( &m_strategyAssigned[p] );
+			xfer->xferAsciiString( &m_strategyName[p] );
+		}
 	}
 
 }

@@ -343,6 +343,7 @@ GlobalData* GlobalData::m_theOriginal = nullptr;
 
 	{ "DebugAI",										INI::parseBool,				nullptr,			offsetof( GlobalData, m_debugAI ) },
 	{ "DebugAIObstacles",						INI::parseBool,				nullptr,			offsetof( GlobalData, m_debugAIObstacles ) },
+	{ "DebugAITactical",						INI::parseBool,				nullptr,			offsetof( GlobalData, m_debugAITactical ) },
 	{ "ShowClientPhysics",				INI::parseBool,				nullptr,			offsetof( GlobalData, m_showClientPhysics ) },
 	{ "ShowTerrainNormals",				INI::parseBool,				nullptr,			offsetof( GlobalData, m_showTerrainNormals ) },
 	{ "ShowObjectHealth",						INI::parseBool,				nullptr,			offsetof( GlobalData, m_showObjectHealth ) },
@@ -843,6 +844,7 @@ GlobalData::GlobalData()
 	m_debugAI = AI_DEBUG_NONE;
 	m_debugSupplyCenterPlacement = FALSE;
 	m_debugAIObstacles = FALSE;
+	m_debugAITactical = FALSE;
 	m_showClientPhysics = TRUE;
 	m_showTerrainNormals = FALSE;
 	m_showObjectHealth = FALSE;

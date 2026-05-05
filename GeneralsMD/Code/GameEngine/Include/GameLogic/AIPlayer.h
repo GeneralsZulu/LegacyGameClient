@@ -186,6 +186,7 @@ public: // AIPlayer interface, may be overridden by AISkirmishPlayer.  jba.
 	virtual void selectSkillset(Int skillset);
 
 public:
+	Player *getPlayer() const { return m_player; }
 	Bool getBaseCenter(Coord3D *pos) const {*pos = m_baseCenter; return m_baseCenterSet;}
 	/// Difficulty level for this player.
 	GameDifficulty getAIDifficulty() const;

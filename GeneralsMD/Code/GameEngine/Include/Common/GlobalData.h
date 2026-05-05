@@ -298,6 +298,7 @@ public:
 	AIDebugOptions m_debugAI;			///< Used to display AI debug information
 	Bool m_debugSupplyCenterPlacement; ///< Dumps to log everywhere it thinks about placing a supply center
 	Bool m_debugAIObstacles;			///< Used to display AI obstacle debug information
+	Bool m_debugAITactical;				///< Surface Tactical-AI strategy decisions as in-game messages
 	Bool m_showObjectHealth;			///< debug display object health
 	Bool m_scriptDebug;						///< Should we attempt to load the script debugger window (.DLL)
 	Bool m_particleEdit;					///< Should we attempt to load the particle editor (.DLL)

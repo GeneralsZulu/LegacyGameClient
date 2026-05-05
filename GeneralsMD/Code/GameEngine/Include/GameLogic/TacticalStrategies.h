@@ -45,6 +45,7 @@ public:
 		, m_phase(TACTICAL_PHASE_OPENING)
 		, m_minNumPlayers(0)
 		, m_maxNumPlayers(0x7fffffff)
+		, m_scriptTemplateName("TacticalAI")
 		, m_apply(nullptr)
 	{}
 
@@ -55,10 +56,28 @@ public:
 	AsciiString					m_enemySide;			///< empty = wildcard
 	Int							m_minNumPlayers;
 	Int							m_maxNumPlayers;
-	TacticalStrategyApplyFunc	m_apply;				///< invoked once at strategy assignment
+
+	// If non-empty, a .scb file path (relative to game data root, e.g.
+	// "Data\\Scripts\\Tactical\\USA_PatriotRush.scb") whose ScriptList is
+	// loaded and qualified for the AI player at strategy assignment time.
+	// Authored in WorldBuilder against a placeholder side whose name matches
+	// m_scriptTemplateName (defaults to "TacticalAI"); the qualifier rewrites
+	// player references to the actual AI player's name.
+	AsciiString					m_scriptFile;
+	AsciiString					m_scriptTemplateName;	///< template player name in the .scb to substitute; defaults to "TacticalAI"
+
+	// Phase-1 fallback / supplement. When set, runs after any script-file
+	// load. Useful for hybrid strategies (small C++ orchestration plus a
+	// reusable script body) and as the legacy path for placeholder strategies.
+	TacticalStrategyApplyFunc	m_apply;
 
 	// True if every condition is satisfied by the given context.
 	Bool matches(const AsciiString &ownSide, const AsciiString &enemySide, Int numPlayers) const;
+
+	// Apply this strategy to the given AI: load m_scriptFile (if any), then
+	// invoke m_apply (if any). Order matters — scripts attach first so any
+	// C++ orchestration in m_apply can read or augment them.
+	void applyTo(AISkirmishPlayer *ai) const;
 };
 
 // Singleton registry. Strategies are registered on first access (lazy init).
