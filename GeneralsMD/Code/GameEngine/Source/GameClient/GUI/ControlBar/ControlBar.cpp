@@ -1750,7 +1750,9 @@ void ControlBar::evaluateContextUI()
 	//we don't show any GUI commands for them!!!
 	//This is used when we select enemy objects or objects on another team.
 	//@todo we may want to show their portrait
-	if( !TheInGameUI->areSelectedObjectsControllable() )
+	// Observers / replay viewers always fall through to the regular evaluation
+	// below so they can see production queues and garrison contents.
+	if( !TheInGameUI->areSelectedObjectsControllable() && !isViewerOnlyClient() )
 	{
 		//Also make sure the unit isn't a garrisonable neutral civ team building!
 		Drawable *draw = selectedDrawables->front();
@@ -1894,7 +1896,7 @@ void ControlBar::evaluateContextUI()
 
 				// we cannot select objects that are controlled by our enemies
 				relationship = localPlayer->getRelationship( obj->getTeam() );
-				if( obj->isLocallyControlled() == TRUE || relationship == NEUTRAL )
+				if( obj->isLocallyControlled() == TRUE || relationship == NEUTRAL || isViewerOnlyClient() )
 					switchToContext( CB_CONTEXT_STRUCTURE_INVENTORY, drawToEvaluateFor );
 
 			}

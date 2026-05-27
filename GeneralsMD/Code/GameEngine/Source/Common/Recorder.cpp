@@ -2542,6 +2542,19 @@ void RecorderClass::updateResumeCatchup()
 	}
 }
 
+Bool isViewerOnlyClient()
+{
+	if (TheRecorder && TheRecorder->isPlaybackMode())
+		return TRUE;
+	if (ThePlayerList)
+	{
+		Player *local = ThePlayerList->getLocalPlayer();
+		if (local && local->isPlayerObserver())
+			return TRUE;
+	}
+	return FALSE;
+}
+
 /**
  * Create a new recorder object.
  */

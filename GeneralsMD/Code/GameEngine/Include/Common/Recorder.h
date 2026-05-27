@@ -281,3 +281,9 @@ protected:
 
 extern RecorderClass *TheRecorder;
 RecorderClass *createRecorder();
+
+// True when the local client is viewing a game it doesn't control: any
+// playback flavor (regular, simulation, live-observer) or when the local
+// player occupies an observer slot. Used by ControlBar/InGameUI to surface
+// production queues and garrison contents on non-friendly buildings.
+Bool isViewerOnlyClient();
