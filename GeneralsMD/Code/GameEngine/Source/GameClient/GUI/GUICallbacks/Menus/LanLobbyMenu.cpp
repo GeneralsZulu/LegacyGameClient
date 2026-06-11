@@ -61,6 +61,7 @@
 #include "GameNetwork/IPEnumeration.h"
 #include "GameNetwork/LANAPICallbacks.h"
 #include "GameNetwork/LANGameInfo.h"
+#include "GameNetwork/NetworkDefs.h"
 #include "GameNetwork/OnlineCoordinatorAPI.h"
 
 Bool LANisShuttingDown = false;
@@ -695,11 +696,14 @@ static void connectCoordinatorIfNeeded()
 	}
 	s_coordCurrentNick = readPlayerNickAscii();
 	AsciiString host = COORD_HOST_DEFAULT;
-	// Bind UDP/8086 so the punched NAT mapping is on the port the LAN code
-	// will rebind after PUNCH_OK. The TCP signaling port is the listed
-	// coordinator port; UDP STUN is on the port reported in hello_ok.
+	// Bind UDP/8086 (lobby) so the punched NAT mapping is on the port the LAN
+	// code will rebind after PUNCH_OK, AND UDP/8088 (NETWORK_BASE_PORT_NUMBER,
+	// in-game data) so ConnectionManager's later socket inherits an already-
+	// punched mapping. The TCP signaling port is the listed coordinator port;
+	// UDP STUN is on the port reported in hello_ok.
 	if (!s_coord->connect(host, COORD_TCP_PORT_DEFAULT,
-		s_coordCurrentNick, AsciiString("zulu/1"), /*udpBindPort=*/8086))
+		s_coordCurrentNick, AsciiString("zulu/1"),
+		/*lobbyBindPort=*/8086, /*gameBindPort=*/NETWORK_BASE_PORT_NUMBER))
 	{
 		DEBUG_LOG(("connectCoordinatorIfNeeded: connect failed: %s",
 			s_coord->lastError().str()));
@@ -819,12 +823,21 @@ static void doCoordinatorHandoffToLAN()
 	// are: m_amIHost is set inside requestHost/requestJoin so it cannot
 	// drift out of sync with what we actually asked the coordinator for.
 	Bool weAreHost = s_coord->amIHost();
-	DEBUG_LOG(("HANDOFF: start weAreHost=%d peerIP=0x%08x peerPort=%u",
-		(int)weAreHost, peerIP, peerPort));
+	DEBUG_LOG(("HANDOFF: start weAreHost=%d peerIP=0x%08x peerPort=%u gamePeerIP=0x%08x gamePeerPort=%u",
+		(int)weAreHost, peerIP, peerPort, peer.gamePunchedIP, peer.gamePunchedPort));
 
-	// Release the coordinator's UDP socket so TheLAN can rebind 8086. The
-	// NAT mapping established during punch persists for ~30s+, well within
-	// the few ms it takes us to rebind.
+	// Move the punched game UDP socket into the module-level stash so it
+	// outlives the coordinator (and this menu); a keepalive sender keeps
+	// the NAT mapping alive through the LAN lobby phase. ConnectionManager
+	// adopts the FD at game start.
+	if (!s_coord->stashGameSocketForGameStart())
+	{
+		DEBUG_LOG(("HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
+	}
+
+	// Release the coordinator's lobby UDP socket so TheLAN can rebind 8086.
+	// The NAT mapping established during punch persists for ~30s+, well
+	// within the few ms it takes us to rebind.
 	s_coord->disconnect();
 	DEBUG_LOG(("HANDOFF: coord disconnected"));
 
@@ -849,6 +862,13 @@ static void doCoordinatorHandoffToLAN()
 	}
 	TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
 	DEBUG_LOG(("HANDOFF: RequestSetName done"));
+
+	// Plumb the peer's punched game-data port so direct-connect slot setup
+	// (both host's handleRequestJoin and joiner's handleJoinAccept) records
+	// it on the slot, which ConnectionManager then reads as the in-game
+	// destination port. Without this the slots default to 8088 and packets
+	// land on the peer's NAT with no mapping.
+	TheLAN->setDirectConnectRemoteGamePort(peer.gamePunchedPort);
 
 	if (weAreHost)
 	{

@@ -43,15 +43,32 @@
 
 
 // Wire constants must match tools/coordinator/protocol.go.
-static const UnsignedInt  STUN_REQUEST_SIZE  = 4 + 16;
+static const UnsignedInt  STUN_REQUEST_SIZE  = 4 + 16 + 1;
 static const UnsignedInt  STUN_RESPONSE_SIZE = 4 + 4 + 2;
 static const UnsignedInt  SESSION_TOKEN_BYTES = 16;
+static const unsigned char STUN_PURPOSE_LOBBY = 0;
+static const unsigned char STUN_PURPOSE_GAME  = 1;
 
 static const UnsignedInt  STUN_PROBE_INTERVAL_MS = 500;
 static const Int          STUN_PROBE_MAX_TRIES   = 6;
 static const UnsignedInt  PUNCH_BLAST_INTERVAL_MS = 200;
 static const UnsignedInt  PUNCH_TIMEOUT_MS        = 8000;
 static const UnsignedInt  TCP_RX_BUF_HIGH_WATER   = 64 * 1024;
+// Keepalive interval for the stashed game socket. Well under the most
+// aggressive NAT UDP idle TTLs (commonly 30s on home routers).
+static const UnsignedInt  GAME_KEEPALIVE_INTERVAL_MS = 5000;
+
+// --- Lobby-phase stash for the punched game UDP socket ---
+// The OnlineCoordinatorAPI instance is destroyed during the LanLobbyMenu
+// shutdown that follows PUNCH_OK, so the socket cannot live on the instance.
+// We park it here, send periodic keepalives to maintain the NAT mapping, and
+// ConnectionManager picks it up at game start.
+static Int           s_stashGameFd            = -1;
+static UnsignedShort s_stashGameLocalPort     = 0;
+static UnsignedInt   s_stashGamePeerIPHost    = 0;  // host order
+static UnsignedShort s_stashGamePeerPortHost  = 0;  // host order
+static UnsignedInt   s_stashKeepaliveNextMs   = 0;
+static AsciiString   s_stashKeepaliveNick;
 
 
 // ---- platform helpers ------------------------------------------------------
@@ -278,23 +295,107 @@ static void appendEscaped(AsciiString& dst, const char* s)
 }
 
 
+// ---- static stash helpers --------------------------------------------------
+
+Bool OnlineCoordinatorAPI::hasStashedGameSocket()
+{
+	return s_stashGameFd != -1;
+}
+
+Int OnlineCoordinatorAPI::takeStashedGameFd()
+{
+	Int fd = s_stashGameFd;
+	s_stashGameFd = -1;
+	DEBUG_LOG(("OnlineCoordinatorAPI: takeStashedGameFd -> %d (local port %u, peer %u.%u.%u.%u:%u)",
+		fd, s_stashGameLocalPort,
+		(s_stashGamePeerIPHost >> 24) & 0xff,
+		(s_stashGamePeerIPHost >> 16) & 0xff,
+		(s_stashGamePeerIPHost >>  8) & 0xff,
+		(s_stashGamePeerIPHost      ) & 0xff,
+		s_stashGamePeerPortHost));
+	return fd;
+}
+
+UnsignedShort OnlineCoordinatorAPI::stashedGameLocalPort()
+{
+	return s_stashGameLocalPort;
+}
+
+UnsignedInt OnlineCoordinatorAPI::stashedGamePeerIPHost()
+{
+	return s_stashGamePeerIPHost;
+}
+
+UnsignedShort OnlineCoordinatorAPI::stashedGamePeerPortHost()
+{
+	return s_stashGamePeerPortHost;
+}
+
+void OnlineCoordinatorAPI::discardStashedGameSocket()
+{
+	if (s_stashGameFd != -1)
+	{
+		CLOSE_SOCKET(s_stashGameFd);
+		s_stashGameFd = -1;
+	}
+	s_stashGameLocalPort    = 0;
+	s_stashGamePeerIPHost   = 0;
+	s_stashGamePeerPortHost = 0;
+	s_stashKeepaliveNextMs  = 0;
+	s_stashKeepaliveNick.clear();
+}
+
+void OnlineCoordinatorAPI::pumpStashedKeepalive()
+{
+	if (s_stashGameFd == -1) return;
+	if (s_stashGamePeerIPHost == 0 || s_stashGamePeerPortHost == 0) return;
+
+	UnsignedInt nowMs = timeGetTime();
+	if (nowMs < s_stashKeepaliveNextMs) return;
+	s_stashKeepaliveNextMs = nowMs + GAME_KEEPALIVE_INTERVAL_MS;
+
+	// Tiny payload; content doesn't matter to either NAT or the peer (it'll
+	// arrive on a socket that nothing is reading until ConnectionManager
+	// adopts the FD, but discarded unread packets still keep NAT mappings
+	// alive on both sides).
+	char msg[48];
+	Int msgLen = snprintf(msg, sizeof(msg), "KEEPALIVE from %s",
+		s_stashKeepaliveNick.isEmpty() ? "coord" : s_stashKeepaliveNick.str());
+	if (msgLen <= 0) msgLen = 9;
+
+	struct sockaddr_in dst;
+	memset(&dst, 0, sizeof(dst));
+	dst.sin_family      = AF_INET;
+	dst.sin_addr.s_addr = htonl(s_stashGamePeerIPHost);
+	dst.sin_port        = htons(s_stashGamePeerPortHost);
+	sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+}
+
 // ---- class implementation --------------------------------------------------
 
 OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	: m_state(STATE_IDLE)
 	, m_tcpFd(-1)
-	, m_udpFd(-1)
-	, m_udpBoundPort(0)
+	, m_udpFdLobby(-1)
+	, m_udpFdGame(-1)
+	, m_udpBoundPortLobby(0)
+	, m_udpBoundPortGame(0)
 	, m_stunMagic(0)
 	, m_coordUdpPort(0)
 	, m_coordIPNet(0)
 	, m_peerInfoArmed(FALSE)
 	, m_amIHost(FALSE)
-	, m_stunNextProbeMs(0)
-	, m_stunProbesSent(0)
+	, m_stunNextProbeMsLobby(0)
+	, m_stunNextProbeMsGame(0)
+	, m_stunProbesSentLobby(0)
+	, m_stunProbesSentGame(0)
+	, m_stunOkLobby(FALSE)
+	, m_stunOkGame(FALSE)
 	, m_punchStartMs(0)
 	, m_punchNextBlastMs(0)
 	, m_punchDeadlineMs(0)
+	, m_punchOkLobby(FALSE)
+	, m_punchOkGame(FALSE)
 {
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
 }
@@ -320,9 +421,48 @@ void OnlineCoordinatorAPI::setError(const AsciiString& msg)
 
 void OnlineCoordinatorAPI::closeSockets()
 {
-	if (m_tcpFd != -1) { CLOSE_SOCKET(m_tcpFd); m_tcpFd = -1; }
-	if (m_udpFd != -1) { CLOSE_SOCKET(m_udpFd); m_udpFd = -1; }
+	if (m_tcpFd      != -1) { CLOSE_SOCKET(m_tcpFd);      m_tcpFd      = -1; }
+	if (m_udpFdLobby != -1) { CLOSE_SOCKET(m_udpFdLobby); m_udpFdLobby = -1; }
+	// m_udpFdGame may have been transferred to the lobby-phase stash by
+	// stashGameSocketForGameStart(); in that case it's no longer ours to
+	// close (the static stash now owns it).
+	if (m_udpFdGame  != -1) { CLOSE_SOCKET(m_udpFdGame);  m_udpFdGame  = -1; }
 	m_rxBuf.clear();
+}
+
+Bool OnlineCoordinatorAPI::stashGameSocketForGameStart()
+{
+	if (m_udpFdGame == -1)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: no game socket to stash"));
+		return FALSE;
+	}
+	if (!m_punchOkGame || m_peerInfo.gamePunchedIP == 0 || m_peerInfo.gamePunchedPort == 0)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: punch state incomplete (ok=%d ip=0x%08x port=%u)",
+			(int)m_punchOkGame, m_peerInfo.gamePunchedIP, m_peerInfo.gamePunchedPort));
+		return FALSE;
+	}
+	// Replace whatever was previously stashed (shouldn't happen in a clean
+	// flow, but a stale FD must not leak across rematches).
+	if (s_stashGameFd != -1)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: replacing stale stash"));
+		CLOSE_SOCKET(s_stashGameFd);
+	}
+	s_stashGameFd            = m_udpFdGame;
+	s_stashGameLocalPort     = m_udpBoundPortGame;
+	s_stashGamePeerIPHost    = m_peerInfo.gamePunchedIP;
+	s_stashGamePeerPortHost  = m_peerInfo.gamePunchedPort;
+	s_stashKeepaliveNextMs   = timeGetTime();
+	s_stashKeepaliveNick     = m_nick;
+	m_udpFdGame              = -1;
+	DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: fd=%d local=%u peer=%u.%u.%u.%u:%u",
+		s_stashGameFd, s_stashGameLocalPort,
+		(s_stashGamePeerIPHost >> 24) & 0xff, (s_stashGamePeerIPHost >> 16) & 0xff,
+		(s_stashGamePeerIPHost >>  8) & 0xff, (s_stashGamePeerIPHost      ) & 0xff,
+		s_stashGamePeerPortHost));
+	return TRUE;
 }
 
 void OnlineCoordinatorAPI::disconnect()
@@ -337,7 +477,7 @@ void OnlineCoordinatorAPI::disconnect()
 	m_peerInfoArmed = FALSE;
 }
 
-Bool OnlineCoordinatorAPI::openUdp(UnsignedShort bindPort)
+Bool OnlineCoordinatorAPI::openUdpOnPort(UnsignedShort bindPort, Int& outFd, UnsignedShort& outBoundPort)
 {
 	Int fd = (Int)socket(AF_INET, SOCK_DGRAM, 0);
 	if (fd < 0)
@@ -359,7 +499,9 @@ Bool OnlineCoordinatorAPI::openUdp(UnsignedShort bindPort)
 	if (bind(fd, (struct sockaddr*)&a, sizeof(a)) == SOCKET_ERROR)
 	{
 		CLOSE_SOCKET(fd);
-		setError("udp bind failed");
+		AsciiString msg;
+		msg.format("udp bind failed on port %u", (unsigned)bindPort);
+		setError(msg);
 		return FALSE;
 	}
 	// Read back what we actually bound to (matters when bindPort=0).
@@ -369,14 +511,14 @@ Bool OnlineCoordinatorAPI::openUdp(UnsignedShort bindPort)
 	memset(&b, 0, sizeof(b));
 	if (getsockname(fd, (struct sockaddr*)&b, &bLen) == 0)
 	{
-		m_udpBoundPort = ntohs(b.sin_port);
+		outBoundPort = ntohs(b.sin_port);
 	}
 	else
 	{
-		m_udpBoundPort = bindPort;
+		outBoundPort = bindPort;
 	}
-	m_udpFd = fd;
-	DEBUG_LOG(("OnlineCoordinatorAPI: udp bound on port %u", m_udpBoundPort));
+	outFd = fd;
+	DEBUG_LOG(("OnlineCoordinatorAPI: udp bound on port %u", outBoundPort));
 	return TRUE;
 }
 
@@ -421,7 +563,8 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	UnsignedShort tcpPort,
 	const AsciiString& nick,
 	const AsciiString& version,
-	UnsignedShort udpBindPort)
+	UnsignedShort lobbyBindPort,
+	UnsignedShort gameBindPort)
 {
 	disconnect();
 	m_lastError.clear();
@@ -439,15 +582,27 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
 	m_peerInfoArmed = FALSE;
 	m_amIHost = FALSE;
-	m_publicAddr.clear();
+	m_publicAddrLobby.clear();
+	m_publicAddrGame.clear();
 	m_localAddr.clear();
 	m_hostedGameID.clear();
 	m_sessionToken.clear();
-	m_stunProbesSent  = 0;
-	m_stunNextProbeMs = 0;
+	m_stunProbesSentLobby = 0;
+	m_stunProbesSentGame  = 0;
+	m_stunNextProbeMsLobby = 0;
+	m_stunNextProbeMsGame  = 0;
+	m_stunOkLobby = FALSE;
+	m_stunOkGame  = FALSE;
+	m_punchOkLobby = FALSE;
+	m_punchOkGame  = FALSE;
 
-	if (!openUdp(udpBindPort))
+	if (!openUdpOnPort(lobbyBindPort, m_udpFdLobby, m_udpBoundPortLobby))
 		return FALSE;
+	if (!openUdpOnPort(gameBindPort, m_udpFdGame, m_udpBoundPortGame))
+	{
+		closeSockets();
+		return FALSE;
+	}
 
 	if (!beginTcpConnect(ipHostOrder, tcpPort))
 	{
@@ -483,8 +638,8 @@ void OnlineCoordinatorAPI::requestHost(const UnicodeString& gameName, const Asci
 	line.concat(",\"map\":");
 	appendEscaped(line, mapName.str());
 	AsciiString tail;
-	tail.format(",\"max_players\":%d,\"local_addr\":\"%s\",\"public_addr\":\"%s\"}}",
-		maxPlayers, m_localAddr.str(), m_publicAddr.str());
+	tail.format(",\"max_players\":%d,\"local_addr\":\"%s\",\"public_addr\":\"%s\",\"game_public_addr\":\"%s\"}}",
+		maxPlayers, m_localAddr.str(), m_publicAddrLobby.str(), m_publicAddrGame.str());
 	line.concat(tail);
 
 	sendJsonLine(line);
@@ -506,17 +661,17 @@ void OnlineCoordinatorAPI::requestJoin(const AsciiString& gameID)
 	AsciiString line = "{\"type\":\"join\",\"data\":{\"game_id\":";
 	appendEscaped(line, gameID.str());
 	AsciiString tail;
-	tail.format(",\"local_addr\":\"%s\",\"public_addr\":\"%s\"}}",
-		m_localAddr.str(), m_publicAddr.str());
+	tail.format(",\"local_addr\":\"%s\",\"public_addr\":\"%s\",\"game_public_addr\":\"%s\"}}",
+		m_localAddr.str(), m_publicAddrLobby.str(), m_publicAddrGame.str());
 	line.concat(tail);
 	sendJsonLine(line);
 	m_amIHost = FALSE;
 	setState(STATE_JOINING);
 }
 
-void OnlineCoordinatorAPI::sendStunProbe()
+void OnlineCoordinatorAPI::sendStunProbe(Int fd, unsigned char purpose)
 {
-	if (m_udpFd == -1 || m_sessionToken.isEmpty()) return;
+	if (fd == -1 || m_sessionToken.isEmpty()) return;
 	unsigned char buf[STUN_REQUEST_SIZE];
 	UnsignedInt magicBE = htonl(m_stunMagic);
 	memcpy(buf, &magicBE, 4);
@@ -525,32 +680,56 @@ void OnlineCoordinatorAPI::sendStunProbe()
 		setError(AsciiString("bad session token hex"));
 		return;
 	}
+	buf[4 + SESSION_TOKEN_BYTES] = purpose;
 	struct sockaddr_in dst;
 	memset(&dst, 0, sizeof(dst));
 	dst.sin_family      = AF_INET;
 	dst.sin_addr.s_addr = m_coordIPNet;
 	dst.sin_port        = htons(m_coordUdpPort);
-	sendto(m_udpFd, (const char*)buf, (Int)sizeof(buf), 0, (struct sockaddr*)&dst, sizeof(dst));
-	++m_stunProbesSent;
+	sendto(fd, (const char*)buf, (Int)sizeof(buf), 0, (struct sockaddr*)&dst, sizeof(dst));
 }
 
 void OnlineCoordinatorAPI::pumpStunDiscovery(UnsignedInt nowMs)
 {
 	if (m_state != STATE_DISCOVERING) return;
-	if (nowMs < m_stunNextProbeMs) return;
-	if (m_stunProbesSent >= STUN_PROBE_MAX_TRIES)
+
+	// Lobby socket
+	if (!m_stunOkLobby && nowMs >= m_stunNextProbeMsLobby)
 	{
-		setError(AsciiString("STUN: no response after retries"));
-		return;
+		if (m_stunProbesSentLobby >= STUN_PROBE_MAX_TRIES)
+		{
+			setError(AsciiString("STUN(lobby): no response after retries"));
+			return;
+		}
+		sendStunProbe(m_udpFdLobby, STUN_PURPOSE_LOBBY);
+		++m_stunProbesSentLobby;
+		m_stunNextProbeMsLobby = nowMs + STUN_PROBE_INTERVAL_MS;
 	}
-	sendStunProbe();
-	m_stunNextProbeMs = nowMs + STUN_PROBE_INTERVAL_MS;
+
+	// Game socket
+	if (!m_stunOkGame && nowMs >= m_stunNextProbeMsGame)
+	{
+		if (m_stunProbesSentGame >= STUN_PROBE_MAX_TRIES)
+		{
+			setError(AsciiString("STUN(game): no response after retries"));
+			return;
+		}
+		sendStunProbe(m_udpFdGame, STUN_PURPOSE_GAME);
+		++m_stunProbesSentGame;
+		m_stunNextProbeMsGame = nowMs + STUN_PROBE_INTERVAL_MS;
+	}
+
+	if (m_stunOkLobby && m_stunOkGame)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI: STUN complete: lobby=%s game=%s",
+			m_publicAddrLobby.str(), m_publicAddrGame.str()));
+		setState(STATE_READY);
+	}
 }
 
-void OnlineCoordinatorAPI::blastPunchPackets()
+void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& publicAddr, const AsciiString& localAddr)
 {
-	if (m_udpFd == -1) return;
-	if (!m_peerInfoArmed) return;
+	if (fd == -1) return;
 
 	char msg[64];
 	Int msgLen = snprintf(msg, sizeof(msg), "PUNCH from %s", m_nick.str());
@@ -558,7 +737,7 @@ void OnlineCoordinatorAPI::blastPunchPackets()
 
 	// Public address candidate.
 	{
-		const char* s = m_peerInfo.publicAddr.str();
+		const char* s = publicAddr.str();
 		const char* colon = strchr(s, ':');
 		if (colon && colon != s)
 		{
@@ -574,14 +753,16 @@ void OnlineCoordinatorAPI::blastPunchPackets()
 			dst.sin_addr.s_addr = inet_addr(ipbuf);
 			dst.sin_port        = htons(port);
 			if (dst.sin_addr.s_addr != INADDR_NONE)
-				sendto(m_udpFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+				sendto(fd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
 		}
 	}
 
-	// Local address candidate (for same-LAN play).
-	if (!m_peerInfo.localAddr.isEmpty())
+	// Local address candidate (for same-LAN play). Only the lobby side has
+	// a local_addr exchanged through the coordinator; the game side reuses
+	// the same LAN IP at the local game port if both peers share a LAN.
+	if (!localAddr.isEmpty())
 	{
-		const char* s = m_peerInfo.localAddr.str();
+		const char* s = localAddr.str();
 		const char* colon = strchr(s, ':');
 		if (colon && colon != s)
 		{
@@ -597,7 +778,7 @@ void OnlineCoordinatorAPI::blastPunchPackets()
 			dst.sin_addr.s_addr = inet_addr(ipbuf);
 			dst.sin_port        = htons(port);
 			if (dst.sin_addr.s_addr != INADDR_NONE)
-				sendto(m_udpFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+				sendto(fd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
 		}
 	}
 }
@@ -605,6 +786,7 @@ void OnlineCoordinatorAPI::blastPunchPackets()
 void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 {
 	if (m_state != STATE_PUNCHING) return;
+	if (!m_peerInfoArmed) return;
 	if (nowMs >= m_punchDeadlineMs)
 	{
 		setError(AsciiString("punch: no inbound packet within timeout"));
@@ -612,21 +794,48 @@ void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 	}
 	if (nowMs >= m_punchNextBlastMs)
 	{
-		blastPunchPackets();
+		if (!m_punchOkLobby)
+			blastPunchPacketsOn(m_udpFdLobby, m_peerInfo.publicAddr, m_peerInfo.localAddr);
+		if (!m_punchOkGame)
+			// Game-side has no exchanged local_addr today; pass empty so the
+			// helper only fires the public candidate.
+			blastPunchPacketsOn(m_udpFdGame, m_peerInfo.gamePublicAddr, AsciiString::TheEmptyString);
 		m_punchNextBlastMs = nowMs + PUNCH_BLAST_INTERVAL_MS;
 	}
 }
 
 void OnlineCoordinatorAPI::pumpUdpRecv()
 {
-	if (m_udpFd == -1) return;
+	pumpUdpRecvOne(m_udpFdLobby, FALSE);
+	pumpUdpRecvOne(m_udpFdGame,  TRUE);
+
+	if (m_state == STATE_PUNCHING && m_punchOkLobby && m_punchOkGame)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH OK on both sockets, lobby=%u.%u.%u.%u:%u game=%u.%u.%u.%u:%u",
+			(m_peerInfo.punchedIP >> 24) & 0xff,
+			(m_peerInfo.punchedIP >> 16) & 0xff,
+			(m_peerInfo.punchedIP >> 8) & 0xff,
+			(m_peerInfo.punchedIP) & 0xff,
+			m_peerInfo.punchedPort,
+			(m_peerInfo.gamePunchedIP >> 24) & 0xff,
+			(m_peerInfo.gamePunchedIP >> 16) & 0xff,
+			(m_peerInfo.gamePunchedIP >> 8) & 0xff,
+			(m_peerInfo.gamePunchedIP) & 0xff,
+			m_peerInfo.gamePunchedPort));
+		setState(STATE_PUNCH_OK);
+	}
+}
+
+void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
+{
+	if (fd == -1) return;
 	unsigned char buf[1500];
 	for (;;)
 	{
 		struct sockaddr_in src;
 		int srcLen = sizeof(src);
 		memset(&src, 0, sizeof(src));
-		Int n = (Int)recvfrom(m_udpFd, (char*)buf, (Int)sizeof(buf), 0,
+		Int n = (Int)recvfrom(fd, (char*)buf, (Int)sizeof(buf), 0,
 			(struct sockaddr*)&src, &srcLen);
 		if (n <= 0)
 		{
@@ -649,35 +858,52 @@ void OnlineCoordinatorAPI::pumpUdpRecv()
 				UnsignedShort port = ntohs(portBE);
 				AsciiString addr;
 				addr.format("%u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], port);
-				m_publicAddr = addr;
-				DEBUG_LOG(("OnlineCoordinatorAPI: STUN discovered public addr %s", m_publicAddr.str()));
-				setState(STATE_READY);
+				if (isGame)
+				{
+					m_publicAddrGame = addr;
+					m_stunOkGame = TRUE;
+					DEBUG_LOG(("OnlineCoordinatorAPI: STUN(game) public=%s", addr.str()));
+				}
+				else
+				{
+					m_publicAddrLobby = addr;
+					m_stunOkLobby = TRUE;
+					DEBUG_LOG(("OnlineCoordinatorAPI: STUN(lobby) public=%s", addr.str()));
+				}
 				continue;
 			}
 		}
 
-		// In PUNCHING state, any packet from the peer's candidate addresses
-		// counts as a successful punch. We don't validate contents.
+		// In PUNCHING state, any packet on a socket from the peer counts as a
+		// successful punch on that socket. We don't validate contents.
 		if (m_state == STATE_PUNCHING && m_peerInfoArmed)
 		{
-			// recvfrom returns network byte order; convert to host order
-			// before storing so callers can pass straight through to the
-			// LAN code (which always works in host order).
-			m_peerInfo.punchedIP   = ntohl(src.sin_addr.s_addr);
-			m_peerInfo.punchedPort = ntohs(src.sin_port);
-			DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH OK from %u.%u.%u.%u:%u",
-				(src.sin_addr.s_addr) & 0xff,
-				(src.sin_addr.s_addr >> 8) & 0xff,
-				(src.sin_addr.s_addr >> 16) & 0xff,
-				(src.sin_addr.s_addr >> 24) & 0xff,
-				m_peerInfo.punchedPort));
+			UnsignedInt   srcIPHost   = ntohl(src.sin_addr.s_addr);
+			UnsignedShort srcPortHost = ntohs(src.sin_port);
+			if (isGame && !m_punchOkGame)
+			{
+				m_peerInfo.gamePunchedIP   = srcIPHost;
+				m_peerInfo.gamePunchedPort = srcPortHost;
+				m_punchOkGame = TRUE;
+				DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH(game) OK from %u.%u.%u.%u:%u",
+					(srcIPHost >> 24) & 0xff, (srcIPHost >> 16) & 0xff,
+					(srcIPHost >> 8) & 0xff, (srcIPHost) & 0xff, srcPortHost));
+			}
+			else if (!isGame && !m_punchOkLobby)
+			{
+				m_peerInfo.punchedIP   = srcIPHost;
+				m_peerInfo.punchedPort = srcPortHost;
+				m_punchOkLobby = TRUE;
+				DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH(lobby) OK from %u.%u.%u.%u:%u",
+					(srcIPHost >> 24) & 0xff, (srcIPHost >> 16) & 0xff,
+					(srcIPHost >> 8) & 0xff, (srcIPHost) & 0xff, srcPortHost));
+			}
 			// Send one acknowledgement so the peer also sees inbound traffic
 			// quickly even if its first blast was lost.
 			char ack[32];
 			Int ackLen = snprintf(ack, sizeof(ack), "ACK from %s", m_nick.str());
 			if (ackLen > 0)
-				sendto(m_udpFd, ack, ackLen, 0, (struct sockaddr*)&src, sizeof(src));
-			setState(STATE_PUNCH_OK);
+				sendto(fd, ack, ackLen, 0, (struct sockaddr*)&src, sizeof(src));
 		}
 	}
 }
@@ -862,7 +1088,8 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		m_sessionToken = tok;
 		m_stunMagic    = magic;
 		m_coordUdpPort = (UnsignedShort)udpPort;
-		// Capture our local IP for the local_addr hint.
+		// Capture our local IP for the local_addr hint. The advertised port
+		// is the lobby socket (LAN games look it up here for same-LAN play).
 		struct sockaddr_in self;
 		int selfLen = sizeof(self);
 		if (m_tcpFd != -1 && getsockname(m_tcpFd, (struct sockaddr*)&self, &selfLen) == 0)
@@ -871,11 +1098,13 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 			AsciiString s;
 			s.format("%u.%u.%u.%u:%u",
 				(nbo) & 0xff, (nbo>>8) & 0xff, (nbo>>16) & 0xff, (nbo>>24) & 0xff,
-				m_udpBoundPort);
+				m_udpBoundPortLobby);
 			m_localAddr = s;
 		}
 		setState(STATE_DISCOVERING);
-		m_stunNextProbeMs = timeGetTime(); // probe immediately
+		UnsignedInt nowMs = timeGetTime();
+		m_stunNextProbeMsLobby = nowMs; // probe immediately
+		m_stunNextProbeMsGame  = nowMs;
 		return;
 	}
 
@@ -903,13 +1132,16 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 	{
 		char tmp[128];
 		memset(&m_peerInfo, 0, sizeof(m_peerInfo));
-		if (parseStringField(obj, "nick",        tmp, sizeof(tmp))) m_peerInfo.nick       = tmp;
-		if (parseStringField(obj, "public_addr", tmp, sizeof(tmp))) m_peerInfo.publicAddr = tmp;
-		if (parseStringField(obj, "local_addr",  tmp, sizeof(tmp))) m_peerInfo.localAddr  = tmp;
-		if (parseStringField(obj, "role",        tmp, sizeof(tmp))) m_peerInfo.role       = tmp;
+		if (parseStringField(obj, "nick",             tmp, sizeof(tmp))) m_peerInfo.nick           = tmp;
+		if (parseStringField(obj, "public_addr",      tmp, sizeof(tmp))) m_peerInfo.publicAddr     = tmp;
+		if (parseStringField(obj, "game_public_addr", tmp, sizeof(tmp))) m_peerInfo.gamePublicAddr = tmp;
+		if (parseStringField(obj, "local_addr",       tmp, sizeof(tmp))) m_peerInfo.localAddr      = tmp;
+		if (parseStringField(obj, "role",             tmp, sizeof(tmp))) m_peerInfo.role           = tmp;
 		parseIntField(obj, "punch_in_ms", &m_peerInfo.punchInMS);
 
 		m_peerInfoArmed = TRUE;
+		m_punchOkLobby = FALSE;
+		m_punchOkGame  = FALSE;
 		UnsignedInt nowMs = timeGetTime();
 		m_punchStartMs     = nowMs + (UnsignedInt)m_peerInfo.punchInMS;
 		m_punchNextBlastMs = m_punchStartMs;

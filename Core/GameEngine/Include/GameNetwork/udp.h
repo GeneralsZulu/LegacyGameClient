@@ -103,6 +103,14 @@ class UDP
                   ~UDP();
   Int           Bind(UnsignedInt IP,UnsignedShort port);
   Int           Bind(const char *Host,UnsignedShort port);
+  /// Take ownership of an already-bound UDP socket FD. Used by the online
+  /// coordinator handoff: STUN+punch ran on this FD, then it was stashed in
+  /// OnlineCoordinatorAPI's lobby-phase keepalive, and now ConnectionManager
+  /// adopts it so the NAT mapping established during punch is reused for
+  /// in-game traffic without ever closing the underlying socket. Pass the IP
+  /// and port the socket is bound to; ip=0 means "we don't care, just use the
+  /// kernel-reported local addr".
+  Int           AdoptFD(Int fd, UnsignedInt IP, UnsignedShort port);
   Int           Write(const unsigned char *msg,UnsignedInt len,UnsignedInt IP,UnsignedShort port);
   Int           Read(unsigned char *msg,UnsignedInt len,sockaddr_in *from);
   sockStat         GetStatus();

@@ -308,6 +308,14 @@ public:
 	/// internally to lobbyPort but visible externally on a different port.
 	void setDirectConnectRemotePort( UnsignedShort port ) { m_directConnectRemotePort = port; }
 	UnsignedShort getDirectConnectRemotePort() const { return m_directConnectRemotePort; }
+
+	/// Set the peer's NAT-translated game-data port (NETWORK_BASE_PORT_NUMBER
+	/// equivalent visible externally). When non-zero and the current game is
+	/// direct-connect, slot setup uses this instead of the hardcoded
+	/// NETWORK_BASE_PORT_NUMBER so ConnectionManager sends to the punched
+	/// mapping rather than to an unrouted port that nobody is listening on.
+	void setDirectConnectRemoteGamePort( UnsignedShort port ) { m_directConnectRemoteGamePort = port; }
+	UnsignedShort getDirectConnectRemoteGamePort() const { return m_directConnectRemoteGamePort; }
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
@@ -381,6 +389,7 @@ protected:
 	UnsignedInt					m_actionTimeout;
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
 	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
+	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER.
 	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
 	UnsignedShort				m_dispatchSenderPort;///< Source port of the LAN message currently being dispatched. Lets reply-style handlers send back through NAT-translated mappings instead of hardcoded lobbyPort.
 

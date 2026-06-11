@@ -190,6 +190,46 @@ Int UDP::Bind(UnsignedInt IP,UnsignedShort Port)
   return(OK);
 }
 
+Int UDP::AdoptFD(Int fdIn, UnsignedInt IP, UnsignedShort Port)
+{
+  if (fdIn < 0)
+    return UNKNOWN;
+  // Close any existing socket we were holding so we don't leak FDs.
+  if (fd)
+  {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+  }
+  fd = fdIn;
+
+  // Re-derive the actual bound address from the kernel; the caller may have
+  // passed a guess. Falling back to the supplied IP/port keeps behavior sane
+  // if getsockname fails for some reason.
+  int namelen = sizeof(addr);
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  if (getsockname(fd, (struct sockaddr *)&addr, &namelen) == 0)
+  {
+    myIP   = ntohl(addr.sin_addr.s_addr);
+    myPort = ntohs(addr.sin_port);
+  }
+  else
+  {
+    myIP   = IP;
+    myPort = Port;
+    addr.sin_addr.s_addr = htonl(IP);
+    addr.sin_port        = htons(Port);
+  }
+
+  // Make sure we're non-blocking even if the donor socket already was --
+  // the cost is one syscall and it removes a category of subtle bug.
+  SetBlocking(FALSE);
+  return OK;
+}
+
 Int UDP::getLocalAddr(UnsignedInt &ip, UnsignedShort &port)
 {
   ip=myIP;

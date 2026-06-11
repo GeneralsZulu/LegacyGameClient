@@ -46,6 +46,7 @@
 #include "GameClient/MessageBox.h"
 #include "GameNetwork/ConnectionManager.h"
 #include "GameNetwork/LANAPICallbacks.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/NAT.h"
 #include "GameNetwork/NetCommandWrapperList.h"
 #include "GameNetwork/networkutil.h"
@@ -1406,10 +1407,12 @@ void ConnectionManager::update(Bool isInGame) {
 }
 
 void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didSelfSlug, Int nextExecutionFrame) {
-	static time_t lasttimesent = 0;
-	time_t curTime = timeGetTime();
+	// Use UnsignedInt to avoid the signed-time_t overflow that happens on
+	// VC6 once uptime exceeds ~24.85 days (see Connection::doSend comment).
+	static UnsignedInt lasttimesent = 0;
+	UnsignedInt curTime = timeGetTime();
 
-	if ((lasttimesent == 0) || ((curTime - lasttimesent) > TheGlobalData->m_networkRunAheadMetricsTime)) {
+	if ((lasttimesent == 0) || ((curTime - lasttimesent) > (UnsignedInt)TheGlobalData->m_networkRunAheadMetricsTime)) {
 		if (m_localSlot == m_packetRouterSlot) {
 			// We are the packet router, time to compute a new run ahead for this game.
 			m_latencyAverages[m_localSlot] = m_frameMetrics.getAverageLatency();
@@ -1669,6 +1672,31 @@ void ConnectionManager::initTransport() {
 	delete m_transport;
 	m_transport = new Transport;
 	m_transport->reset();
+
+	// If the online coordinator left a punched UDP socket parked for us at
+	// game-start (cross-internet direct-connect path), adopt that FD so the
+	// NAT mapping established during punch carries over into in-game traffic.
+	// Falling back to a fresh bind keeps regular LAN games unchanged.
+	if (OnlineCoordinatorAPI::hasStashedGameSocket())
+	{
+		Int           fd        = OnlineCoordinatorAPI::takeStashedGameFd();
+		UnsignedShort localPort = OnlineCoordinatorAPI::stashedGameLocalPort();
+		if (fd != -1)
+		{
+			DEBUG_LOG(("ConnectionManager::initTransport - adopting coord game socket fd=%d localPort=%u (m_localPort was %u)",
+				fd, localPort, m_localPort));
+			// m_localPort came from setLocalAddress(.., NETWORK_BASE_PORT_NUMBER);
+			// align it with the actual bound port (they should be equal, but
+			// trust the kernel-reported value above).
+			if (localPort != 0)
+				m_localPort = localPort;
+			m_transport->initFromFD(fd, m_localAddr, m_localPort);
+			ReleaseLog("Game transport adopted punched coordinator socket on port %d", m_localPort);
+			return;
+		}
+		DEBUG_LOG(("ConnectionManager::initTransport - stash reported live but takeStashedGameFd returned -1; falling back to fresh bind"));
+	}
+
 	// A failed bind here means the whole match runs with a dead transport:
 	// we load in, receive nothing, and get dropped at the disconnect screen
 	// with no clue why. There's no recovery path this late in game start,
@@ -1901,16 +1929,18 @@ void ConnectionManager::determineRouterFallbackPlan() {
 
 void ConnectionManager::doKeepAlive() {
 	static Int nextIndex = 0;
-	static time_t startTime = 0;
+	// Use UnsignedInt to avoid the signed-time_t overflow that happens on
+	// VC6 once uptime exceeds ~24.85 days (see Connection::doSend comment).
+	static UnsignedInt startTime = 0;
 
-	time_t curTime = timeGetTime();
+	UnsignedInt curTime = timeGetTime();
 
 	if (startTime == 0) {
 		startTime = curTime;
 		return;
 	}
 
-	time_t numSeconds = (curTime - startTime) / 1000;
+	UnsignedInt numSeconds = (curTime - startTime) / 1000;
 
 	while ((nextIndex <= numSeconds) && (nextIndex < MAX_SLOTS)) {
 //		DEBUG_LOG(("ConnectionManager::doKeepAlive - trying to send keep alive message to player %d", nextIndex));

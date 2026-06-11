@@ -250,7 +250,15 @@ void Connection::setQuitting()
  */
 UnsignedInt Connection::doSend() {
 	Int numpackets = 0;
-	time_t curtime = timeGetTime();
+	// timeGetTime() returns a DWORD (UnsignedInt); on this VC6 build time_t is
+	// signed 32-bit, so once the OS uptime exceeds ~24.85 days timeGetTime()
+	// passes 2^31 ms and "time_t curtime = timeGetTime()" silently wraps to a
+	// negative value. The downstream gate "(curtime - m_lastTimeSent) <
+	// m_frameGrouping" then compares as signed (negative < small positive =
+	// TRUE) and this function returns 0 forever -- no game packets ever go
+	// out. Keep curtime unsigned so subtractions promote everything to
+	// UnsignedInt and modular arithmetic gives the correct delta.
+	UnsignedInt curtime = timeGetTime();
 	Bool couldQueue = TRUE;
 
 	// Do this check first, since it's an important fail-safe
@@ -280,9 +288,12 @@ UnsignedInt Connection::doSend() {
 		while ((msg != nullptr) && notDone) {
 			NetCommandRef *next = msg->getNext(); // Need this since msg could be deleted
 
-			time_t timeLastSent = msg->getTimeLastSent();
+			// Same signed-time_t-overflow concern as the outer curtime: keep
+			// the value unsigned so the retry-delta comparison is correct on
+			// long-uptime systems.
+			UnsignedInt timeLastSent = (UnsignedInt)msg->getTimeLastSent();
 
-			if (((curtime - timeLastSent) > m_retryTime) || (timeLastSent == -1)) {
+			if (((curtime - timeLastSent) > (UnsignedInt)m_retryTime) || (timeLastSent == (UnsignedInt)-1)) {
 				notDone = packet->addCommand(msg);
 				if (notDone) {
 					// the msg command was added to the packet.

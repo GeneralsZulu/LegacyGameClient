@@ -30,6 +30,7 @@
 #include "Common/GameState.h"
 #include "Common/Registry.h"
 #include "GameNetwork/LANAPI.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/networkutil.h"
 #include "Common/GlobalData.h"
 #include "Common/RandomValue.h"
@@ -84,6 +85,7 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_currentGame = nullptr;
 	m_broadcastAddr = INADDR_BROADCAST;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemoteGamePort = 0;
 	m_actionTimeout = 5000; // ms
 	m_lastUpdate = 0;
 	m_transport = new Transport;
@@ -121,6 +123,7 @@ void LANAPI::init()
 	m_currentGame = nullptr;
 	m_directConnectRemoteIP = 0;
 	m_directConnectRemotePort = 0;
+	m_directConnectRemoteGamePort = 0;
 	m_dispatchSenderIP = 0;
 	m_dispatchSenderPort = 0;
 
@@ -192,6 +195,7 @@ void LANAPI::reset()
 	m_lobbyPlayers = nullptr;
 	m_directConnectRemoteIP = 0;
 	m_directConnectRemotePort = 0;
+	m_directConnectRemoteGamePort = 0;
 	m_dispatchSenderIP = 0;
 	m_dispatchSenderPort = 0;
 	m_pendingAction = ACT_NONE;
@@ -399,6 +403,11 @@ void LANAPI::update()
 	{
 		return;
 	}
+
+	// Tick the coordinator's lobby-phase keepalive sender so the punched
+	// NAT mapping on the game UDP port stays alive through the lobby. No-op
+	// when no socket is stashed (most LAN sessions).
+	OnlineCoordinatorAPI::pumpStashedKeepalive();
 
 	// Let the UDP socket breathe
 	if ((m_transport->update() == FALSE) && (LANSocketErrorDetected == FALSE)) {

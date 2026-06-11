@@ -114,13 +114,18 @@ func (c *client) recvExpect(t string, out any) error {
 }
 
 func (c *client) discover() (string, error) {
+	return c.discoverPurpose(coordinator.STUNPurposeLobby)
+}
+
+func (c *client) discoverPurpose(purpose byte) (string, error) {
 	tokBytes, err := hex.DecodeString(c.sessionToken)
 	if err != nil {
 		return "", err
 	}
 	req := make([]byte, coordinator.STUNRequestSize)
 	binary.BigEndian.PutUint32(req[0:4], c.stunMagic)
-	copy(req[4:], tokBytes)
+	copy(req[4:4+coordinator.SessionTokenBytes], tokBytes)
+	req[4+coordinator.SessionTokenBytes] = purpose
 
 	buf := make([]byte, 64)
 	for range 6 {
@@ -135,7 +140,9 @@ func (c *client) discover() (string, error) {
 				ip := net.IP(buf[4:8])
 				port := binary.BigEndian.Uint16(buf[8:10])
 				addr := fmt.Sprintf("%s:%d", ip.String(), port)
-				c.publicAddr = addr
+				if purpose == coordinator.STUNPurposeLobby {
+					c.publicAddr = addr
+				}
 				c.udp.SetReadDeadline(time.Time{})
 				return addr, nil
 			}
@@ -160,11 +167,12 @@ func (c *client) localAddrString() string {
 
 func (c *client) host(name string) (string, error) {
 	if err := c.send(coordinator.MsgHost, coordinator.Host{
-		Name:       name,
-		Map:        "unknown",
-		MaxPlayers: 2,
-		LocalAddr:  c.localAddrString(),
-		PublicAddr: c.publicAddr,
+		Name:           name,
+		Map:            "unknown",
+		MaxPlayers:     2,
+		LocalAddr:      c.localAddrString(),
+		PublicAddr:     c.publicAddr,
+		GamePublicAddr: c.publicAddr, // stuntest reuses one socket; real client uses a second
 	}); err != nil {
 		return "", err
 	}
@@ -188,9 +196,10 @@ func (c *client) list() ([]coordinator.GameInfo, error) {
 
 func (c *client) join(gameID string) error {
 	return c.send(coordinator.MsgJoin, coordinator.Join{
-		GameID:     gameID,
-		LocalAddr:  c.localAddrString(),
-		PublicAddr: c.publicAddr,
+		GameID:         gameID,
+		LocalAddr:      c.localAddrString(),
+		PublicAddr:     c.publicAddr,
+		GamePublicAddr: c.publicAddr, // stuntest reuses one socket; real client uses a second
 	})
 }
 

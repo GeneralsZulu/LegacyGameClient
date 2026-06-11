@@ -132,6 +132,41 @@ Bool Transport::init( UnsignedInt ip, UnsignedShort port )
 		return false;
 	}
 
+	return finishInit(port);
+}
+
+Bool Transport::initFromFD( Int fd, UnsignedInt ip, UnsignedShort port )
+{
+	if (!m_winsockInit)
+	{
+		WORD verReq = MAKEWORD(2, 2);
+		WSADATA wsadata;
+		if (WSAStartup(verReq, &wsadata) != 0)
+			return false;
+		if ((LOBYTE(wsadata.wVersion) != 2) || (HIBYTE(wsadata.wVersion) != 2)) {
+			WSACleanup();
+			return false;
+		}
+		m_winsockInit = true;
+	}
+
+	delete m_udpsock;
+	m_udpsock = NEW UDP();
+	if (!m_udpsock)
+		return false;
+	if (m_udpsock->AdoptFD(fd, ip, port) != 0)
+	{
+		DEBUG_LOG(("Transport::initFromFD - AdoptFD failed for fd=%d", fd));
+		delete m_udpsock;
+		m_udpsock = nullptr;
+		return false;
+	}
+	DEBUG_LOG(("Transport::initFromFD - adopted fd=%d as 0x%08X:%u", fd, ip, port));
+	return finishInit(port);
+}
+
+Bool Transport::finishInit( UnsignedShort port )
+{
 	// ------- Clear buffers --------
 	int i=0;
 	for (; i<MAX_MESSAGES; ++i)
@@ -233,7 +268,6 @@ Bool Transport::doSend() {
 			// Send this message
 			if ((bytesSent = m_udpsock->Write((unsigned char *)(&m_outBuffer[i]), bytesToSend, m_outBuffer[i].addr, m_outBuffer[i].port)) > 0)
 			{
-				//DEBUG_LOG(("Sending %d bytes to %d.%d.%d.%d:%d", bytesToSend, PRINTF_IP_AS_4_INTS(m_outBuffer[i].addr), m_outBuffer[i].port));
 				m_outgoingPackets[m_statisticsSlot]++;
 				m_outgoingBytes[m_statisticsSlot] += m_outBuffer[i].length + sizeof(TransportMessageHeader);
 				m_outBuffer[i].length = 0;  // Remove from queue

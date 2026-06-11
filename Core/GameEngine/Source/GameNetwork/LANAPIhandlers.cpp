@@ -402,7 +402,16 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					LANGameSlot newSlot;
 					newSlot.setState(SLOT_PLAYER, UnicodeString(msg->name));
 					newSlot.setIP(senderIP);
-					newSlot.setPort(NETWORK_BASE_PORT_NUMBER);
+					// In direct-connect mode through the online coordinator,
+					// override the hardcoded NETWORK_BASE_PORT_NUMBER with the
+					// peer's NAT-translated game-data port discovered during
+					// punch. ConnectionManager will later send to (slot.IP,
+					// slot.Port), so this must be the punched external port,
+					// not the peer's local 8088 that isn't routable from us.
+					if (m_currentGame->getIsDirectConnect() && m_directConnectRemoteGamePort != 0)
+						newSlot.setPort(m_directConnectRemoteGamePort);
+					else
+						newSlot.setPort(NETWORK_BASE_PORT_NUMBER);
 					// Capture the NAT-translated lobby port from the joiner's
 					// incoming packet so subsequent lobby replies go back
 					// through the punched mapping. For pure LAN this equals
@@ -489,6 +498,23 @@ void LANAPI::handleJoinAccept( LANMessage *msg, UnsignedInt senderIP )
 				// joiner go to the punched mapping. LAN: equals lobbyPort, no
 				// behavior change.
 				m_currentGame->getLANSlot(0)->setLobbyPort(m_dispatchSenderPort);
+				// Overwrite slot[0].IP with the actual packet source IP. The
+				// game-options string the host announced encodes its LOCAL IP,
+				// so ParseAsciiStringToGameInfo above stamped slot[0] with a
+				// LAN address that's unroutable from us. Subsequent handlers
+				// (handleGameOptions, handleSetAccept, handleHasMap, etc.) match
+				// incoming packets by `getIP(player) == senderIP`, and broadcast
+				// sends to direct-connect slots use slot[i].getIP() as the
+				// destination, so without this fix the joiner cannot exchange
+				// any in-lobby state with the host through NAT.
+				m_currentGame->getLANSlot(0)->setIP(senderIP);
+				// Same story for the host's game-data port: the announce
+				// encoded NETWORK_BASE_PORT_NUMBER (host's local 8088), but
+				// ConnectionManager needs to send to the host's punched
+				// external port. m_directConnectRemoteGamePort was set from
+				// the coordinator's peer_info before TheLAN was kicked.
+				if (m_currentGame->getIsDirectConnect() && m_directConnectRemoteGamePort != 0)
+					m_currentGame->getLANSlot(0)->setPort(m_directConnectRemoteGamePort);
 
 				LANPreferences prefs;
 				AsciiString entry;

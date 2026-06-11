@@ -25,16 +25,17 @@ const (
 )
 
 type Session struct {
-	Token       string
-	Conn        net.Conn
-	Nick        string
-	Version     string
-	RemoteAddr  string
-	PublicAddr  string
-	LocalAddr   string
-	HostingGame string
-	LastSeen    time.Time
-	writeMu     sync.Mutex
+	Token          string
+	Conn           net.Conn
+	Nick           string
+	Version        string
+	RemoteAddr     string
+	PublicAddr     string // lobby (8086) public addr, discovered via STUN purpose=0
+	GamePublicAddr string // in-game (8088) public addr, discovered via STUN purpose=1
+	LocalAddr      string
+	HostingGame    string
+	LastSeen       time.Time
+	writeMu        sync.Mutex
 }
 
 func (sess *Session) send(msgType string, payload any) error {
@@ -226,6 +227,9 @@ func (s *Server) handleHost(sess *Session, m *Host) error {
 	if m.PublicAddr == "" {
 		return fmt.Errorf("public_addr required (do STUN discovery first)")
 	}
+	if m.GamePublicAddr == "" {
+		return fmt.Errorf("game_public_addr required (do STUN discovery on game port first)")
+	}
 	s.mu.Lock()
 	if sess.HostingGame != "" {
 		gid := sess.HostingGame
@@ -240,6 +244,7 @@ func (s *Server) handleHost(sess *Session, m *Host) error {
 	gameID = gameID[:12]
 	sess.LocalAddr = m.LocalAddr
 	sess.PublicAddr = m.PublicAddr
+	sess.GamePublicAddr = m.GamePublicAddr
 	sess.HostingGame = gameID
 	s.games[gameID] = &gameState{
 		info: GameInfo{
@@ -283,6 +288,9 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	if m.PublicAddr == "" {
 		return fmt.Errorf("public_addr required (do STUN discovery first)")
 	}
+	if m.GamePublicAddr == "" {
+		return fmt.Errorf("game_public_addr required (do STUN discovery on game port first)")
+	}
 	s.mu.Lock()
 	g, ok := s.games[m.GameID]
 	if !ok {
@@ -292,6 +300,7 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	host := g.hostSess
 	sess.LocalAddr = m.LocalAddr
 	sess.PublicAddr = m.PublicAddr
+	sess.GamePublicAddr = m.GamePublicAddr
 	s.mu.Unlock()
 
 	if host == sess {
@@ -299,25 +308,28 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	}
 
 	if err := host.send(MsgPeerInfo, PeerInfo{
-		Nick:       sess.Nick,
-		PublicAddr: sess.PublicAddr,
-		LocalAddr:  sess.LocalAddr,
-		PunchInMS:  PunchDelayMS,
-		Role:       "host",
+		Nick:           sess.Nick,
+		PublicAddr:     sess.PublicAddr,
+		GamePublicAddr: sess.GamePublicAddr,
+		LocalAddr:      sess.LocalAddr,
+		PunchInMS:      PunchDelayMS,
+		Role:           "host",
 	}); err != nil {
 		return fmt.Errorf("host send: %w", err)
 	}
 	if err := sess.send(MsgPeerInfo, PeerInfo{
-		Nick:       host.Nick,
-		PublicAddr: host.PublicAddr,
-		LocalAddr:  host.LocalAddr,
-		PunchInMS:  PunchDelayMS,
-		Role:       "guest",
+		Nick:           host.Nick,
+		PublicAddr:     host.PublicAddr,
+		GamePublicAddr: host.GamePublicAddr,
+		LocalAddr:      host.LocalAddr,
+		PunchInMS:      PunchDelayMS,
+		Role:           "guest",
 	}); err != nil {
 		return fmt.Errorf("guest send: %w", err)
 	}
-	log.Printf("matched host=%s(%s) <-> guest=%s(%s) game=%s",
-		host.Nick, host.PublicAddr, sess.Nick, sess.PublicAddr, m.GameID)
+	log.Printf("matched host=%s(lobby=%s game=%s) <-> guest=%s(lobby=%s game=%s) game=%s",
+		host.Nick, host.PublicAddr, host.GamePublicAddr,
+		sess.Nick, sess.PublicAddr, sess.GamePublicAddr, m.GameID)
 	return nil
 }
 
@@ -341,7 +353,9 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 			log.Printf("udp read: %v", err)
 			continue
 		}
-		if n < STUNRequestSize {
+		// Accept the legacy 20-byte probe (assume lobby) and the current
+		// 21-byte probe with a purpose byte.
+		if n < 4+SessionTokenBytes {
 			continue
 		}
 		magic := binary.BigEndian.Uint32(buf[0:4])
@@ -353,6 +367,10 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 			continue
 		}
 		token := hex.EncodeToString(buf[4 : 4+SessionTokenBytes])
+		purpose := STUNPurposeLobby
+		if n >= STUNRequestSize {
+			purpose = buf[4+SessionTokenBytes]
+		}
 		s.mu.Lock()
 		sess, ok := s.sessions[token]
 		s.mu.Unlock()
@@ -362,7 +380,12 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 		}
 
 		public := fmt.Sprintf("%s:%d", ip4.String(), src.Port)
-		sess.PublicAddr = public
+		switch purpose {
+		case STUNPurposeGame:
+			sess.GamePublicAddr = public
+		default:
+			sess.PublicAddr = public
+		}
 
 		resp := make([]byte, STUNResponseSize)
 		binary.BigEndian.PutUint32(resp[0:4], s.Magic)
@@ -370,7 +393,7 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 		binary.BigEndian.PutUint16(resp[8:10], uint16(src.Port))
 		udpL.WriteToUDP(resp, src)
 
-		log.Printf("session %s STUN public=%s", token[:8], public)
+		log.Printf("session %s STUN purpose=%d public=%s", token[:8], purpose, public)
 	}
 }
 

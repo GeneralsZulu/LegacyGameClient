@@ -443,8 +443,35 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 	{
 		m_currentGame->setLastHeard(timeGetTime());
 		AsciiString oldOptions = GameInfoToAsciiString(m_currentGame); // save these off for if we get booted
+
+		// Remember our local slot index BEFORE the parse, because the parse
+		// overwrites slot IPs with the host's LAN view -- after that,
+		// getLocalSlotNum() (which matches by IP) would return -1.
+		Int preParseLocalSlotNum = m_currentGame->getLocalSlotNum();
+
 		if(ParseGameOptionsString(m_currentGame,options))
 		{
+			// Restore NAT-aware slot IPs and ports that the parse just
+			// clobbered with the host's LAN-view addresses. For direct-
+			// connect games the host's own slot needs to be its externally-
+			// routable IP (where this packet came from) so subsequent
+			// matching/routing works, and our own slot needs to be
+			// m_localIP so getLocalSlotNum() and isLocalPlayer() keep
+			// identifying us correctly. The game-data port on slot[0] must
+			// be the host's punched external port (ConnectionManager reads
+			// slot.getPort() when sending in-game), not the announced
+			// NETWORK_BASE_PORT_NUMBER which is the host's local 8088.
+			if (m_currentGame->getIsDirectConnect())
+			{
+				m_currentGame->getLANSlot(0)->setIP(playerIP);
+				if (m_directConnectRemoteGamePort != 0)
+					m_currentGame->getLANSlot(0)->setPort(m_directConnectRemoteGamePort);
+				if (preParseLocalSlotNum > 0)
+				{
+					m_currentGame->getLANSlot(preParseLocalSlotNum)->setIP(m_localIP);
+				}
+			}
+
 			// Peer-side cncstats download: if the host just advertised a
 			// map CRC we don't have locally, fetch it from the cncstats
 			// server now so the lobby preview can show immediately

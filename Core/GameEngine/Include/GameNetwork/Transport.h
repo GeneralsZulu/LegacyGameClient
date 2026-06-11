@@ -47,6 +47,11 @@ public:
 
 	Bool init( AsciiString ip, UnsignedShort port );
 	Bool init( UnsignedInt ip, UnsignedShort port );
+	/// Initialize from an already-bound UDP socket FD instead of binding a new
+	/// one. Used by the online-coordinator handoff so ConnectionManager keeps
+	/// the same socket (and therefore the same NAT mapping) that was punched
+	/// during the coordinator session.
+	Bool initFromFD( Int fd, UnsignedInt ip, UnsignedShort port );
 	void reset();
 	Bool update();									///< Call this once a GameEngine tick, regardless of whether the frame advances.
 
@@ -81,6 +86,8 @@ public:
 private:
 	Bool m_winsockInit;
 	UDP *m_udpsock;
+
+	Bool finishInit( UnsignedShort port );  // shared tail of init() / initFromFD()
 
 	// Latency insertion and packet loss
 	Bool m_useLatency;
