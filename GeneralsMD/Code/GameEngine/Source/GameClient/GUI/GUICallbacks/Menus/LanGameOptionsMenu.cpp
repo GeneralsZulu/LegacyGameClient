@@ -1147,6 +1147,7 @@ void DeinitLanGameGadgets()
 //-------------------------------------------------------------------------------------------------
 void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 {
+	DEBUG_LOG(("LanGameOptionsMenuInit: entry, TheLAN=%p", (void*)TheLAN));
 	if (TheLAN->GetMyGame() && TheLAN->GetMyGame()->isGameInProgress())
 	{
 		// If we init while the game is in progress, we are really returning to the menu
@@ -1155,6 +1156,8 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 		TheShell->popImmediate();
 		return;
 	}
+	DEBUG_LOG(("LanGameOptionsMenuInit: not in progress; GetMyGame=%p amIHost=%d",
+		(void*)TheLAN->GetMyGame(), (int)TheLAN->AmIHost()));
 	s_isIniting = TRUE;
 
 	LANbuttonPushed = false;
@@ -1168,7 +1171,9 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 
 	//initialize the gadgets
 	EnableSlotListUpdates(FALSE);
+	DEBUG_LOG(("LanGameOptionsMenuInit: pre InitLanGameGadgets"));
 	InitLanGameGadgets();
+	DEBUG_LOG(("LanGameOptionsMenuInit: post InitLanGameGadgets"));
 	EnableSlotListUpdates(TRUE);
 	Int start = 0;
 
@@ -1177,16 +1182,20 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 	GadgetTextEntrySetText(textEntryChat, UnicodeString::TheEmptyString);
 
 	//The dialog needs to react differently depending on whether it's the host or not.
+	DEBUG_LOG(("LanGameOptionsMenuInit: pre TheMapCache->updateCache"));
 	TheMapCache->updateCache();
+	DEBUG_LOG(("LanGameOptionsMenuInit: post TheMapCache->updateCache"));
 	if (TheLAN->AmIHost())
 	{
 		// read in some prefs
 		LANGameInfo *game = TheLAN->GetMyGame();
 		LANGameSlot *slot = game->getLANSlot(0);
+		DEBUG_LOG(("LanGameOptionsMenuInit: host branch game=%p slot=%p", (void*)game, (void*)slot));
 		LANPreferences pref;
 		slot->setColor( pref.getPreferredColor() );
 		slot->setPlayerTemplate( pref.getPreferredFaction() );
 		slot->setNATBehavior(FirewallHelperClass::FIREWALL_TYPE_SIMPLE);
+		DEBUG_LOG(("LanGameOptionsMenuInit: about to setMap '%s'", pref.getPreferredMap().str()));
 		game->setMap( pref.getPreferredMap() );
     game->setStartingCash( pref.getStartingCash() );
     game->setSuperweaponRestriction( pref.getSuperweaponRestricted() ? 1 : 0 );
@@ -1203,8 +1212,11 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 		}
 
 		//GadgetTextEntrySetText(comboBoxPlayer[0], TheLAN->GetMyName());
+		DEBUG_LOG(("LanGameOptionsMenuInit: pre lanUpdateSlotList (host)"));
 		lanUpdateSlotList();
+		DEBUG_LOG(("LanGameOptionsMenuInit: pre updateGameOptions (host)"));
 		updateGameOptions();
+		DEBUG_LOG(("LanGameOptionsMenuInit: post updateGameOptions (host)"));
 		start = 1; // leave my combo boxes usable
 
 		// TheSuperHackers @tweak disable the combo box for the host's player name

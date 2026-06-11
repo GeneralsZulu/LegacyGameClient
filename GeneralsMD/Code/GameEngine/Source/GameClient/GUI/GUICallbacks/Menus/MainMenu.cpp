@@ -1421,8 +1421,13 @@ WindowMsgHandledType MainMenuSystem( GameWindow *window, UnsignedInt msg,
 				dropDownWindows[DROPDOWN_MULTIPLAYER]->winHide(FALSE);
 				TheTransitionHandler->reverse("MainMenuMultiPlayerMenuTransitionToNext");
 
-				StartPatchCheck();
-//				localAnimateWindowManager->reverseAnimateWindow();
+				// The "Online" button used to start the GameSpy patch-check
+				// flow against dead retail services. Repurposed: push the
+				// LAN lobby in coordinator mode so it talks to the cncstats
+				// matchmaking service instead of broadcasting on the LAN.
+				extern void LanLobbyMenuSetUseCoordinator(Bool enable);
+				LanLobbyMenuSetUseCoordinator(TRUE);
+				TheShell->push( "Menus/LanLobbyMenu.wnd" );
 				dropDown = DROPDOWN_NONE;
 
 			}
@@ -1434,6 +1439,11 @@ WindowMsgHandledType MainMenuSystem( GameWindow *window, UnsignedInt msg,
 				buttonPushed = TRUE;
 				dropDownWindows[DROPDOWN_MULTIPLAYER]->winHide(FALSE);
 				TheTransitionHandler->reverse("MainMenuMultiPlayerMenuTransitionToNext");
+				// Belt-and-suspenders: in case a prior coordinator-mode push
+				// did not clean up the flag (e.g. abrupt menu pop), make sure
+				// the LAN button always lands us in plain LAN mode.
+				extern void LanLobbyMenuSetUseCoordinator(Bool enable);
+				LanLobbyMenuSetUseCoordinator(FALSE);
 				TheShell->push( "Menus/LanLobbyMenu.wnd" );
 
 				TheScriptEngine->signalUIInteract(TheShellHookNames[SHELL_SCRIPT_HOOK_MAIN_MENU_NETWORK_SELECTED]);
