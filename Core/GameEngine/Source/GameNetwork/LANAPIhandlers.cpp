@@ -403,6 +403,12 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					newSlot.setState(SLOT_PLAYER, UnicodeString(msg->name));
 					newSlot.setIP(senderIP);
 					newSlot.setPort(NETWORK_BASE_PORT_NUMBER);
+					// Capture the NAT-translated lobby port from the joiner's
+					// incoming packet so subsequent lobby replies go back
+					// through the punched mapping. For pure LAN this equals
+					// lobbyPort and is functionally a no-op against the
+					// getLobbyPort()==0 fallback in sendMessage.
+					newSlot.setLobbyPort(m_dispatchSenderPort);
 					newSlot.setLastHeard(timeGetTime());
 					newSlot.setSerial(msg->GameToJoin.serial);
 					m_currentGame->setSlot(player,newSlot);
@@ -439,7 +445,15 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 
 void LANAPI::handleJoinAccept( LANMessage *msg, UnsignedInt senderIP )
 {
-	if (msg->GameJoined.playerIP == m_localIP) // Is it for us?
+	// "Is it for us?" -- on LAN, the host stamps the reply with the joiner's
+	// source IP, which equals the joiner's m_localIP. With the online
+	// coordinator the host saw our packets coming from our NAT external IP,
+	// so msg->GameJoined.playerIP is that external IP and m_localIP is the
+	// joiner's LAN IP. Also accept when the reply came back from the host
+	// we explicitly asked to join via direct connect.
+	Bool forUs = (msg->GameJoined.playerIP == m_localIP) ||
+	             (m_pendingAction == ACT_JOIN && senderIP == m_directConnectRemoteIP);
+	if (forUs)
 	{
 		if (m_pendingAction == ACT_JOIN) // Are we trying to join?
 		{
@@ -470,6 +484,11 @@ void LANAPI::handleJoinAccept( LANMessage *msg, UnsignedInt senderIP )
 
 				m_currentGame->getLANSlot(0)->setHost(msg->hostName);
 				m_currentGame->getLANSlot(0)->setLogin(msg->userName);
+				// Lock in the host's NAT-translated lobby port (source of the
+				// MSG_JOIN_ACCEPT packet) so subsequent lobby sends from this
+				// joiner go to the punched mapping. LAN: equals lobbyPort, no
+				// behavior change.
+				m_currentGame->getLANSlot(0)->setLobbyPort(m_dispatchSenderPort);
 
 				LANPreferences prefs;
 				AsciiString entry;
@@ -494,7 +513,10 @@ extern UnsignedShort s_pendingObservePort;
 
 void LANAPI::handleJoinDeny( LANMessage *msg, UnsignedInt senderIP )
 {
-	if (msg->GameJoined.playerIP == m_localIP) // Is it for us?
+	// Same NAT consideration as handleJoinAccept above.
+	Bool forUs = (msg->GameJoined.playerIP == m_localIP) ||
+	             (m_pendingAction == ACT_JOIN && senderIP == m_directConnectRemoteIP);
+	if (forUs)
 	{
 		if (m_pendingAction == ACT_JOIN) // Are we trying to join?
 		{

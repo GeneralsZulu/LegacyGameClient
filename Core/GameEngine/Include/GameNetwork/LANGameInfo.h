@@ -58,6 +58,13 @@ public:
 	void setLastHeard( UnsignedInt t ) { m_lastHeard = t; }
 	UnsignedInt getLastHeard() { return m_lastHeard; }
 
+	// Port that lobby-layer LANMessages should be sent to for this peer.
+	// 0 means "use LANAPI's default lobbyPort" (LAN behavior). Non-zero is
+	// the NAT-translated port learned from this peer's incoming packets,
+	// used when LANAPI is driven by the online coordinator across NAT.
+	void setLobbyPort( UnsignedShort port ) { m_lobbyPort = port; }
+	UnsignedShort getLobbyPort() const { return m_lobbyPort; }
+
 	//LANGameSlot& operator=(const LANGameSlot& src);
 
 private:
@@ -66,6 +73,7 @@ private:
 	AsciiString m_serial;
 
 	UnsignedInt m_lastHeard;
+	UnsignedShort m_lobbyPort;
 };
 
 /**

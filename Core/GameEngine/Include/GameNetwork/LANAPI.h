@@ -300,6 +300,14 @@ public:
 	virtual void RequestLocations() override;																				///< Request everybody to respond with where they are
 	virtual void RequestGameJoin( LANGameInfo *game, UnsignedInt ip = 0 ) override;				///< Request to join a game
 	virtual void RequestGameJoinDirectConnect( UnsignedInt ipaddress ) override;						///< Request to join a game at an IP address
+
+	/// Set the remote UDP port for the next RequestGameJoinDirectConnect target.
+	/// 0 (default) means use lobbyPort, which is the only behavior LAN cares
+	/// about. The online coordinator sets this to the peer's NAT-translated
+	/// port discovered during hole punch, since the peer's LAN code is bound
+	/// internally to lobbyPort but visible externally on a different port.
+	void setDirectConnectRemotePort( UnsignedShort port ) { m_directConnectRemotePort = port; }
+	UnsignedShort getDirectConnectRemotePort() const { return m_directConnectRemotePort; }
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
@@ -372,6 +380,9 @@ protected:
 	UnsignedInt					m_expiration;						///< When should we give up on our action?
 	UnsignedInt					m_actionTimeout;
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
+	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
+	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
+	UnsignedShort				m_dispatchSenderPort;///< Source port of the LAN message currently being dispatched. Lets reply-style handlers send back through NAT-translated mappings instead of hardcoded lobbyPort.
 
 	// Resend timer ---------------------------------------------------------------------------
 	UnsignedInt					m_lastResendTime; // in ms

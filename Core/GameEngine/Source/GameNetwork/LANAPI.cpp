@@ -120,6 +120,9 @@ void LANAPI::init()
 	m_isInLANMenu = TRUE;
 	m_currentGame = nullptr;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemotePort = 0;
+	m_dispatchSenderIP = 0;
+	m_dispatchSenderPort = 0;
 
 	// A download from a previous session is no longer ours to finish, and a CRC
 	// that failed there deserves a fresh try in this one.
@@ -188,6 +191,9 @@ void LANAPI::reset()
 	m_games = nullptr;
 	m_lobbyPlayers = nullptr;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemotePort = 0;
+	m_dispatchSenderIP = 0;
+	m_dispatchSenderPort = 0;
 	m_pendingAction = ACT_NONE;
 	m_expiration = 0;
 	m_inLobby = true;
@@ -204,7 +210,39 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 {
 	if (ip != 0)
 	{
-		m_transport->queueSend(ip, lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
+		// Choose the destination port in priority order:
+		//   1) per-peer lobby port stored on the matching game slot (the host
+		//      learns this from each joiner's source port when running behind
+		//      NAT through the online coordinator).
+		//   2) source port of the LAN message currently being dispatched (lets
+		//      a reply land back through the same NAT mapping the request came
+		//      through, even before a slot exists for that peer).
+		//   3) m_directConnectRemotePort, set by the coordinator on the joiner
+		//      side before RequestGameJoinDirectConnect so the joiner's first
+		//      sends to the host go to the punched mapping, not lobbyPort.
+		//   4) lobbyPort (LAN default, unchanged behavior).
+		UnsignedShort port = lobbyPort;
+		if (m_currentGame != nullptr)
+		{
+			for (Int i = 0; i < MAX_SLOTS; ++i)
+			{
+				LANGameSlot *slot = m_currentGame->getLANSlot(i);
+				if (slot != nullptr && slot->isHuman() && slot->getIP() == ip && slot->getLobbyPort() != 0)
+				{
+					port = slot->getLobbyPort();
+					break;
+				}
+			}
+		}
+		if (port == lobbyPort && m_dispatchSenderPort != 0 && ip == m_dispatchSenderIP)
+		{
+			port = m_dispatchSenderPort;
+		}
+		if (port == lobbyPort && ip == m_directConnectRemoteIP && m_directConnectRemotePort != 0)
+		{
+			port = m_directConnectRemotePort;
+		}
+		m_transport->queueSend(ip, port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 	}
 	else if ((m_currentGame != nullptr) && (m_currentGame->getIsDirectConnect()))
 	{
@@ -212,9 +250,10 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 		for (Int i = 0; i < MAX_SLOTS; ++i)
 		{
 			if (i != localSlot) {
-				GameSlot *slot = m_currentGame->getSlot(i);
+				LANGameSlot *slot = m_currentGame->getLANSlot(i);
 				if ((slot != nullptr) && (slot->isHuman())) {
-					m_transport->queueSend(slot->getIP(), lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
+					UnsignedShort port = slot->getLobbyPort() != 0 ? slot->getLobbyPort() : lobbyPort;
+					m_transport->queueSend(slot->getIP(), port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 				}
 			}
 		}
@@ -382,6 +421,13 @@ void LANAPI::update()
 				continue;
 			}
 
+			// Track the source port so reply-path sendMessage calls can
+			// route back through the same NAT mapping (matters for the
+			// online-coordinator flow; LAN packets always arrive on
+			// lobbyPort and behave identically).
+			m_dispatchSenderIP   = senderIP;
+			m_dispatchSenderPort = m_transport->m_inBuffer[i].port;
+
 			LANMessage *msg = (LANMessage *)(m_transport->m_inBuffer[i].data);
 			//DEBUG_LOG(("LAN message type %s from %ls (%s@%s)", GetMessageTypeString(msg->messageType).str(),
 			//	msg->name, msg->userName, msg->hostName));
@@ -459,6 +505,12 @@ void LANAPI::update()
 
 			// Mark it as read
 			m_transport->m_inBuffer[i].length = 0;
+
+			// Clear the transient dispatch context so any sends queued from
+			// outside the dispatch loop (timers, user input) don't pick up
+			// a stale per-message port.
+			m_dispatchSenderIP   = 0;
+			m_dispatchSenderPort = 0;
 		}
 	}
 	if(LANbuttonPushed)
