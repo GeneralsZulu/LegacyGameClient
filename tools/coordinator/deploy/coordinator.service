@@ -1,0 +1,28 @@
+[Unit]
+Description=Generals coordinator (online matchmaking + STUN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coord
+Group=coord
+ExecStart=/usr/local/bin/coord -tcp :27500 -udp :27501
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
