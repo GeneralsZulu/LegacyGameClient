@@ -28,6 +28,8 @@
 
 #pragma once
 
+#include <map>
+
 #include "GameNetwork/Transport.h"
 #include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/NetworkDefs.h"
@@ -314,8 +316,31 @@ public:
 	/// direct-connect, slot setup uses this instead of the hardcoded
 	/// NETWORK_BASE_PORT_NUMBER so ConnectionManager sends to the punched
 	/// mapping rather than to an unrouted port that nobody is listening on.
+	/// Used for the single-joiner case (2-player coord). For N-player, see
+	/// setDirectConnectGamePortForPeer below which keeps a per-peer map.
 	void setDirectConnectRemoteGamePort( UnsignedShort port ) { m_directConnectRemoteGamePort = port; }
 	UnsignedShort getDirectConnectRemoteGamePort() const { return m_directConnectRemoteGamePort; }
+
+	/// Record a joiner's punched external game-data port keyed by their
+	/// external lobby IP. Populated by the lobby UI as the coordinator
+	/// delivers peer_info for each new joiner. handleRequestJoin looks the
+	/// joiner up here before falling back to the single-value setter above.
+	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort port )
+	{
+		m_directConnectGamePorts[ip] = port;
+	}
+	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip ) const
+	{
+		std::map<UnsignedInt, UnsignedShort>::const_iterator it = m_directConnectGamePorts.find(ip);
+		return (it == m_directConnectGamePorts.end()) ? (UnsignedShort)0 : it->second;
+	}
+
+	/// Send a tiny fill-in-style LOBBY_ANNOUNCE packet directly to (ip:port)
+	/// to open the host's NAT mapping for that external addr. Used for
+	/// N-player coord: when the coordinator tells the host about a new
+	/// joiner, the host fires this so its NAT lets the joiner's subsequent
+	/// MSG_REQUEST_GAME_INFO through (for non-cone NATs).
+	void sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHost );
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
@@ -389,7 +414,8 @@ protected:
 	UnsignedInt					m_actionTimeout;
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
 	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
-	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER.
+	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER. Single-value version for 2-player coord.
+	std::map<UnsignedInt, UnsignedShort> m_directConnectGamePorts; ///< Per-peer punched game-data port keyed by external lobby IP. N-player coord populates this from coordinator peer_info.
 	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
 	UnsignedShort				m_dispatchSenderPort;///< Source port of the LAN message currently being dispatched. Lets reply-style handlers send back through NAT-translated mappings instead of hardcoded lobbyPort.
 

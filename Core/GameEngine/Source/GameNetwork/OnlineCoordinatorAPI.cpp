@@ -65,10 +65,16 @@ static const UnsignedInt  GAME_KEEPALIVE_INTERVAL_MS = 5000;
 // ConnectionManager picks it up at game start.
 static Int           s_stashGameFd            = -1;
 static UnsignedShort s_stashGameLocalPort     = 0;
-static UnsignedInt   s_stashGamePeerIPHost    = 0;  // host order
-static UnsignedShort s_stashGamePeerPortHost  = 0;  // host order
+static UnsignedInt   s_stashGamePeerIPHost    = 0;  // host order (first joiner)
+static UnsignedShort s_stashGamePeerPortHost  = 0;  // host order (first joiner)
 static UnsignedInt   s_stashKeepaliveNextMs   = 0;
 static AsciiString   s_stashKeepaliveNick;
+// Additional in-game peer endpoints registered after the initial handoff
+// (N-player: each subsequent joiner). The first peer above is the original
+// punched peer and is always sent to first; entries here are sent in order
+// alongside it on each keepalive tick.
+struct StashGamePeer { UnsignedInt ipHost; UnsignedShort portHost; };
+static std::vector<StashGamePeer> s_stashGameExtraPeers;
 
 
 // ---- platform helpers ------------------------------------------------------
@@ -343,12 +349,40 @@ void OnlineCoordinatorAPI::discardStashedGameSocket()
 	s_stashGamePeerPortHost = 0;
 	s_stashKeepaliveNextMs  = 0;
 	s_stashKeepaliveNick.clear();
+	s_stashGameExtraPeers.clear();
+}
+
+void OnlineCoordinatorAPI::addStashedGamePeer(UnsignedInt ipHost, UnsignedShort portHost)
+{
+	if (s_stashGameFd == -1) return;
+	if (ipHost == 0 || portHost == 0) return;
+	// Skip duplicates (including the primary stash peer) so we don't double
+	// up keepalives if the caller plumbs the same joiner twice.
+	if (ipHost == s_stashGamePeerIPHost && portHost == s_stashGamePeerPortHost)
+		return;
+	for (size_t i = 0; i < s_stashGameExtraPeers.size(); ++i)
+	{
+		if (s_stashGameExtraPeers[i].ipHost == ipHost &&
+		    s_stashGameExtraPeers[i].portHost == portHost)
+			return;
+	}
+	StashGamePeer p;
+	p.ipHost   = ipHost;
+	p.portHost = portHost;
+	s_stashGameExtraPeers.push_back(p);
+	// Fire one immediately so the host's NAT installs an outbound mapping
+	// before this joiner's first inbound packet arrives.
+	s_stashKeepaliveNextMs = 0;
+	DEBUG_LOG(("OnlineCoordinatorAPI::addStashedGamePeer - %u.%u.%u.%u:%u",
+		(ipHost >> 24) & 0xff, (ipHost >> 16) & 0xff,
+		(ipHost >> 8) & 0xff, ipHost & 0xff, portHost));
 }
 
 void OnlineCoordinatorAPI::pumpStashedKeepalive()
 {
 	if (s_stashGameFd == -1) return;
-	if (s_stashGamePeerIPHost == 0 || s_stashGamePeerPortHost == 0) return;
+	const Bool hasPrimary = (s_stashGamePeerIPHost != 0 && s_stashGamePeerPortHost != 0);
+	if (!hasPrimary && s_stashGameExtraPeers.empty()) return;
 
 	UnsignedInt nowMs = timeGetTime();
 	if (nowMs < s_stashKeepaliveNextMs) return;
@@ -365,10 +399,39 @@ void OnlineCoordinatorAPI::pumpStashedKeepalive()
 
 	struct sockaddr_in dst;
 	memset(&dst, 0, sizeof(dst));
-	dst.sin_family      = AF_INET;
-	dst.sin_addr.s_addr = htonl(s_stashGamePeerIPHost);
-	dst.sin_port        = htons(s_stashGamePeerPortHost);
-	sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+	dst.sin_family = AF_INET;
+	if (hasPrimary)
+	{
+		dst.sin_addr.s_addr = htonl(s_stashGamePeerIPHost);
+		dst.sin_port        = htons(s_stashGamePeerPortHost);
+		sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+	}
+	for (size_t i = 0; i < s_stashGameExtraPeers.size(); ++i)
+	{
+		dst.sin_addr.s_addr = htonl(s_stashGameExtraPeers[i].ipHost);
+		dst.sin_port        = htons(s_stashGameExtraPeers[i].portHost);
+		sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+	}
+}
+
+// Parse an "ip:port" string into host-order UnsignedInt + UnsignedShort.
+// Both *ip and *port are set to 0 on failure (and may be NULL to skip).
+static void parseHostOrderIpPort(const AsciiString& s, UnsignedInt* ip, UnsignedShort* port)
+{
+	if (ip)   *ip   = 0;
+	if (port) *port = 0;
+	const char* str = s.str();
+	const char* colon = strchr(str, ':');
+	if (!colon || colon == str) return;
+	char ipbuf[64];
+	Int ipLen = (Int)(colon - str);
+	if (ipLen >= (Int)sizeof(ipbuf)) ipLen = (Int)sizeof(ipbuf) - 1;
+	memcpy(ipbuf, str, ipLen);
+	ipbuf[ipLen] = '\0';
+	UnsignedInt nbo = inet_addr(ipbuf);
+	if (nbo == INADDR_NONE) return;
+	if (ip)   *ip   = ntohl(nbo);
+	if (port) *port = (UnsignedShort)strtoul(colon + 1, NULL, 10);
 }
 
 // ---- class implementation --------------------------------------------------
@@ -385,6 +448,7 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_coordIPNet(0)
 	, m_peerInfoArmed(FALSE)
 	, m_amIHost(FALSE)
+	, m_postHandoff(FALSE)
 	, m_stunNextProbeMsLobby(0)
 	, m_stunNextProbeMsGame(0)
 	, m_stunProbesSentLobby(0)
@@ -475,6 +539,31 @@ void OnlineCoordinatorAPI::disconnect()
 	closeSockets();
 	m_state = STATE_IDLE;
 	m_peerInfoArmed = FALSE;
+	m_postHandoff = FALSE;
+	m_newPeers.clear();
+}
+
+void OnlineCoordinatorAPI::closeLobbyUdpForHostHandoff()
+{
+	if (m_udpFdLobby != -1)
+	{
+		CLOSE_SOCKET(m_udpFdLobby);
+		m_udpFdLobby = -1;
+	}
+	// Don't touch TCP -- we still want peer_info for subsequent joiners.
+	// Don't touch the game UDP socket -- it's already stashed elsewhere.
+	// We leave m_state at STATE_HOSTING so the coord doesn't think anything
+	// went wrong; we just stop being able to STUN/punch.
+	m_postHandoff = TRUE;
+	DEBUG_LOG(("OnlineCoordinatorAPI: entered post-handoff mode; TCP signaling stays open for additional joiners"));
+}
+
+Bool OnlineCoordinatorAPI::consumeNewPeer(PeerInfo* out)
+{
+	if (m_newPeers.empty()) return FALSE;
+	if (out) *out = m_newPeers.front();
+	m_newPeers.erase(m_newPeers.begin());
+	return TRUE;
 }
 
 Bool OnlineCoordinatorAPI::openUdpOnPort(UnsignedShort bindPort, Int& outFd, UnsignedShort& outBoundPort)
@@ -595,6 +684,8 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	m_stunOkGame  = FALSE;
 	m_punchOkLobby = FALSE;
 	m_punchOkGame  = FALSE;
+	m_postHandoff  = FALSE;
+	m_newPeers.clear();
 
 	if (!openUdpOnPort(lobbyBindPort, m_udpFdLobby, m_udpBoundPortLobby))
 		return FALSE;
@@ -1130,15 +1221,35 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 
 	if (strcmp(msgType, "peer_info") == 0)
 	{
+		PeerInfo p;
+		memset(&p, 0, sizeof(p));
 		char tmp[128];
-		memset(&m_peerInfo, 0, sizeof(m_peerInfo));
-		if (parseStringField(obj, "nick",             tmp, sizeof(tmp))) m_peerInfo.nick           = tmp;
-		if (parseStringField(obj, "public_addr",      tmp, sizeof(tmp))) m_peerInfo.publicAddr     = tmp;
-		if (parseStringField(obj, "game_public_addr", tmp, sizeof(tmp))) m_peerInfo.gamePublicAddr = tmp;
-		if (parseStringField(obj, "local_addr",       tmp, sizeof(tmp))) m_peerInfo.localAddr      = tmp;
-		if (parseStringField(obj, "role",             tmp, sizeof(tmp))) m_peerInfo.role           = tmp;
-		parseIntField(obj, "punch_in_ms", &m_peerInfo.punchInMS);
+		if (parseStringField(obj, "nick",             tmp, sizeof(tmp))) p.nick           = tmp;
+		if (parseStringField(obj, "public_addr",      tmp, sizeof(tmp))) p.publicAddr     = tmp;
+		if (parseStringField(obj, "game_public_addr", tmp, sizeof(tmp))) p.gamePublicAddr = tmp;
+		if (parseStringField(obj, "local_addr",       tmp, sizeof(tmp))) p.localAddr      = tmp;
+		if (parseStringField(obj, "role",             tmp, sizeof(tmp))) p.role           = tmp;
+		parseIntField(obj, "punch_in_ms", &p.punchInMS);
 
+		// Resolve the peer's punched-port pair from the addr strings (the
+		// coordinator-observed external addrs). After handoff we can't punch
+		// any more so these are the values the lobby UI plumbs into TheLAN.
+		parseHostOrderIpPort(p.publicAddr,     &p.punchedIP,     &p.punchedPort);
+		parseHostOrderIpPort(p.gamePublicAddr, &p.gamePunchedIP, &p.gamePunchedPort);
+
+		if (m_postHandoff)
+		{
+			// We no longer own the UDP sockets, so we can't STUN/punch on
+			// behalf of this new peer. Stash the addrs and let the lobby UI
+			// drain the queue; it'll plumb the game-port into TheLAN and
+			// fire a NAT-opening packet via TheLAN's transport.
+			DEBUG_LOG(("OnlineCoordinatorAPI: post-handoff peer_info from %s (game %s); queueing for UI",
+				p.publicAddr.str(), p.gamePublicAddr.str()));
+			m_newPeers.push_back(p);
+			return;
+		}
+
+		m_peerInfo = p;
 		m_peerInfoArmed = TRUE;
 		m_punchOkLobby = FALSE;
 		m_punchOkGame  = FALSE;

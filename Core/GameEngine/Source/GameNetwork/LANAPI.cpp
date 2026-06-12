@@ -711,6 +711,25 @@ void LANAPI::RequestLocations()
 	sendMessage(&msg);
 }
 
+void LANAPI::sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHost )
+{
+	if (destIPHost == 0 || destPortHost == 0) return;
+	if (!m_transport) return;
+	// MSG_REQUEST_LOCATIONS is a tiny, side-effect-free packet that any LAN
+	// peer accepts. We use it as the NAT-opening probe: the host fires this
+	// at a newly-arrived joiner's external lobby addr (which the coordinator
+	// just told us about) so the host's NAT installs an outbound mapping
+	// before the joiner's MSG_REQUEST_GAME_INFO arrives. For full-cone hosts
+	// this is a no-op; for port-restricted hosts it's required.
+	LANMessage msg;
+	msg.messageType = LANMessage::MSG_REQUEST_LOCATIONS;
+	fillInLANMessage( &msg );
+	m_transport->queueSend(destIPHost, destPortHost, (unsigned char*)&msg, sizeof(LANMessage));
+	DEBUG_LOG(("LANAPI::sendNATKeepalive - sent to %u.%u.%u.%u:%u",
+		(destIPHost >> 24) & 0xff, (destIPHost >> 16) & 0xff,
+		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
+}
+
 void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 {
 	if ((m_pendingAction != ACT_NONE) && (m_pendingAction != ACT_JOINDIRECTCONNECT))

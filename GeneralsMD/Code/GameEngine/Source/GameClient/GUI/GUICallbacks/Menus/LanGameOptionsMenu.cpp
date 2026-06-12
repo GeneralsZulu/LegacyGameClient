@@ -56,6 +56,7 @@
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/IPEnumeration.h"
 #include "GameNetwork/LANAPICallbacks.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/Recorder.h"
 #include "Common/StatsUploader.h"
@@ -71,6 +72,11 @@ extern Bool LANisShuttingDown;
 extern Bool LANbuttonPushed;
 extern void MapSelectorTooltip(GameWindow *window, WinInstanceData *instData,	UnsignedInt mouse);
 extern void gameAcceptTooltip(GameWindow *window, WinInstanceData *instData, UnsignedInt mouse);
+
+// Defined in LanLobbyMenu.cpp; used here to pump the host's coord TCP session
+// after the lobby->options handoff so additional joiners can show up.
+extern OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost();
+extern void LanLobbyMenuShutdownHostCoordinator();
 Color white = GameMakeColor( 255, 255, 255, 255 );
 static bool s_isIniting = FALSE;
 
@@ -618,6 +624,10 @@ void StartPressed()
 				GadgetComboBoxSetSelectedPos(comboBoxPlayer[i], SLOT_CLOSED);
 			}
 		}
+		// Slots are locked; no more joiners can arrive through the coord. Tear
+		// down the host's TCP signaling session so the gameID disappears from
+		// the listing.
+		LanLobbyMenuShutdownHostCoordinator();
 		Int seconds = TheMultiplayerSettings->getStartCountdownTimerSeconds();
 		if (seconds)
 			TheLAN->RequestGameStartTimer(seconds);
@@ -1439,6 +1449,41 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 	// pick once the bytes are in.
 	updateMapVoteDownload();
 	//TheLAN->update(); // this is handled in the lobby
+
+	// Host-side N-player coord: keep the coordinator TCP signaling alive so
+	// joiners 2..N can find this game while we wait in the options screen.
+	// Each peer_info the coord delivers gets plumbed into TheLAN so the
+	// joiner's eventual MSG_REQUEST_JOIN finds the right game-port mapping,
+	// and we send a NAT-opening probe to their lobby addr so port-restricted
+	// host NATs let the joiner through.
+	OnlineCoordinatorAPI* coord = LanLobbyMenuGetCoordinatorForHost();
+	if (coord)
+	{
+		coord->update();
+		OnlineCoordinatorAPI::PeerInfo p;
+		while (coord->consumeNewPeer(&p))
+		{
+			DEBUG_LOG(("LanGameOptionsMenu: new joiner %s lobby=0x%08x:%u game=0x%08x:%u",
+				p.nick.str(),
+				p.punchedIP, p.punchedPort,
+				p.gamePunchedIP, p.gamePunchedPort));
+			if (TheLAN && p.punchedIP != 0)
+			{
+				if (p.gamePunchedPort != 0)
+				{
+					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.gamePunchedPort);
+				}
+				TheLAN->sendNATKeepalive(p.punchedIP, p.punchedPort);
+			}
+			// Register the joiner's game-data endpoint with the stashed-FD
+			// keepalive sender so the host's NAT mapping on UDP/8088 opens
+			// outbound to that peer before ConnectionManager adopts the FD.
+			if (p.gamePunchedIP != 0 && p.gamePunchedPort != 0)
+			{
+				OnlineCoordinatorAPI::addStashedGamePeer(p.gamePunchedIP, p.gamePunchedPort);
+			}
+		}
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2036,6 +2081,9 @@ WindowMsgHandledType LanGameOptionsMenuSystem( GameWindow *window, UnsignedInt m
 					// Explicit lobby exit — disarm any resume-from-replay selection
 					// so it doesn't carry into a later lobby session.
 					ClearResumeFromReplayArm();
+					// If the host kept the coord TCP alive for N-player, tear
+					// it down now -- backing out means abandoning the game.
+					LanLobbyMenuShutdownHostCoordinator();
 					TheLAN->RequestGameLeave();
 					//TheShell->pop();
 

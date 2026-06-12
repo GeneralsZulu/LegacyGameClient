@@ -408,8 +408,19 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					// punch. ConnectionManager will later send to (slot.IP,
 					// slot.Port), so this must be the punched external port,
 					// not the peer's local 8088 that isn't routable from us.
-					if (m_currentGame->getIsDirectConnect() && m_directConnectRemoteGamePort != 0)
-						newSlot.setPort(m_directConnectRemoteGamePort);
+					// Prefer the per-peer map (populated by the lobby UI from
+					// coordinator peer_info for N-player), fall back to the
+					// single-value setter (2-player coord). Either is zero
+					// for pure LAN games, leaving the LAN default in place.
+					UnsignedShort peerGamePort = 0;
+					if (m_currentGame->getIsDirectConnect())
+					{
+						peerGamePort = lookupDirectConnectGamePort(senderIP);
+						if (peerGamePort == 0)
+							peerGamePort = m_directConnectRemoteGamePort;
+					}
+					if (peerGamePort != 0)
+						newSlot.setPort(peerGamePort);
 					else
 						newSlot.setPort(NETWORK_BASE_PORT_NUMBER);
 					// Capture the NAT-translated lobby port from the joiner's

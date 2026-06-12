@@ -94,6 +94,28 @@ void LanLobbyMenuSetUseCoordinator( Bool enable )
 	s_useCoordinator = enable;
 }
 
+// Cross-menu accessor: LanGameOptionsMenu calls this each frame so the host's
+// coordinator TCP signaling stays pumped after the handoff. Returns NULL
+// when no coord session is alive (regular LAN games, or after the host has
+// torn down the session).
+OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost()
+{
+	return s_coord;
+}
+
+// Cross-menu teardown: LanGameOptionsMenu calls this when the host actually
+// starts the game (no more joiners can come in) or when the host backs out
+// of the lobby. Idempotent.
+void LanLobbyMenuShutdownHostCoordinator()
+{
+	if (s_coord)
+	{
+		s_coord->disconnect();
+		delete s_coord;
+		s_coord = nullptr;
+	}
+}
+
 // Forward declarations for the coordinator helpers; the definitions live
 // just above LanLobbyMenuUpdate further down in this file.
 static void connectCoordinatorIfNeeded();
@@ -630,9 +652,16 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 
 	if (s_coord)
 	{
-		s_coord->disconnect();
-		delete s_coord;
-		s_coord = nullptr;
+		// For a host that just handed off, leave s_coord alive so the
+		// LanGameOptionsMenu can pump it and accept additional joiners.
+		// LanLobbyMenuShutdownHostCoordinator() tears it down later.
+		const Bool hostKeepAlive = (s_coordHandoffDone && s_coord->amIHost());
+		if (!hostKeepAlive)
+		{
+			s_coord->disconnect();
+			delete s_coord;
+			s_coord = nullptr;
+		}
 	}
 	// If the handoff to TheLAN already happened we keep s_useCoordinator
 	// set so the post-handoff lobby push still uses the coordinator-aware
@@ -838,8 +867,22 @@ static void doCoordinatorHandoffToLAN()
 	// Release the coordinator's lobby UDP socket so TheLAN can rebind 8086.
 	// The NAT mapping established during punch persists for ~30s+, well
 	// within the few ms it takes us to rebind.
-	s_coord->disconnect();
-	DEBUG_LOG(("HANDOFF: coord disconnected"));
+	if (weAreHost)
+	{
+		// N-player: keep TCP signaling alive so the coordinator can deliver
+		// peer_info for additional joiners while this host stays in the
+		// lobby. The s_coord instance survives LanLobbyMenuShutdown (see
+		// guard there) and is pumped by LanGameOptionsMenu.
+		s_coord->closeLobbyUdpForHostHandoff();
+		DEBUG_LOG(("HANDOFF: coord lobby UDP closed; TCP kept alive for additional joiners"));
+	}
+	else
+	{
+		// Joiners don't need to talk to the coordinator any more; their
+		// in-game connection goes through the host (packet router model).
+		s_coord->disconnect();
+		DEBUG_LOG(("HANDOFF: coord disconnected"));
+	}
 
 	if (!TheLAN)
 	{

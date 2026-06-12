@@ -104,6 +104,22 @@ public:
 
 	void disconnect();
 
+	// Release just the lobby UDP socket so TheLAN can rebind on it. Used in
+	// the host-side handoff for N-player games where we want to keep the TCP
+	// signaling channel alive so the coordinator can deliver peer_info for
+	// additional joiners (without that, the coord session ends and the gameID
+	// disappears the moment the first joiner finishes punching).
+	// After this call the API is in "post-handoff" mode: peer_info arrivals
+	// no longer transition to STATE_PUNCHING -- they get pushed into the new
+	// peer queue for the UI to drain. m_state stays at STATE_HOSTING.
+	void closeLobbyUdpForHostHandoff();
+
+	// Pull the next post-handoff peer_info off the queue. Returns FALSE when
+	// the queue is empty. Used by the lobby UI to plumb each new joiner's
+	// punched ports into TheLAN before that joiner's MSG_REQUEST_JOIN arrives
+	// over the lobby socket.
+	Bool consumeNewPeer(PeerInfo* out);
+
 	// Non-blocking poll. Call every frame while a session is active.
 	void update();
 
@@ -133,6 +149,11 @@ public:
 	static UnsignedShort stashedGamePeerPortHost();
 	static void          pumpStashedKeepalive();                // call from a per-frame update loop
 	static void          discardStashedGameSocket();            // emergency cleanup (closes the FD)
+	// Register an additional in-game peer endpoint to send keepalives to.
+	// Used by the host's N-player flow: each new joiner's gamePunchedAddr
+	// goes here so the host's NAT mapping on the stashed game socket stays
+	// open for that peer while we wait in the lobby.
+	static void          addStashedGamePeer(UnsignedInt ipHost, UnsignedShort portHost);
 
 	State                            state()           const { return m_state; }
 	const AsciiString&               publicAddr()      const { return m_publicAddrLobby; }
@@ -180,6 +201,11 @@ private:
 	PeerInfo      m_peerInfo;
 	Bool          m_peerInfoArmed;    // peer_info received; punch in progress
 	Bool          m_amIHost;          // TRUE if we called requestHost()
+	// Post-handoff mode: TCP signaling stays open so additional joiners can
+	// reach us via the coordinator, but we no longer own UDP sockets so we
+	// can't punch. New peer_infos go into m_newPeers for the UI to drain.
+	Bool          m_postHandoff;
+	std::vector<PeerInfo> m_newPeers;
 
 	// STUN discovery: track per-socket so the transition to STATE_READY
 	// waits until BOTH external addresses have been observed.
