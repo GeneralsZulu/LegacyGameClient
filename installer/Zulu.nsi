@@ -126,6 +126,16 @@ Section "Install ${APPNAME}" SecInstall
     WriteRegDWORD HKLM "${UNINSTREGKEY}" "NoModify" 1
     WriteRegDWORD HKLM "${UNINSTREGKEY}" "NoRepair" 1
 
+    ; --- Windows Firewall allow rule -------------------------------------
+    ; The exe is renamed from the retail game, so it inherits no existing
+    ; firewall rules; without one, inbound LAN traffic (UDP lobby 8086/8088
+    ; and the TCP 8188 observer stream) is silently dropped whenever the
+    ; first-listen consent prompt goes unanswered behind the fullscreen
+    ; game. We're already elevated, so register the rule here.
+    ; Delete-then-add keeps repeat installs/updates from stacking dupes.
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${APPNAME} (${EXENAME})"'
+    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${APPNAME} (${EXENAME})" dir=in action=allow program="$INSTDIR\${EXENAME}" enable=yes profile=any'
+
     ; Silent invocations come from the launcher's update flow. The
     ; *calling* launcher (still running while we install) waits for us
     ; to exit and then re-launches the game with the user's original
@@ -147,6 +157,9 @@ Section "Uninstall"
     RMDir  "$SMPROGRAMS\${APPNAME}"
 
     DeleteRegKey HKLM "${UNINSTREGKEY}"
+
+    ; Remove the firewall rule the installer registered.
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${APPNAME} (${EXENAME})"'
 
     ; Don't RMDir $INSTDIR — that's the user's Zero Hour folder and we
     ; share it with the retail install. Leave it alone.

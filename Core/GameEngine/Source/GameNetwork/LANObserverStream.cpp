@@ -116,6 +116,7 @@ Bool LANObserverHost::start(UnsignedShort port)
 	Int fd = (Int)socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
 	{
+		LANObsLog("LANObserverHost::start - socket() FAILED (err=%d)", SOCK_ERR_LAST);
 		DEBUG_LOG(("LANObserverHost::start - socket() failed (%d)", SOCK_ERR_LAST));
 		return FALSE;
 	}
@@ -132,18 +133,21 @@ Bool LANObserverHost::start(UnsignedShort port)
 
 	if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
 	{
+		LANObsLog("LANObserverHost::start - bind(%u) FAILED (err=%d) - port in use by another process/instance?", port, SOCK_ERR_LAST);
 		DEBUG_LOG(("LANObserverHost::start - bind(%u) failed (%d)", port, SOCK_ERR_LAST));
 		CLOSE_SOCKET(fd);
 		return FALSE;
 	}
 	if (listen(fd, 8) == SOCKET_ERROR)
 	{
+		LANObsLog("LANObserverHost::start - listen(%u) FAILED (err=%d)", port, SOCK_ERR_LAST);
 		DEBUG_LOG(("LANObserverHost::start - listen failed (%d)", SOCK_ERR_LAST));
 		CLOSE_SOCKET(fd);
 		return FALSE;
 	}
 	if (!setNonBlocking(fd))
 	{
+		LANObsLog("LANObserverHost::start - setNonBlocking FAILED (err=%d)", SOCK_ERR_LAST);
 		DEBUG_LOG(("LANObserverHost::start - setNonBlocking failed"));
 		CLOSE_SOCKET(fd);
 		return FALSE;
@@ -151,6 +155,7 @@ Bool LANObserverHost::start(UnsignedShort port)
 
 	m_listenFd = fd;
 	m_port     = port;
+	LANObsLog("LANObserverHost::start - LISTENING on port %u (fd=%d)", port, fd);
 	DEBUG_LOG(("LANObserverHost::start - listening on port %u", port));
 	return TRUE;
 }
@@ -162,6 +167,9 @@ void LANObserverHost::setReplayFile(const AsciiString& path)
 
 void LANObserverHost::stop()
 {
+	if (m_listenFd != -1 || !m_conns.empty())
+		LANObsLog("LANObserverHost::stop - closing listen socket (port=%u) and %u observer conn(s)",
+			m_port, (UnsignedInt)m_conns.size());
 	for (size_t i = 0; i < m_conns.size(); ++i)
 		closeConn(m_conns[i]);
 	m_conns.clear();
@@ -208,8 +216,16 @@ void LANObserverHost::acceptNew(UnicodeString* outNames, Int outNamesCap, Int& o
 		conn->connectedAt  = timeGetTime();
 
 		// Snapshot the file size NOW; this becomes the "catch-up" boundary.
-		// Everything else streams live.
-		if (!m_replayPath.isEmpty())
+		// Everything else streams live. If we can't open the source replay
+		// there is nothing we can ever stream: close the connection so the
+		// observer sees a clean failure (and can retry) instead of waiting
+		// forever on a snapshot that will never arrive.
+		if (m_replayPath.isEmpty())
+		{
+			LANObsLog("LANObserverHost::acceptNew - no replay path wired yet; dropping observer fd=%d", newFd);
+			closeConn(conn);
+			continue;
+		}
 		{
 			conn->readHandle = fopen(m_replayPath.str(), "rb");
 			if (conn->readHandle)
@@ -229,7 +245,11 @@ void LANObserverHost::acceptNew(UnicodeString* outNames, Int outNamesCap, Int& o
 			}
 			else
 			{
+				LANObsLog("LANObserverHost::acceptNew - fopen('%s') FAILED (errno=%d); dropping observer fd=%d",
+					m_replayPath.str(), errno, newFd);
 				DEBUG_LOG(("LANObserverHost::acceptNew - fopen('%s') failed", m_replayPath.str()));
+				closeConn(conn);
+				continue;
 			}
 		}
 
@@ -309,6 +329,7 @@ Bool LANObserverHost::pumpSendToSocket(ObserverConn* conn)
 		Int err = SOCK_ERR_LAST;
 		if (err == SOCK_ERR_WOULDBLOCK)
 			return TRUE; // try again next tick
+		LANObsLog("LANObserverHost - send error %d on fd=%d, dropping observer", err, conn->socketFd);
 		DEBUG_LOG(("LANObserverHost - send error %d on fd=%d, dropping", err, conn->socketFd));
 		return FALSE;
 	}
