@@ -1374,7 +1374,10 @@ static const MapMetaData *findObserverMapByCRC(UnsignedInt crc)
 void LANAPI::startObserverHost()
 {
 	if (!AmIHost())
+	{
+		LANObsLog("startObserverHost: skipped, AmIHost()=0 (currentGame=%d)", m_currentGame ? 1 : 0);
 		return;
+	}
 	if (!m_observerHost)
 		m_observerHost = new LANObserverHost();
 	if (!m_observerHost->isRunning())
@@ -1382,6 +1385,9 @@ void LANAPI::startObserverHost()
 		UnsignedShort port = (UnsignedShort)(NETWORK_BASE_PORT_NUMBER + LAN_OBSERVER_PORT_OFFSET);
 		if (!m_observerHost->start(port))
 		{
+			// Leave the failure visible; updateObserver re-attempts on a
+			// throttle while the game is in progress.
+			LANObsLog("startObserverHost: start(%u) FAILED; will retry from updateObserver", port);
 			DEBUG_LOG(("LANAPI::startObserverHost - failed to start on port %u", port));
 			delete m_observerHost;
 			m_observerHost = nullptr;
@@ -1389,8 +1395,8 @@ void LANAPI::startObserverHost()
 		}
 	}
 	// Wire the host's currently-recording .rep file path. If recording hasn't
-	// started yet (we may be a frame early), the host will pick up the path
-	// on a subsequent updateObserver call via the same lookup.
+	// started yet (we may be a frame early), updateObserver refreshes the
+	// path on every tick via the same lookup.
 	if (TheRecorder)
 	{
 		AsciiString dir = RecorderClass::getReplayDir();
@@ -1399,6 +1405,7 @@ void LANAPI::startObserverHost()
 		AsciiString full = dir;
 		full.concat(file);
 		m_observerHost->setReplayFile(full);
+		LANObsLog("startObserverHost: streaming replay '%s'", full.str());
 	}
 }
 
@@ -1428,6 +1435,21 @@ void LANAPI::stopObserverClient()
 	m_observerProgressLastBytes = 0;
 }
 
+// Observer-client reconnect state. Written by RequestObserve, consumed by
+// updateObserver: if the TCP connect fails or the stream dies before
+// playback starts, we retry the connect a couple of times before surfacing
+// an error dialog. File statics (like the s_pendingObserve pair) so no
+// header change is needed.
+static UnsignedInt   s_observeHostIPHostOrder = 0;
+static UnsignedShort s_observeConnectPort     = 0;
+static Int           s_observeAttemptsLeft    = 0;
+static UnsignedInt   s_observeLastBytes       = 0;
+static UnsignedInt   s_observeLastProgressMs  = 0;
+// Give up on a connected-but-silent host after this long without a single
+// new byte. Generous because the host may still be inside its blocking map
+// load right after game start, during which nothing is pumped.
+static const UnsignedInt OBS_CLIENT_STALL_TIMEOUT_MS = 60000;
+
 void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 {
 	LANObsLog("RequestObserve: hostIP=%08X port=%u", hostIP, observerPort);
@@ -1437,6 +1459,12 @@ void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 		DEBUG_LOG(("LANAPI::RequestObserve - no observer port advertised by host"));
 		return;
 	}
+
+	s_observeHostIPHostOrder = hostIP;
+	s_observeConnectPort     = observerPort;
+	s_observeAttemptsLeft    = 2; // retries after the initial attempt
+	s_observeLastBytes       = 0;
+	s_observeLastProgressMs  = timeGetTime();
 
 	stopObserverClient();
 	m_observerClient = new LANObserverClient();
@@ -1552,6 +1580,37 @@ Bool LANAPI::ensureObserverMapAvailable(AsciiString relReplayPath)
 
 void LANAPI::updateObserver()
 {
+	// Host self-heal: if we're hosting an in-progress LAN game, the observer
+	// listen socket must be up. It can be missing because the bind failed at
+	// game-start time (port still held by another process/instance) or
+	// because startObserverHost never ran; either way, re-attempt on a
+	// throttle so a transient failure doesn't permanently kill observing.
+	// While it is up, refresh the streamed replay path every tick: at
+	// OnGameStart time recording hasn't begun yet, so the path wired then
+	// can predate the recorder's actual file.
+	if (m_currentGame && m_currentGame->isGameInProgress() && AmIHost())
+	{
+		if (!m_observerHost || !m_observerHost->isRunning())
+		{
+			static UnsignedInt s_lastListenRetryMs = 0;
+			UnsignedInt now = timeGetTime();
+			if (s_lastListenRetryMs == 0 || now - s_lastListenRetryMs >= 5000u)
+			{
+				s_lastListenRetryMs = now;
+				LANObsLog("updateObserver: observer listen socket not running; attempting start");
+				startObserverHost();
+			}
+		}
+		else if (TheRecorder)
+		{
+			AsciiString file = RecorderClass::getLastReplayFileName();
+			file.concat(RecorderClass::getReplayExtention());
+			AsciiString full = RecorderClass::getReplayDir();
+			full.concat(file);
+			m_observerHost->setReplayFile(full);
+		}
+	}
+
 	if (m_observerHost && m_observerHost->isRunning())
 	{
 		// Capture up to a handful of names per tick for chat notification.
@@ -1568,6 +1627,55 @@ void LANAPI::updateObserver()
 	if (m_observerClient)
 	{
 		m_observerClient->update();
+
+		// Track byte progress for the stall guard.
+		if (m_observerClient->bytesReceived() != s_observeLastBytes)
+		{
+			s_observeLastBytes      = m_observerClient->bytesReceived();
+			s_observeLastProgressMs = timeGetTime();
+		}
+
+		// A connected host that never sends anything (not even the 4-byte
+		// snapshot header) is as dead as a failed connect; fold it into the
+		// same retry path below by treating it as a failed attempt.
+		Bool stalled = (m_observerClient->state() == LANObserverClient::STATE_BUFFERING
+		    && timeGetTime() - s_observeLastProgressMs > OBS_CLIENT_STALL_TIMEOUT_MS);
+
+		// Connect failed, stream died before playback started, or stalled:
+		// retry the TCP connect (each attempt has its own handshake deadline),
+		// then surface an error dialog instead of silently doing nothing.
+		// STATE_IDLE here means a retry's connect() kickoff itself failed
+		// (socket/file error); treat it like a failed attempt too.
+		if (!m_observerClientPlaybackKicked
+		    && (m_observerClient->state() == LANObserverClient::STATE_CLOSED
+		        || m_observerClient->state() == LANObserverClient::STATE_IDLE
+		        || stalled))
+		{
+			if (s_observeAttemptsLeft > 0 && s_observeConnectPort != 0)
+			{
+				--s_observeAttemptsLeft;
+				LANObsLog("updateObserver: observer connect %s; retrying (%d attempt(s) left)",
+					stalled ? "stalled" : "failed", s_observeAttemptsLeft);
+				OnChat(L"", 0, TheGameText->FETCH_OR_SUBSTITUTE("LAN:ObserveRetrying",
+					L"Observer connection failed; retrying..."), LANCHAT_SYSTEM);
+				AsciiString path = RecorderClass::getReplayDir();
+				path.concat("_live_observer");
+				path.concat(RecorderClass::getReplayExtention());
+				s_observeLastBytes      = 0;
+				s_observeLastProgressMs = timeGetTime();
+				m_observerClient->connect(htonl(s_observeHostIPHostOrder), s_observeConnectPort, path);
+				if (TheRecorder)
+					TheRecorder->setLiveObserverStreamOpen(TRUE);
+				return;
+			}
+			LANObsLog("updateObserver: observer connect failed after all retries; giving up");
+			stopObserverClient();
+			UnicodeString title = TheGameText->fetch("LAN:JoinFailed");
+			UnicodeString body  = TheGameText->FETCH_OR_SUBSTITUTE("LAN:ObserveConnectFailedBody",
+				L"Could not connect to the host's observer stream. Check that the host machine's firewall allows the game and that the host is running the same game version.");
+			MessageBoxOk(title, body, NULL);
+			return;
+		}
 
 		// Periodic snapshot-download progress as a lobby chat line so the user
 		// can see the join is doing something during the catch-up wait, which

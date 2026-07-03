@@ -138,6 +138,14 @@ LAN:ObserveFailedBody
 "Could not start observing the game. The host's replay may be incomplete; try again in a moment."
 END
 
+LAN:ObserveRetrying
+"Observer connection failed; retrying..."
+END
+
+LAN:ObserveConnectFailedBody
+"Could not connect to the host's observer stream. Check that the host machine's firewall allows the game and that the host is running the same game version."
+END
+
 LAN:ObserveMapMissingBody
 "Could not start observing the game. You do not have the map being played and it could not be downloaded."
 END
