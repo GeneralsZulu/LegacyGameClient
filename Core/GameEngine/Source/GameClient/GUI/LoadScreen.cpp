@@ -74,6 +74,10 @@
 #include "GameClient/Keyboard.h"
 #include "GameClient/LoadScreen.h"
 #include "GameClient/MapUtil.h"
+// Zero Hour only: multiplayer loading-screen "battlefield intel" (radarvan).
+#if RTS_ZEROHOUR
+#include "Common/StatsUploader.h"
+#endif
 #include "GameClient/Mouse.h"
 #include "GameClient/Shell.h"
 #include "GameClient/VideoPlayer.h"
@@ -1233,6 +1237,8 @@ MultiPlayerLoadScreen::MultiPlayerLoadScreen()
 	m_portraitLocalGeneral = nullptr;
 	m_featuresLocalGeneral = nullptr;
 	m_nameLocalGeneral = nullptr;
+	m_intelResolved = FALSE;
+	m_intelWaitCalls = 0;
 
 	for(Int i = 0; i < MAX_SLOTS; ++i)
 	{
@@ -1304,6 +1310,18 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 	m_featuresLocalGeneral = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:LocalGeneralFeatures"));
 	AsciiString features = pt->getGeneralFeatures();
 	GadgetStaticTextSetText( m_featuresLocalGeneral, TheGameText->fetch( features.isEmpty() ? "GUI:PlayerObserver" : pt->getGeneralFeatures() ) );
+	// The general-features panel is repurposed as the radarvan "battlefield
+	// intel" area. Show a themed placeholder until the (non-blocking) worker
+	// started at countdown returns; update() swaps in the real intel or a
+	// fallback note. Reset the poll state for this game.
+	m_intelResolved = FALSE;
+	m_intelWaitCalls = 0;
+	if (m_featuresLocalGeneral && !TheGlobalData->m_predictUrl.isEmpty())
+	{
+		UnicodeString awaiting;
+		awaiting.translate(AsciiString("BATTLEFIELD INTEL\nRecon inbound, General..."));
+		GadgetStaticTextSetText( m_featuresLocalGeneral, awaiting );
+	}
 	m_nameLocalGeneral = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:LocalGeneralName"));
 	GadgetStaticTextSetText( m_nameLocalGeneral, localName );
 #endif
@@ -1462,6 +1480,33 @@ void MultiPlayerLoadScreen::update( Int percent )
 	//GadgetProgressBarSetProgress(m_progressBars[TheNetwork->getLocalPlayerID()], percent );
 
 	TheMouse->setCursorTooltip(UnicodeString::TheEmptyString);
+
+#if RTS_ZEROHOUR
+	// Poll the radarvan "battlefield intel" worker (started at countdown) and
+	// drop the result into the general-features panel. Purely display; this
+	// never blocks loading. Once resolved (real intel or fallback) we stop.
+	if (!m_intelResolved && m_featuresLocalGeneral)
+	{
+		++m_intelWaitCalls;
+		AsciiString intelText;
+		if (RadarvanIntelReady(intelText))
+		{
+			UnicodeString u;
+			u.translate(intelText);
+			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			m_intelResolved = TRUE;
+		}
+		else if (!RadarvanIntelPending() || percent >= 100 || m_intelWaitCalls > 3000)
+		{
+			// Worker finished without data, or loading is done and radarvan
+			// never answered in time: show the themed fallback and give up.
+			UnicodeString u;
+			u.translate(AsciiString("BATTLEFIELD INTEL\nRecon uplink is down, General.\nNo intel on this engagement.\nTrust your instincts."));
+			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			m_intelResolved = TRUE;
+		}
+	}
+#endif
 
 	// Do this last!
 	LoadScreen::update( percent );

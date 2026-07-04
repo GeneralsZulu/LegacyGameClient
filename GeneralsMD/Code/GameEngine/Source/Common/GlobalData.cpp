@@ -644,6 +644,9 @@ GlobalData::GlobalData()
 	m_mapDownloadUrl = "https://cncstats.computersrfun.org/get_map_file";
 	m_balanceTeamsUrl = "https://www.radarvan.com/api/balance_teams/";
 	m_mapSummaryUrl = "https://www.radarvan.com/api/map_summary/";
+	m_predictUrl = "https://www.radarvan.com/api/predict";
+	m_teamStatsUrl = "https://www.radarvan.com/api/team_stats/";
+	m_synergyUrl = "https://www.radarvan.com/api/player_ratings/synergy/";
 	m_mapMatchCountsUrl = "https://www.radarvan.com/api/map_match_counts";
 	m_mapVoteUrl = "https://www.radarvan.com/api/map_vote/";
 	m_zuluDebug = FALSE;

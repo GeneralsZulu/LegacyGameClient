@@ -33,10 +33,13 @@
 
 #include <windows.h>
 #include <wininet.h>
+#include <process.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <map>
+#include <vector>
 
 #pragma comment(lib, "wininet.lib")
 
@@ -2032,4 +2035,690 @@ int GetMapMatchCount(const AsciiString& mapCacheKey)
 	if (it == s_mapMatchCounts.end())
 		return 0;
 	return it->second;
+}
+
+// ===========================================================================
+// Multiplayer loading-screen "battlefield intel".
+//
+// Calls radarvan's /api/predict (anchor), /api/team_stats/, and
+// /api/player_ratings/synergy/ on a background thread and distills the
+// results into a short, display-ready blurb. See StatsUploader.h for the
+// public contract; everything below is best-effort and non-blocking.
+// ===========================================================================
+
+// ---- shared state (guarded by s_intelCS) ---------------------------------
+//
+// The engine's global operator new / AsciiString allocate through the
+// (thread-safe, TheDmaCriticalSection-guarded) game allocator, so a worker
+// thread may allocate freely. What is NOT safe is sharing a single
+// AsciiString's copy-on-write buffer across threads: its refCount is bumped
+// without that lock. So nothing here shares an AsciiString across the
+// thread boundary - the job is a plain-C POD, and the result is handed back
+// as a malloc'd C string that each side turns into its own AsciiString.
+static CRITICAL_SECTION s_intelCS;
+static bool s_intelCSInit = false;   // only touched from the main thread
+static bool s_intelPending = false;  // worker running, no result yet
+static bool s_intelReady = false;    // s_intelTextC holds a usable blurb
+static char *s_intelTextC = nullptr; // malloc'd blurb (CRT heap), guarded
+static unsigned long s_intelGen = 0; // bumped per game; stale workers discard
+
+static void ensureIntelCS(void)
+{
+	// Called only from the main thread (RadarvanIntelStart / poll), so this
+	// lazy init needs no lock of its own.
+	if (!s_intelCSInit)
+	{
+		InitializeCriticalSection(&s_intelCS);
+		s_intelCSInit = true;
+	}
+}
+
+// ---- tiny JSON helpers on top of jsonValueStart ---------------------------
+
+// Copy the half-open byte range [b, e) into a fresh AsciiString.
+static AsciiString jsonSubstr(const char *b, const char *e)
+{
+	AsciiString out;
+	if (e <= b)
+		return out;
+	size_t n = (size_t)(e - b);
+	char *buf = (char *)malloc(n + 1);
+	if (buf != nullptr)
+	{
+		memcpy(buf, b, n);
+		buf[n] = '\0';
+		out = buf;
+		free(buf);
+	}
+	return out;
+}
+
+// Parse a (possibly signed/decimal/exponent) JSON number for the given key.
+static bool jsonGetFloat(const char *body, const char *key, double &out)
+{
+	const char *p = jsonValueStart(body, key);
+	if (p == nullptr)
+		return false;
+	char *endp = nullptr;
+	double v = strtod(p, &endp);
+	if (endp == p)
+		return false;
+	out = v;
+	return true;
+}
+
+// Parse a JSON array-of-strings value for the given key into out (appended).
+// Returns true if the key was found and pointed at a '['.
+static bool jsonGetStringArray(const char *body, const char *key,
+                               std::vector<AsciiString> &out)
+{
+	const char *p = jsonValueStart(body, key);
+	if (p == nullptr || *p != '[')
+		return false;
+	++p;
+	for (;;)
+	{
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',')
+			++p;
+		if (*p == ']' || *p == '\0')
+			break;
+		if (*p != '"')
+			break; // not a string array element
+		++p;
+		AsciiString s;
+		while (*p != '\0' && *p != '"')
+		{
+			if (*p == '\\' && p[1] != '\0')
+			{
+				char n = p[1];
+				switch (n)
+				{
+					case 'n':  s.concat('\n'); break;
+					case 't':  s.concat('\t'); break;
+					case 'r':  s.concat('\r'); break;
+					case '"':  s.concat('"');  break;
+					case '\\': s.concat('\\'); break;
+					case '/':  s.concat('/');  break;
+					default:   s.concat(n);    break;
+				}
+				p += 2;
+			}
+			else
+			{
+				s.concat(*p++);
+			}
+		}
+		if (*p == '"')
+			++p;
+		out.push_back(s);
+	}
+	return true;
+}
+
+// Split the top-level object elements ({...}) of the JSON array that begins at
+// or after `arr` (the first '[' found) into `out`. Handles nested objects,
+// arrays, and strings-with-escapes; scalar (non-object) elements are ignored,
+// which is all we need for the radarvan payloads.
+static void jsonSplitObjects(const char *arr, std::vector<AsciiString> &out)
+{
+	if (arr == nullptr)
+		return;
+	const char *p = arr;
+	while (*p != '\0' && *p != '[')
+		++p;
+	if (*p != '[')
+		return;
+	++p;
+	bool inStr = false;
+	int depth = 0;
+	const char *start = nullptr;
+	for (; *p != '\0'; ++p)
+	{
+		char c = *p;
+		if (inStr)
+		{
+			if (c == '\\' && p[1] != '\0')
+				++p;
+			else if (c == '"')
+				inStr = false;
+			continue;
+		}
+		if (c == '"')
+		{
+			inStr = true;
+		}
+		else if (c == '{' || c == '[')
+		{
+			if (c == '{' && depth == 0)
+				start = p;
+			++depth;
+		}
+		else if (c == '}' || c == ']')
+		{
+			if (depth == 0)
+				break; // closing ']' of the outer array
+			--depth;
+			if (depth == 0 && c == '}' && start != nullptr)
+			{
+				out.push_back(jsonSubstr(start, p + 1));
+				start = nullptr;
+			}
+		}
+	}
+}
+
+// Case-insensitive "is name present in the set".
+static bool nameInList(const AsciiString &name, const std::vector<AsciiString> &set)
+{
+	size_t i;
+	for (i = 0; i < set.size(); ++i)
+	{
+		if (set[i].compareNoCase(name) == 0)
+			return true;
+	}
+	return false;
+}
+
+// True when the two name lists are the same set (same size, all present).
+static bool sameNameSet(const std::vector<AsciiString> &a,
+                        const std::vector<AsciiString> &b)
+{
+	if (a.size() != b.size())
+		return false;
+	size_t i;
+	for (i = 0; i < a.size(); ++i)
+	{
+		if (!nameInList(a[i], b))
+			return false;
+	}
+	return true;
+}
+
+// ---- blocking HTTP that returns the response body into a string -----------
+
+// GET or POST `url`; on HTTP 2xx, fills outResp with the body and returns
+// true. Bounds every phase with a timeout so a stalled server can't keep the
+// worker thread (and its WinINet handles) alive indefinitely.
+//
+// url/body are plain C strings (the caller owns them) so nothing crosses the
+// thread boundary as a shared AsciiString. The AsciiString built here for
+// openHttpRequest is worker-local and never escapes, which is safe.
+static bool intelHttpJson(const char *url, const char *method,
+                          const char *body, AsciiString &outResp)
+{
+	outResp.clear();
+	if (url == nullptr || url[0] == '\0')
+		return false;
+
+	AsciiString urlStr;
+	urlStr = url; // fresh, worker-local buffer
+
+	WinInetSession s;
+	if (!openHttpRequest(urlStr, method, nullptr, "Radarvan intel", &s))
+		return false;
+
+	DWORD toConnect = 4000, toSend = 4000, toReceive = 6000;
+	InternetSetOption(s.hRequest, INTERNET_OPTION_CONNECT_TIMEOUT, &toConnect, sizeof(toConnect));
+	InternetSetOption(s.hRequest, INTERNET_OPTION_SEND_TIMEOUT, &toSend, sizeof(toSend));
+	InternetSetOption(s.hRequest, INTERNET_OPTION_RECEIVE_TIMEOUT, &toReceive, sizeof(toReceive));
+
+	const bool hasBody = (body != nullptr && body[0] != '\0');
+	const char *headers = hasBody
+		? "Content-Type: application/json\r\nAccept: application/json\r\n"
+		: "Accept: application/json\r\n";
+	void *bodyPtr = hasBody ? (void *)const_cast<char *>(body) : nullptr;
+	DWORD bodyLen = hasBody ? (DWORD)strlen(body) : 0;
+
+	BOOL sent = HttpSendRequestA(s.hRequest, headers, (DWORD)strlen(headers), bodyPtr, bodyLen);
+	if (!sent)
+	{
+		closeHttpRequest(&s);
+		return false;
+	}
+
+	DWORD statusCode = 0;
+	DWORD statusSize = sizeof(statusCode);
+	HttpQueryInfoA(s.hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+	               &statusCode, &statusSize, nullptr);
+	if (statusCode < 200 || statusCode >= 300)
+	{
+		printf("Radarvan intel: %s -> %lu\n", url, statusCode);
+		closeHttpRequest(&s);
+		return false;
+	}
+
+	// synergy for large formats can run to tens of KB; cap generously.
+	static const DWORD bodyCap = 256 * 1024;
+	char *buf = (char *)malloc(bodyCap);
+	if (buf == nullptr)
+	{
+		closeHttpRequest(&s);
+		return false;
+	}
+	DWORD totalRead = 0;
+	for (;;)
+	{
+		DWORD bytesRead = 0;
+		if (!InternetReadFile(s.hRequest, buf + totalRead, bodyCap - 1 - totalRead, &bytesRead))
+			break;
+		if (bytesRead == 0)
+			break;
+		totalRead += bytesRead;
+		if (totalRead >= bodyCap - 1)
+			break;
+	}
+	buf[totalRead] = '\0';
+	closeHttpRequest(&s);
+	outResp = buf;
+	free(buf);
+	return true;
+}
+
+// ---- composition ----------------------------------------------------------
+
+// Plain-C POD handed to the worker (malloc'd on the main thread, free'd on the
+// worker). No AsciiString/STL members, so nothing is shared across threads.
+// The predict body and the fully-formed synergy URL (query string included)
+// are built on the main thread where AsciiString use is unambiguously safe.
+struct IntelJob
+{
+	char predictUrl[512];
+	char teamStatsUrl[512];
+	char synergyUrl[640];
+	char body[4096];      // prebuilt predict JSON request body
+	int localTeam;
+	unsigned long gen;
+};
+
+struct SynPair
+{
+	bool valid;
+	AsciiString a;
+	AsciiString b;
+	double synergy;
+	double delta;
+	SynPair() : valid(false), synergy(0.0), delta(0.0) {}
+};
+
+// Round a probability/fraction to a signed integer percent.
+static int pctSigned(double frac)
+{
+	return (int)(frac * 100.0 + (frac >= 0.0 ? 0.5 : -0.5));
+}
+
+// Find team_stats' exact-composition record for `team`. Returns true and sets
+// wins/losses when found (teams with <6 games together are simply absent).
+static bool lookupTeamRecord(const char *ts, const std::vector<AsciiString> &team,
+                             int &wins, int &losses)
+{
+	const char *groupsVal = jsonValueStart(ts, "groups");
+	if (groupsVal == nullptr)
+		return false;
+	std::vector<AsciiString> groups;
+	jsonSplitObjects(groupsVal, groups);
+	size_t gi;
+	for (gi = 0; gi < groups.size(); ++gi)
+	{
+		unsigned int size = 0;
+		if (!jsonGetUInt(groups[gi].str(), "size", size) || (int)size != (int)team.size())
+			continue;
+		const char *teamsVal = jsonValueStart(groups[gi].str(), "teams");
+		if (teamsVal == nullptr)
+			continue;
+		std::vector<AsciiString> teams;
+		jsonSplitObjects(teamsVal, teams);
+		size_t ti;
+		for (ti = 0; ti < teams.size(); ++ti)
+		{
+			std::vector<AsciiString> players;
+			jsonGetStringArray(teams[ti].str(), "players", players);
+			if (sameNameSet(players, team))
+			{
+				unsigned int w = 0, l = 0;
+				jsonGetUInt(teams[ti].str(), "wins", w);
+				jsonGetUInt(teams[ti].str(), "losses", l);
+				wins = (int)w;
+				losses = (int)l;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Pick the pair with the largest-magnitude synergy where both players are on
+// `team`. `syn` is the top-level synergy JSON array.
+static void standoutPair(const char *syn, const std::vector<AsciiString> &team, SynPair &best)
+{
+	std::vector<AsciiString> items;
+	jsonSplitObjects(syn, items);
+	size_t i;
+	for (i = 0; i < items.size(); ++i)
+	{
+		AsciiString pa, pb;
+		if (!jsonGetString(items[i].str(), "player_a", pa))
+			continue;
+		if (!jsonGetString(items[i].str(), "player_b", pb))
+			continue;
+		if (!nameInList(pa, team) || !nameInList(pb, team))
+			continue;
+		double synergy = 0.0, delta = 0.0;
+		jsonGetFloat(items[i].str(), "synergy", synergy);
+		jsonGetFloat(items[i].str(), "win_prob_delta", delta);
+		if (!best.valid || fabs(synergy) > fabs(best.synergy))
+		{
+			best.valid = true;
+			best.a = pa;
+			best.b = pb;
+			best.synergy = synergy;
+			best.delta = delta;
+		}
+	}
+}
+
+// Append one team's block ("<LABEL>  W-L" plus an optional standout-duo line).
+static void appendTeamBlock(AsciiString &out, const char *label,
+                            bool haveRecord, int wins, int losses, const SynPair &pair)
+{
+	char line[160];
+	if (haveRecord)
+		sprintf(line, "%s  %d-%d", label, wins, losses);
+	else
+		sprintf(line, "%s  untested lineup", label);
+	out.concat(line);
+	out.concat('\n');
+	if (pair.valid)
+	{
+		const char *tag = (pair.synergy >= 0.0) ? "spark" : "drag";
+		char l2[192];
+		sprintf(l2, "  %s: %s & %s %+d%%", tag, pair.a.str(), pair.b.str(), pctSigned(pair.delta));
+		out.concat(l2);
+		out.concat('\n');
+	}
+}
+
+// Do the calls and build the blurb. Returns "" when there's nothing worth
+// showing (predict URL empty / predict failed / not two teams) so the caller
+// falls back to the themed "recon down" note.
+static AsciiString composeIntel(const IntelJob &job)
+{
+	if (job.predictUrl[0] == '\0' || job.body[0] == '\0')
+		return AsciiString();
+
+	// ---- 1) predict (anchor); body was prebuilt on the main thread ----
+	AsciiString predictResp;
+	if (!intelHttpJson(job.predictUrl, "POST", job.body, predictResp))
+		return AsciiString();
+
+	unsigned int favoredTeam = 0;
+	double favoredProb = 0.0;
+	AsciiString mapName;
+	std::vector<AsciiString> teamA, teamB, unknown;
+	jsonGetString(predictResp.str(), "map_name", mapName);
+	jsonGetUInt(predictResp.str(), "favored_team", favoredTeam);
+	jsonGetFloat(predictResp.str(), "favored_win_prob", favoredProb);
+	jsonGetStringArray(predictResp.str(), "team_a_players", teamA);
+	jsonGetStringArray(predictResp.str(), "team_b_players", teamB);
+	jsonGetStringArray(predictResp.str(), "unknown_players", unknown);
+	if (teamA.empty() || teamB.empty())
+		return AsciiString(); // not a two-team match / unexpected shape
+
+	// ---- 2) team_stats: full-lineup record per team ----
+	int aW = 0, aL = 0, bW = 0, bL = 0;
+	bool aHaveRec = false, bHaveRec = false;
+	if (job.teamStatsUrl[0] != '\0')
+	{
+		AsciiString tsResp;
+		if (intelHttpJson(job.teamStatsUrl, "GET", nullptr, tsResp))
+		{
+			aHaveRec = lookupTeamRecord(tsResp.str(), teamA, aW, aL);
+			bHaveRec = lookupTeamRecord(tsResp.str(), teamB, bW, bL);
+		}
+	}
+
+	// ---- 3) synergy: standout duo per team (URL prebuilt with query) ----
+	SynPair aPair, bPair;
+	if (job.synergyUrl[0] != '\0')
+	{
+		AsciiString synResp;
+		if (intelHttpJson(job.synergyUrl, "GET", nullptr, synResp))
+		{
+			standoutPair(synResp.str(), teamA, aPair);
+			standoutPair(synResp.str(), teamB, bPair);
+		}
+	}
+
+	// ---- 4) compose ----
+	AsciiString out;
+	out.concat("BATTLEFIELD INTEL\n");
+
+	int oddsPct = pctSigned(favoredProb);
+	char oddsLine[128];
+	if (job.localTeam == 1 || job.localTeam == 2)
+	{
+		const char *who = (favoredTeam == (unsigned int)job.localTeam) ? "your side" : "the enemy";
+		sprintf(oddsLine, "Victory odds: %d%% - %s", oddsPct, who);
+	}
+	else
+	{
+		sprintf(oddsLine, "Odds favor Team %u - %d%%", favoredTeam, oddsPct);
+	}
+	out.concat(oddsLine);
+	out.concat('\n');
+
+	if (!mapName.isEmpty())
+	{
+		out.concat(mapName);
+		out.concat('\n');
+	}
+	out.concat('\n');
+
+	const char *labA;
+	const char *labB;
+	if (job.localTeam == 1) { labA = "YOUR SQUAD"; labB = "ENEMY"; }
+	else if (job.localTeam == 2) { labA = "ENEMY"; labB = "YOUR SQUAD"; }
+	else { labA = "TEAM 1"; labB = "TEAM 2"; }
+
+	appendTeamBlock(out, labA, aHaveRec, aW, aL, aPair);
+	appendTeamBlock(out, labB, bHaveRec, bW, bL, bPair);
+
+	if (!unknown.empty())
+	{
+		AsciiString u = "Unranked: ";
+		size_t k;
+		for (k = 0; k < unknown.size(); ++k)
+		{
+			if (k > 0)
+				u.concat(", ");
+			u.concat(unknown[k]);
+		}
+		out.concat(u);
+		out.concat('\n');
+	}
+
+	return out;
+}
+
+static unsigned __stdcall intelThreadProc(void *arg)
+{
+	IntelJob *job = (IntelJob *)arg;
+	AsciiString blurb = composeIntel(*job); // worker-local AsciiString
+
+	// Publish a private malloc'd copy of the text so no AsciiString buffer is
+	// shared with the main thread. `blurb` (worker-local) is destroyed here.
+	char *copy = nullptr;
+	if (!blurb.isEmpty())
+	{
+		size_t n = (size_t)blurb.getLength();
+		copy = (char *)malloc(n + 1);
+		if (copy != nullptr)
+			memcpy(copy, blurb.str(), n + 1);
+	}
+
+	EnterCriticalSection(&s_intelCS);
+	if (job->gen == s_intelGen) // ignore results from a superseded game
+	{
+		if (s_intelTextC != nullptr)
+			free(s_intelTextC);
+		s_intelTextC = copy;
+		s_intelReady = (copy != nullptr);
+		s_intelPending = false;
+	}
+	else if (copy != nullptr)
+	{
+		free(copy); // superseded; discard
+	}
+	LeaveCriticalSection(&s_intelCS);
+
+	free(job); // POD, malloc'd on the main thread
+	return 0;
+}
+
+void RadarvanIntelReset(void)
+{
+	ensureIntelCS();
+	EnterCriticalSection(&s_intelCS);
+	++s_intelGen; // any in-flight worker's result will now be discarded
+	s_intelPending = false;
+	s_intelReady = false;
+	if (s_intelTextC != nullptr)
+	{
+		free(s_intelTextC);
+		s_intelTextC = nullptr;
+	}
+	LeaveCriticalSection(&s_intelCS);
+}
+
+void RadarvanIntelStart(const AsciiString& predictUrl,
+                        const AsciiString& teamStatsUrl,
+                        const AsciiString& synergyUrl,
+                        const AsciiString& mapName,
+                        int localTeam,
+                        const std::vector<MapSummaryPlayer>& players)
+{
+	ensureIntelCS();
+
+	// Fresh game: clear stale state and claim a new generation. If a previous
+	// worker is still running its result is discarded via the gen check.
+	EnterCriticalSection(&s_intelCS);
+	++s_intelGen;
+	unsigned long gen = s_intelGen;
+	s_intelReady = false;
+	s_intelPending = false;
+	if (s_intelTextC != nullptr)
+	{
+		free(s_intelTextC);
+		s_intelTextC = nullptr;
+	}
+	LeaveCriticalSection(&s_intelCS);
+
+	// Nothing to fetch without the anchor call or a roster.
+	if (predictUrl.isEmpty() || players.empty())
+		return;
+
+	// Build everything the worker needs into a plain-C POD here on the main
+	// thread, where AsciiString use is unambiguously safe. The worker only
+	// ever reads these char buffers (no shared AsciiString crosses threads).
+	IntelJob *job = (IntelJob *)malloc(sizeof(IntelJob));
+	if (job == nullptr)
+		return;
+	memset(job, 0, sizeof(IntelJob));
+	job->localTeam = localTeam;
+	job->gen = gen;
+
+	// Prebuild the predict request body: {"map_name":"...","players":[...]}.
+	AsciiString body;
+	body.concat("{\"map_name\":\"");
+	appendJsonEscaped(body, mapName.isEmpty() ? "" : mapName.str());
+	body.concat("\",\"players\":[");
+	size_t i;
+	int teamSizes[2];
+	int teamNums[2];
+	int distinctTeams = 0;
+	for (i = 0; i < players.size(); ++i)
+	{
+		if (i > 0)
+			body.concat(',');
+		body.concat("{\"name\":\"");
+		appendJsonEscaped(body, players[i].name.isEmpty() ? "" : players[i].name.str());
+		char gb[64];
+		sprintf(gb, "\",\"general\":%d,\"team\":%d}", players[i].general, players[i].team);
+		body.concat(gb);
+		// track team sizes so we can derive the synergy game_format (NvN)
+		int t = players[i].team;
+		int d;
+		bool found = false;
+		for (d = 0; d < distinctTeams; ++d)
+			if (teamNums[d] == t) { ++teamSizes[d]; found = true; break; }
+		if (!found && distinctTeams < 2)
+		{
+			teamNums[distinctTeams] = t;
+			teamSizes[distinctTeams] = 1;
+			++distinctTeams;
+		}
+	}
+	body.concat("]}");
+	strncpy(job->body, body.str(), sizeof(job->body) - 1);
+
+	strncpy(job->predictUrl, predictUrl.str(), sizeof(job->predictUrl) - 1);
+	if (!teamStatsUrl.isEmpty())
+		strncpy(job->teamStatsUrl, teamStatsUrl.str(), sizeof(job->teamStatsUrl) - 1);
+
+	// synergy only applies to a symmetric NvN; prebuild its URL (with query)
+	// only then. Otherwise leave it empty so the worker skips synergy.
+	if (!synergyUrl.isEmpty() && distinctTeams == 2 && teamSizes[0] == teamSizes[1])
+	{
+		const char *sep = (strchr(synergyUrl.str(), '?') != nullptr) ? "&" : "?";
+		char full[640];
+		_snprintf(full, sizeof(full) - 1,
+		          "%s%sgame_format=%dv%d&min_games_together=1",
+		          synergyUrl.str(), sep, teamSizes[0], teamSizes[0]);
+		full[sizeof(full) - 1] = '\0';
+		strncpy(job->synergyUrl, full, sizeof(job->synergyUrl) - 1);
+	}
+
+	EnterCriticalSection(&s_intelCS);
+	s_intelPending = true;
+	LeaveCriticalSection(&s_intelCS);
+
+	// _beginthreadex returns the handle as an integer type; VC6 has no
+	// uintptr_t, so capture it straight into a HANDLE.
+	unsigned threadId = 0;
+	HANDLE hThread = (HANDLE)_beginthreadex(nullptr, 0, intelThreadProc, job, 0, &threadId);
+	if (hThread == NULL)
+	{
+		// Couldn't spawn; roll back so the caller shows the fallback.
+		EnterCriticalSection(&s_intelCS);
+		s_intelPending = false;
+		LeaveCriticalSection(&s_intelCS);
+		free(job);
+		return;
+	}
+	CloseHandle(hThread); // detached; it writes into the guarded statics
+}
+
+bool RadarvanIntelReady(AsciiString& outText)
+{
+	if (!s_intelCSInit)
+		return false;
+	bool ready = false;
+	EnterCriticalSection(&s_intelCS);
+	if (s_intelReady && s_intelTextC != nullptr)
+	{
+		outText = s_intelTextC; // main-thread AsciiString from a C string copy
+		ready = true;
+	}
+	LeaveCriticalSection(&s_intelCS);
+	return ready;
+}
+
+bool RadarvanIntelPending(void)
+{
+	if (!s_intelCSInit)
+		return false;
+	bool pending;
+	EnterCriticalSection(&s_intelCS);
+	pending = s_intelPending;
+	LeaveCriticalSection(&s_intelCS);
+	return pending;
 }

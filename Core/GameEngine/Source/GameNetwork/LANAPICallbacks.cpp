@@ -49,6 +49,13 @@
 #include "GameNetwork/MapDownloadHook.h"
 #include "GameNetwork/networkutil.h"
 
+// Zero Hour only: the multiplayer loading-screen "battlefield intel" panel.
+// StatsUploader (and the radarvan endpoints it talks to) live in the Zero Hour
+// tree, so gate the include and the trigger on the ZH build.
+#if RTS_ZEROHOUR
+#include "Common/StatsUploader.h"
+#endif
+
 LANAPI *TheLAN = nullptr;
 extern Bool LANbuttonPushed;
 
@@ -174,6 +181,119 @@ void LANAPI::OnHasMap( UnsignedInt playerIP, Bool status )
 	}
 }
 
+#if RTS_ZEROHOUR
+// Have we already kicked off the intel fetch for the current start attempt?
+// Set when the countdown timer starts, cleared when the game actually starts,
+// so the timer + start pair only fires one worker.
+static Bool s_lanIntelFired = FALSE;
+
+// Build the roster from the current game and fire the (non-blocking) radarvan
+// intel worker for the multiplayer load screen. Requires a clean two-team
+// game; anything else (free-for-all, unteamed slots) just resets the intel
+// state so the load screen shows the themed fallback instead.
+static void startLanBattlefieldIntel(GameInfo *game)
+{
+	if (game == NULL)
+	{
+		RadarvanIntelReset();
+		return;
+	}
+
+	std::vector<MapSummaryPlayer> roster;
+	Int localTeam = 0;
+	Int localSlot = game->getLocalSlotNum();
+	Int i;
+	for (i = 0; i < MAX_SLOTS; ++i)
+	{
+		const GameSlot *slot = game->getConstSlot(i);
+		if (!slot || !slot->isOccupied())
+			continue;
+		if (slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+			continue;
+		MapSummaryPlayer entry;
+		entry.name.translate(slot->getName());
+		if (slot->isAI())
+		{
+			// AI names carry spaces ("Easy AI"); strip them so the server sees
+			// a single token, matching how map_summary sends AI slots.
+			AsciiString joined;
+			for (const char *p = entry.name.str(); *p != '\0'; ++p)
+			{
+				if (*p != ' ')
+					joined.concat(*p);
+			}
+			entry.name = joined;
+		}
+		if (entry.name.isEmpty())
+			continue;
+		entry.general = slot->getPlayerTemplate();
+		// predict wants 1-based teams (0 = no team). getTeamNumber() is 0-based
+		// with -1 = "no team", so a clean NvN maps to 1..N here.
+		entry.team = slot->getTeamNumber() + 1;
+		roster.push_back(entry);
+		if (i == localSlot)
+			localTeam = entry.team;
+	}
+
+	// Require exactly two distinct teams, all teamed (no team-0 entries):
+	// predict only handles two-team matches, and synergy/team_stats are team
+	// concepts. Free-for-alls just get the fallback note.
+	Int teamValues[MAX_SLOTS];
+	Int distinct = 0;
+	Bool hasUnteamed = FALSE;
+	size_t r;
+	for (r = 0; r < roster.size(); ++r)
+	{
+		Int t = roster[r].team;
+		if (t <= 0) { hasUnteamed = TRUE; break; }
+		Bool seen = FALSE;
+		Int d;
+		for (d = 0; d < distinct; ++d)
+			if (teamValues[d] == t) { seen = TRUE; break; }
+		if (!seen && distinct < MAX_SLOTS)
+			teamValues[distinct++] = t;
+	}
+	if (hasUnteamed || distinct != 2 || roster.size() < 2)
+	{
+		RadarvanIntelReset();
+		return;
+	}
+
+	// Map name: prefer the .map's display name (what players see), stripped of
+	// the trailing " (N)" player-count suffix and lowercased, matching what
+	// map_summary sends so the server keys on the same identifier.
+	AsciiString mapName;
+	if (TheMapCache)
+	{
+		const MapMetaData *md = TheMapCache->findMap(game->getMap());
+		if (md && !md->m_displayName.isEmpty())
+			mapName.translate(md->m_displayName);
+	}
+	const char *ms = mapName.str();
+	Int mlen = mapName.getLength();
+	if (mlen >= 4 && ms[mlen - 1] == ')')
+	{
+		Int mi = mlen - 2;
+		while (mi > 0 && ms[mi] >= '0' && ms[mi] <= '9')
+			--mi;
+		if (mi >= 1 && ms[mi] == '(' && ms[mi - 1] == ' ' && mi != mlen - 2)
+		{
+			AsciiString trimmed;
+			Int j;
+			for (j = 0; j < mi - 1; ++j)
+				trimmed.concat(ms[j]);
+			mapName = trimmed;
+		}
+	}
+	mapName.toLower();
+
+	RadarvanIntelStart(TheGlobalData->m_predictUrl,
+	                   TheGlobalData->m_teamStatsUrl,
+	                   TheGlobalData->m_synergyUrl,
+	                   mapName, localTeam, roster);
+}
+#endif // RTS_ZEROHOUR
+
 void LANAPI::OnGameStartTimer( Int seconds )
 {
 	UnicodeString text;
@@ -182,12 +302,32 @@ void LANAPI::OnGameStartTimer( Int seconds )
 	else
 		text.format(TheGameText->fetch("LAN:GameStartTimerPlural"), seconds);
 	OnChat(L"SYSTEM", m_localIP, text, LANCHAT_SYSTEM);
+
+#if RTS_ZEROHOUR
+	// Countdown has begun on this client: fire the intel fetch now so it has
+	// the whole countdown + load time to come back. Guard so the follow-up
+	// OnGameStart() doesn't start a second worker.
+	if (!s_lanIntelFired)
+	{
+		startLanBattlefieldIntel(m_currentGame);
+		s_lanIntelFired = TRUE;
+	}
+#endif
 }
 
 void LANAPI::OnGameStart()
 {
 	//DEBUG_LOG(("Map is '%s', preview is '%s'", m_currentGame->getMap().str(), GetPreviewFromMap(m_currentGame->getMap()).str()));
 	//DEBUG_LOG(("Map is '%s', INI is '%s'", m_currentGame->getMap().str(), GetINIFromMap(m_currentGame->getMap()).str()));
+
+#if RTS_ZEROHOUR
+	// Immediate start (countdown of 0) never fires OnGameStartTimer, so kick
+	// the intel fetch here if it hasn't run yet. Either way, clear the guard
+	// so the next game starts fresh.
+	if (!s_lanIntelFired)
+		startLanBattlefieldIntel(m_currentGame);
+	s_lanIntelFired = FALSE;
+#endif
 
 	if (m_currentGame)
 	{
