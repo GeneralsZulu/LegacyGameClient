@@ -127,6 +127,9 @@ public:
 	// URL to POST compressed stats JSON after export.
 	AsciiString m_statsUrl;
 
+	// Path to a JSON-lines per-replay result log written by batch replay simulation.
+	AsciiString m_replayResultLog;
+
 	// URL to POST the replay file after stats are uploaded.
 	AsciiString m_replayUrl;
 

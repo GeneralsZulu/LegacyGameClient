@@ -32,6 +32,7 @@
 #include "Common/BitFlagsIO.h"
 #include "Common/Player.h"
 #include "Common/Xfer.h"
+#include "Common/Recorder.h"
 #include "Common/GameAudio.h"
 #include "Common/MiscAudio.h"
 #include "GameClient/Anim2D.h"
@@ -168,8 +169,13 @@ Bool CrateCollide::isValidToExecute( const Object *other ) const
 		return FALSE;
 
 	// Prevent the crate from being collected multiple times in a single frame.
-	if (getObject()->isDestroyed() && !md->m_allowMultiPickup)
-		return FALSE;
+	// Introduced in 1.2.8; older replays had no such guard, so gate on the epoch
+	// to keep those replays deterministic.
+	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V128))
+	{
+		if (getObject()->isDestroyed() && !md->m_allowMultiPickup)
+			return FALSE;
+	}
 
 	if( md->m_isForbidOwnerPlayer  &&  (getObject()->getControllingPlayer() == other->getControllingPlayer()) )
 		return FALSE; // Design has decreed this to not be picked up by the dead guy's team.

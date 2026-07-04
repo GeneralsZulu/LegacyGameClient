@@ -175,6 +175,30 @@ public:
 	// for that feature version.
 	Bool isAIFeatureEnabled(UnsignedInt featureVersion) const;
 
+	// TheSuperHackers @feature Replay determinism epochs. Some sim behaviors
+	// changed across Zulu versions WITHOUT being gated by the AI-feature block
+	// above (they shipped ungated), so old replays don't carry a flag to
+	// disable them. To re-simulate an old replay bit-exactly on a newer binary,
+	// we derive a monotonic "epoch" from the replay's recorded version (header
+	// version string, or the -replayEpoch override) and gate each divergent
+	// path on it. Higher = newer behavior; CURRENT during live play/recording.
+	enum ReplayEpoch
+	{
+		REPLAY_EPOCH_RETAIL = 0, ///< retail 1.04 / Zulu <= 1.2.0
+		REPLAY_EPOCH_V121   = 1, ///< 1.2.1+: create-team processed at network frame for all players
+		REPLAY_EPOCH_V128   = 2, ///< 1.2.8+: poison/flame XP source, crate multi-pickup guard, scaffold-resume-on-dead-builder
+		REPLAY_EPOCH_V130   = 3, ///< 1.3.0+: AISkirmishPlayer surrender directive
+		REPLAY_EPOCH_CURRENT = REPLAY_EPOCH_V130
+	};
+	// The epoch to simulate. CURRENT during live play/recording; during playback
+	// it is the recorded version's epoch (override or auto-detected).
+	ReplayEpoch getReplayEpoch() const;
+	// True if the behavior introduced at 'epoch' should run this frame.
+	Bool isReplayEpochAtLeast(ReplayEpoch epoch) const { return getReplayEpoch() >= epoch; }
+	// Command-line override (-replayEpoch); <0 means "auto-detect from header".
+	static void setReplayEpochOverride(Int epoch) { s_replayEpochOverride = epoch; }
+	static Int getReplayEpochOverride() { return s_replayEpochOverride; }
+
 	Int getGameMode() { return m_originalGameMode; }
 
 	void logPlayerDisconnect(UnicodeString player, Int slot);
@@ -233,6 +257,9 @@ protected:
 	Int m_resumeSavedNetFrameRate;									///< During RESUME_CATCHUP, the network's logic frame rate at start so we can restore at handoff.
 
 	UnsignedInt m_replayAIFeatureVersion;						///< CURRENT for live games; loaded from the replay's extension block during playback.
+
+	ReplayEpoch m_replayEpoch;										///< CURRENT for live games; derived from the replay's recorded version during playback.
+	static Int s_replayEpochOverride;								///< -replayEpoch command-line override; <0 = auto-detect from header.
 
 	// LIVE_OBSERVER state. m_liveObserverStreamOpen is owned by the observer
 	// network client and tells us whether to expect more bytes after EOF.

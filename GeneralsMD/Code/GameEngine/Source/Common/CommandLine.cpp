@@ -30,6 +30,7 @@
 #include "Common/CRCDebug.h"
 #include "Common/LocalFileSystem.h"
 #include "Common/Recorder.h"
+#include "Common/ReplaySimulation.h"
 #include "Common/version.h"
 #include "GameClient/ClientInstance.h"
 #include "GameClient/TerrainVisual.h" // for TERRAIN_LOD_MIN definition
@@ -454,6 +455,42 @@ Int parseStatsUrl(char *args[], int num)
 	if (num > 1)
 	{
 		TheWritableGlobalData->m_statsUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
+// TheSuperHackers @feature Path to a JSON-lines file that batch replay
+// simulation appends a per-replay verdict to (OK / DESYNC / INCOMPLETE /
+// CANT_OPEN). Forwarded to worker processes when using -jobs.
+Int parseResultLog(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_replayResultLog = args[1];
+		return 2;
+	}
+	return 1;
+}
+
+// TheSuperHackers @feature Force the replay determinism epoch for playback so a
+// modern binary re-simulates an older replay bit-exactly. Accepts a name
+// (retail / v121 / v128 / v130 / current) or the numeric enum value. Without
+// this, the epoch is auto-detected from the replay's recorded version string
+// (which fails for retail "Version 1.04" and dev builds, so pass it for those).
+Int parseReplayEpoch(char *args[], int num)
+{
+	if (num > 1)
+	{
+		AsciiString a = args[1];
+		Int epoch = -1;
+		if (a.compareNoCase("retail") == 0)       epoch = RecorderClass::REPLAY_EPOCH_RETAIL;
+		else if (a.compareNoCase("v121") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V121;
+		else if (a.compareNoCase("v128") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V128;
+		else if (a.compareNoCase("v130") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V130;
+		else if (a.compareNoCase("current") == 0) epoch = RecorderClass::REPLAY_EPOCH_CURRENT;
+		else                                      epoch = atoi(a.str());
+		RecorderClass::setReplayEpochOverride(epoch);
 		return 2;
 	}
 	return 1;
@@ -1174,6 +1211,12 @@ Int parseMod(char *args[], Int num)
 
 		if (!TheLocalFileSystem->doesFileExist(modPath.str()))
 		{
+			// TheSuperHackers @tweak Be loud about a bad -mod path: in release
+			// builds DEBUG_LOG is compiled out and the game silently continues on
+			// retail-only data, which corrupts batch replay reprocessing results
+			// (replays fail to open or simulate against the wrong INIs).
+			printf("ERROR: -mod path '%s' does not exist; continuing WITHOUT mod data\n", modPath.str());
+			fflush(stdout);
 			DEBUG_LOG(("Mod does not exist."));
 			return 2; // no such file/dir.
 		}
@@ -1182,6 +1225,8 @@ Int parseMod(char *args[], Int num)
 		struct _stat statBuf;
 		if (_stat(modPath.str(), &statBuf) != 0)
 		{
+			printf("ERROR: -mod path '%s' could not be stat'd; continuing WITHOUT mod data\n", modPath.str());
+			fflush(stdout);
 			DEBUG_LOG(("Could not _stat() mod."));
 			return 2; // could not stat the file/dir.
 		}
@@ -1273,6 +1318,17 @@ static CommandLineParam paramsForStartup[] =
 	// URL to POST gzipped stats JSON after export. Defaults to the project
 	// stats endpoint; pass an empty string ("") to skip upload.
 	{ "-statsUrl", parseStatsUrl },
+
+	// Path to a JSON-lines result log for batch replay simulation. Each replay
+	// appends one line with its verdict (OK / DESYNC / INCOMPLETE / CANT_OPEN),
+	// frame counts, and whether stats were exported. Stats are only exported/
+	// uploaded for OK replays.
+	{ "-resultLog", parseResultLog },
+
+	// Force the replay determinism epoch (retail/v121/v128/v130/current or the
+	// numeric value) so a modern binary re-simulates an older replay bit-exactly.
+	// Auto-detected from the replay version when omitted.
+	{ "-replayEpoch", parseReplayEpoch },
 
 	// URL to POST the replay file after stats are uploaded. Defaults to
 	// the project replay endpoint; pass an empty string ("") to skip.

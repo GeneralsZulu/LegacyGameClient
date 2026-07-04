@@ -47,7 +47,66 @@ int countProcessesRunning(const std::vector<WorkerProcess>& processes)
 	}
 	return numProcessesRunning;
 }
+
+// Minimal JSON string escaper: escapes the characters that would otherwise
+// break a JSON string literal. Windows replay paths contain backslashes, so
+// this matters. Not a general-purpose escaper; sufficient for filenames.
+AsciiString escapeJsonString(const AsciiString &in)
+{
+	AsciiString out;
+	const char *s = in.str();
+	for (; *s; ++s)
+	{
+		char c = *s;
+		switch (c)
+		{
+			case '\\': out.concat("\\\\"); break;
+			case '\"': out.concat("\\\""); break;
+			case '\n': out.concat("\\n"); break;
+			case '\r': out.concat("\\r"); break;
+			case '\t': out.concat("\\t"); break;
+			default:
+			{
+				char buf[2] = { c, 0 };
+				out.concat(buf);
+				break;
+			}
+		}
+	}
+	return out;
+}
 } // namespace
+
+void ReplaySimulation::appendResultLogEntry(const AsciiString &filename, const char *verdict,
+	UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch)
+{
+	const AsciiString &logPath = TheGlobalData->m_replayResultLog;
+	if (logPath.isEmpty())
+		return;
+
+	// Append mode so that concurrent worker processes each contribute their
+	// own line. Single small writes keep interleaving to whole lines in
+	// practice. Open/close per line so a crash mid-batch still flushes prior
+	// results to disk.
+	FILE *fp = fopen(logPath.str(), "a");
+	if (fp == NULL)
+	{
+		printf("[resultLog] ERROR: could not open %s for append\n", logPath.str());
+		fflush(stdout);
+		return;
+	}
+
+	fprintf(fp,
+		"{\"file\":\"%s\",\"verdict\":\"%s\",\"framesPlayed\":%u,\"framesExpected\":%u,\"epoch\":%d,\"statsExported\":%s}\n",
+		escapeJsonString(filename).str(),
+		verdict,
+		framesPlayed,
+		framesExpected,
+		epoch,
+		statsExported ? "true" : "false");
+
+	fclose(fp);
+}
 
 int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString> &filenames)
 {
@@ -82,12 +141,22 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 		AsciiString filename = filenames[i];
 		printf("Simulating Replay \"%s\"\n", filename.str());
 		fflush(stdout);
+		// TheSuperHackers @feature Crash-safety marker. A desync corrupts the
+		// game state, and with crash-handling compiled out the next UPDATE()
+		// can hard-crash mid-frame before we get to write the final verdict.
+		// Write a STARTED line up front so a crashed replay still leaves a
+		// trace: post-processing treats a file whose last line is STARTED as a
+		// crash (usually a hard desync). A clean/desynced run appends a final
+		// line that supersedes it.
+		appendResultLogEntry(filename, "STARTED", 0, 0, FALSE, -1);
 		DWORD startTimeMillis = GetTickCount();
 		if (TheGlobalData->m_exportStats)
 			StatsExporterBeginRecording();
 		if (TheRecorder->simulateReplay(filename))
 		{
-			UnsignedInt totalTimeSec = TheRecorder->getPlaybackFrameCount() / LOGICFRAMES_PER_SECOND;
+			UnsignedInt framesExpected = TheRecorder->getPlaybackFrameCount();
+			UnsignedInt totalTimeSec = framesExpected / LOGICFRAMES_PER_SECOND;
+			Bool desynced = FALSE;
 			while (TheRecorder->isPlaybackInProgress())
 			{
 				TheGameClient->updateHeadless();
@@ -103,26 +172,54 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 					fflush(stdout);
 				}
 				TheGameLogic->UPDATE();
-				if (TheGlobalData->m_exportStats)
-					StatsExporterCollectSnapshot();
+				// Check for desync BEFORE snapshotting: after a mismatch the game
+				// state is diverged/garbage, so collecting a stats snapshot from
+				// it is both useless and crash-prone.
 				if (TheRecorder->sawCRCMismatch())
 				{
+					desynced = TRUE;
 					numErrors++;
 					break;
 				}
+				if (TheGlobalData->m_exportStats)
+					StatsExporterCollectSnapshot();
 			}
-			UnsignedInt gameTimeSec = TheGameLogic->getFrame() / LOGICFRAMES_PER_SECOND;
+			UnsignedInt framesPlayed = TheGameLogic->getFrame();
+			UnsignedInt gameTimeSec = framesPlayed / LOGICFRAMES_PER_SECOND;
 			UnsignedInt realTimeSec = (GetTickCount()-startTimeMillis) / 1000;
 			printf("Elapsed Time: %02d:%02d Game Time: %02d:%02d/%02d:%02d\n",
 					realTimeSec/60, realTimeSec%60, gameTimeSec/60, gameTimeSec%60, totalTimeSec/60, totalTimeSec%60);
 			fflush(stdout);
-			if (TheGlobalData->m_exportStats)
+
+			// Classify the outcome. The playback loop only exits by finishing
+			// (isPlaybackInProgress() == false) or by breaking on a CRC
+			// mismatch, so a clean run that reached the recorded frame count is
+			// OK; anything short without a mismatch is treated as INCOMPLETE
+			// (allow a 1-second slack for benign end-of-replay off-by-a-few).
+			const Bool incomplete = !desynced && framesExpected != 0
+				&& framesPlayed + LOGICFRAMES_PER_SECOND < framesExpected;
+			const Bool isOk = !desynced && !incomplete;
+			const char *verdict = desynced ? "DESYNC" : (incomplete ? "INCOMPLETE" : "OK");
+
+			// TheSuperHackers @feature Only export/upload stats for a clean,
+			// complete simulation. A desynced or truncated playback produces a
+			// divergent (garbage) game state, so its stats must never reach
+			// cncstats.
+			Bool statsExported = FALSE;
+			if (TheGlobalData->m_exportStats && isOk)
+			{
 				ExportGameStatsJSON(TheRecorder->getReplayDir(), filename);
+				statsExported = TRUE;
+			}
+
+			appendResultLogEntry(filename, verdict, framesPlayed, framesExpected, statsExported,
+				(Int)TheRecorder->getReplayEpoch());
 		}
 		else
 		{
 			printf("Cannot open replay\n");
 			numErrors++;
+			appendResultLogEntry(filename, "CANT_OPEN", 0, 0, FALSE, -1);
 		}
 	}
 	if (filenames.size() > 1)
@@ -192,6 +289,39 @@ int ReplaySimulation::simulateReplaysInWorkerProcesses(const std::vector<AsciiSt
 				command.concat(L" -statsUrl \"");
 				command.concat(statsUrlWide);
 				command.concat(L"\"");
+			}
+			// Forward the result-log path so each worker appends its own verdict line.
+			if (!TheGlobalData->m_replayResultLog.isEmpty())
+			{
+				UnicodeString resultLogWide;
+				resultLogWide.translate(TheGlobalData->m_replayResultLog);
+				command.concat(L" -resultLog \"");
+				command.concat(resultLogWide);
+				command.concat(L"\"");
+			}
+			// Forward -mod so workers mount the same data set as this process.
+			// Without this, workers run on retail-only data: replays referencing
+			// mod-only content (e.g. Zulu color indices 8+) fail to open, and the
+			// ones that do open simulate against the wrong INIs and desync.
+			// parseMod stores the path fully resolved, so it is safe to pass on.
+			const AsciiString &modPath = !TheGlobalData->m_modBIG.isEmpty()
+				? TheGlobalData->m_modBIG
+				: TheGlobalData->m_modDir;
+			if (!modPath.isEmpty())
+			{
+				UnicodeString modPathWide;
+				modPathWide.translate(modPath);
+				command.concat(L" -mod \"");
+				command.concat(modPathWide);
+				command.concat(L"\"");
+			}
+			// Forward the -replayEpoch override, otherwise workers silently fall
+			// back to auto-detection from each replay's header.
+			if (RecorderClass::getReplayEpochOverride() >= 0)
+			{
+				UnicodeString epochWide;
+				epochWide.format(L" -replayEpoch %d", RecorderClass::getReplayEpochOverride());
+				command.concat(epochWide);
 			}
 
 			processes.push_back(WorkerProcess());

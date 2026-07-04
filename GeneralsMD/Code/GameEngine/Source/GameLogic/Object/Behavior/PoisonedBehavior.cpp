@@ -31,6 +31,7 @@
 // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 #include "Common/Xfer.h"
+#include "Common/Recorder.h"
 #include "GameClient/Drawable.h"
 #include "GameLogic/Module/PoisonedBehavior.h"
 #include "GameLogic/Damage.h"
@@ -159,8 +160,11 @@ void PoisonedBehavior::startPoisonedEffects( const DamageInfo *damageInfo )
 
 	// We are going to take the damage dealt by the original poisoner every so often for a while.
 	m_poisonDamageAmount = damageInfo->out.m_actualDamageDealt;
-	// Allow poison damage to award xp to the poison source.
-	m_poisonSource = damageInfo->in.m_sourceID;
+	// Allow poison damage to award xp to the poison source. Introduced in 1.2.8;
+	// older replays left m_poisonSource = INVALID_ID here, so gate on the epoch
+	// to keep those replays deterministic.
+	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V128))
+		m_poisonSource = damageInfo->in.m_sourceID;
 
 	m_poisonOverallStopFrame = now + d->m_poisonDurationData;
 

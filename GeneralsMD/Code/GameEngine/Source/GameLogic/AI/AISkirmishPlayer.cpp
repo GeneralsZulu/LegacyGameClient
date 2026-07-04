@@ -1018,7 +1018,10 @@ void AISkirmishPlayer::update()
 {
 	AIPlayer::update();
 	processBeaconDirective();
-	processSurrenderDirective();
+	// Surrender directive introduced in 1.3.0; skip for older replays so they
+	// stay deterministic (see getReplayEpoch()).
+	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V130))
+		processSurrenderDirective();
 	announceMilestones();
 	processDistressSignal();
 	commitIdleArmy();

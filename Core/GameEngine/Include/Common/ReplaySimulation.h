@@ -34,15 +34,28 @@ public:
 	static UnsignedInt getCurrentReplayIndex() { return s_replayIndex; }
 	static UnsignedInt getReplayCount() { return s_replayCount; }
 
+	// TheSuperHackers @feature Per-replay result log for batch reprocessing.
+	// The path lives in TheGlobalData->m_replayResultLog (set via the -resultLog
+	// command-line flag). When set, each simulated replay appends one JSON line
+	// recording its verdict (STARTED / OK / DESYNC / INCOMPLETE / CANT_OPEN),
+	// frame counts, and whether stats were exported. This is the "which replays
+	// failed and why" log and doubles as a resume/crash checkpoint. Worker
+	// processes each append their own line, so the path is forwarded to them.
+
 private:
 
 	static int simulateReplaysInThisProcess(const std::vector<AsciiString> &filenames);
 	static int simulateReplaysInWorkerProcesses(const std::vector<AsciiString> &filenames, int maxProcesses);
 	static std::vector<AsciiString> resolveFilenameWildcards(const std::vector<AsciiString> &filenames);
 
+	// Append one JSON-lines record for a finished (or unopened) replay.
+	static void appendResultLogEntry(const AsciiString &filename, const char *verdict,
+		UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch);
+
 private:
 
 	static Bool s_isRunning;
 	static UnsignedInt s_replayIndex;
 	static UnsignedInt s_replayCount;
+	static AsciiString s_resultLogPath;
 };

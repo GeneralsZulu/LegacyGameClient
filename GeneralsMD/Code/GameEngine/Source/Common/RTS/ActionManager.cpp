@@ -38,6 +38,7 @@
 #include "Common/ActionManager.h"
 #include "Common/BuildAssistant.h"
 #include "Common/GlobalData.h"
+#include "Common/Recorder.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/SpecialPower.h"
@@ -487,8 +488,14 @@ Bool ActionManager::canResumeConstructionOf( const Object *obj,
 	// in the future)
 	//
 	Object *builder = TheGameLogic->findObjectByID( objectBeingConstructed->getBuilderID() );
-	// Allow scaffold to be immediately resumed after builder death.
-	if (builder && !builder->isEffectivelyDead())
+	// Allow scaffold to be immediately resumed after builder death (1.2.8+).
+	// Older replays only required the builder to exist, so gate the dead-builder
+	// rejection on the epoch to keep those replays deterministic.
+	Bool builderResumable = builder
+		&& ((!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V128))
+			? !builder->isEffectivelyDead()
+			: TRUE);
+	if (builderResumable)
 	{
 		AIUpdateInterface *ai = builder->getAI();
 		DEBUG_ASSERTCRASH( ai, ("Builder object does not have an AI interface!") );

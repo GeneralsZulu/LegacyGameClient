@@ -310,6 +310,7 @@ RecorderClass::RecorderClass()
 	m_nextFrame = 0;
 	m_wasDesync = FALSE;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
+	m_replayEpoch = REPLAY_EPOCH_CURRENT;
 	m_liveObserverStreamOpen      = FALSE;
 	m_liveObserverWaitingForBytes = FALSE;
 	m_liveObserverRetryPos        = 0;
@@ -371,6 +372,56 @@ Bool RecorderClass::isAIFeatureEnabled(UnsignedInt featureVersion) const
 	return TRUE;
 }
 
+//----------------------------------------------------------------------------------------------------------
+// Replay determinism epoch.
+//----------------------------------------------------------------------------------------------------------
+Int RecorderClass::s_replayEpochOverride = -1;
+
+// Map a semantic version to its determinism epoch. Only Zulu builds after the
+// version-string switch render "major.minor.patch" (e.g. "1.2.8"); retail and
+// pre-switch builds render "Version 1.04" and are handled by the caller as
+// REPLAY_EPOCH_RETAIL.
+static RecorderClass::ReplayEpoch epochFromSemanticVersion(Int major, Int minor, Int patch)
+{
+	if (major != 1)
+		return RecorderClass::REPLAY_EPOCH_CURRENT;
+	if (minor < 2)
+		return RecorderClass::REPLAY_EPOCH_RETAIL;   // 1.0.x, 1.1.x
+	if (minor == 2)
+	{
+		if (patch <= 0) return RecorderClass::REPLAY_EPOCH_RETAIL;  // 1.2.0
+		if (patch <= 7) return RecorderClass::REPLAY_EPOCH_V121;    // 1.2.1 - 1.2.7
+		return RecorderClass::REPLAY_EPOCH_V128;                    // 1.2.8, 1.2.9
+	}
+	return RecorderClass::REPLAY_EPOCH_V130;          // 1.3.0+
+}
+
+static RecorderClass::ReplayEpoch deriveReplayEpochFromHeader(const RecorderClass::ReplayHeader& header)
+{
+	AsciiString vs;
+	vs.translate(header.versionString);
+	const char *s = vs.str();
+	Int a = 0, b = 0, c = 0;
+	// Treat as a Zulu semantic version only if it starts with a digit and has
+	// all three components; otherwise (retail "Version 1.04", dev builds) fall
+	// back to the retail epoch. The -replayEpoch override is authoritative for
+	// anything the header can't disambiguate.
+	if (s[0] >= '0' && s[0] <= '9' && sscanf(s, "%d.%d.%d", &a, &b, &c) == 3)
+		return epochFromSemanticVersion(a, b, c);
+	return RecorderClass::REPLAY_EPOCH_RETAIL;
+}
+
+RecorderClass::ReplayEpoch RecorderClass::getReplayEpoch() const
+{
+	if (m_mode == RECORDERMODETYPE_PLAYBACK
+		|| m_mode == RECORDERMODETYPE_SIMULATION_PLAYBACK
+		|| m_mode == RECORDERMODETYPE_RESUME_CATCHUP)
+	{
+		return m_replayEpoch;
+	}
+	return REPLAY_EPOCH_CURRENT;
+}
+
 /**
  * Initialization
  * The recorder will record by default since every game will be recorded.
@@ -395,6 +446,7 @@ void RecorderClass::init() {
 	m_doingAnalysis = FALSE;
 	m_playbackFrameCount = 0;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
+	m_replayEpoch = REPLAY_EPOCH_CURRENT;
 
 	OptionPreferences optionPref;
 	m_archiveReplays = optionPref.getArchiveReplaysEnabled();
@@ -1594,6 +1646,15 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	{
 		return FALSE;
 	}
+
+	// Select the determinism epoch to simulate: the -replayEpoch override wins,
+	// otherwise auto-detect from the recorded version string. Gated sim paths
+	// read this via getReplayEpoch() to reproduce older behavior bit-exactly.
+	m_replayEpoch = (s_replayEpochOverride >= 0)
+		? (ReplayEpoch)s_replayEpochOverride
+		: deriveReplayEpochFromHeader(header);
+	DEBUG_LOG(("RecorderClass::playbackFile - replay determinism epoch = %d (override=%d)",
+		(Int)m_replayEpoch, s_replayEpochOverride));
 
 #ifdef DEBUG_CRASHING
 	Bool versionStringDiff = header.versionString != TheVersion->getUnicodeVersion();
