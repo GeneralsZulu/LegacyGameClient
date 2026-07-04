@@ -201,6 +201,7 @@ static void startLanBattlefieldIntel(GameInfo *game)
 
 	std::vector<MapSummaryPlayer> roster;
 	Int localTeam = 0;
+	Int localRosterIdx = -1;
 	Int localSlot = game->getLocalSlotNum();
 	Int i;
 	for (i = 0; i < MAX_SLOTS; ++i)
@@ -230,9 +231,9 @@ static void startLanBattlefieldIntel(GameInfo *game)
 		// predict wants 1-based teams (0 = no team). getTeamNumber() is 0-based
 		// with -1 = "no team", so a clean NvN maps to 1..N here.
 		entry.team = slot->getTeamNumber() + 1;
-		roster.push_back(entry);
 		if (i == localSlot)
-			localTeam = entry.team;
+			localRosterIdx = (Int)roster.size();
+		roster.push_back(entry);
 	}
 
 	// Require exactly two distinct teams, all teamed (no team-0 entries):
@@ -253,11 +254,25 @@ static void startLanBattlefieldIntel(GameInfo *game)
 		if (!seen && distinct < MAX_SLOTS)
 			teamValues[distinct++] = t;
 	}
+	// A 2-player game with no real teams is just a 1v1: synthesize opposing
+	// teams so predict/synergy have two sides to work with. (3+ unteamed
+	// players is a genuine free-for-all we can't forecast.)
+	if (roster.size() == 2 && (hasUnteamed || distinct != 2))
+	{
+		roster[0].team = 1;
+		roster[1].team = 2;
+		hasUnteamed = FALSE;
+		distinct = 2;
+	}
+
 	if (hasUnteamed || distinct != 2 || roster.size() < 2)
 	{
 		RadarvanIntelReset();
 		return;
 	}
+
+	localTeam = (localRosterIdx >= 0 && localRosterIdx < (Int)roster.size())
+		? roster[localRosterIdx].team : 0;
 
 	// Map name: prefer the .map's display name (what players see), stripped of
 	// the trailing " (N)" player-count suffix and lowercased, matching what

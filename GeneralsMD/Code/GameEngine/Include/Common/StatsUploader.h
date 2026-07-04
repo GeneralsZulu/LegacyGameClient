@@ -261,6 +261,24 @@ bool RadarvanIntelReady(AsciiString& outText);
 /// either was never started or finished without data -> show the fallback.
 bool RadarvanIntelPending(void);
 
+/// The raw numbers behind the intel blurb, for the load-screen graphic.
+/// Teams A/B here are predict's team_a (lobby team 1) and team_b (team 2).
+struct RadarvanIntelData
+{
+	int   favoredTeam;     ///< 1 or 2; 0 if unknown
+	int   localTeam;       ///< local player's 1-based team; 0 = observer/none
+	float favoredWinProb;  ///< probability the favored team wins (0..1)
+	bool  aHasRecord; int aWins; int aLosses;
+	bool  bHasRecord; int bWins; int bLosses;
+	bool  aHasPair;   float aDelta; ///< team A standout-duo win_prob_delta
+	bool  bHasPair;   float bDelta; ///< team B standout-duo win_prob_delta
+};
+
+/// Copy the structured intel numbers for the current game into `out`.
+/// Returns true only when a result is ready (same gate as RadarvanIntelReady,
+/// which returns the formatted text). Non-blocking.
+bool RadarvanIntelReadyData(RadarvanIntelData& out);
+
 /// Result of a map_vote/<N>/choose API call.
 struct ChooseMapResult
 {

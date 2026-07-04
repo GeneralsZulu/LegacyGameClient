@@ -65,7 +65,10 @@
 #include "Common/PlayerList.h"
 #include "Common/PlayerTemplate.h"
 #include "GameClient/CampaignManager.h"
+#include "GameClient/Color.h"
 #include "GameClient/Display.h"
+#include "GameClient/DisplayString.h"
+#include "GameClient/DisplayStringManager.h"
 #include "GameClient/GadgetProgressBar.h"
 #include "GameClient/GadgetStaticText.h"
 #include "GameClient/GameText.h"
@@ -1231,6 +1234,154 @@ void ShellGameLoadScreen::update( Int percent )
 
 // MultiPlayerLoadScreen Class //////////////////////////////////////////////////
 //-----------------------------------------------------------------------------
+#if RTS_ZEROHOUR
+// ---------------------------------------------------------------------------
+// Battlefield-intel "win probability" card. Replaces the local general's
+// portrait with a procedurally-drawn meter fed by radarvan (see
+// RadarvanIntelReadyData). Rendered each frame through a GameWindow draw
+// callback - no runtime textures and no new art. Only one multiplayer load
+// screen is up at a time, so a single file-static card is sufficient.
+// ---------------------------------------------------------------------------
+enum { INTEL_CARD_AWAITING = 0, INTEL_CARD_READY = 1, INTEL_CARD_NODATA = 2 };
+
+struct IntelCard
+{
+	Int state;
+	RadarvanIntelData d;
+	Color yourColor;
+	Color enemyColor;
+	Int localTeam;       // 1 or 2; 0 = observer/none
+	DisplayString *pct;  // cached "NN%" number (owned by the load screen)
+};
+static IntelCard s_intelCard = { INTEL_CARD_AWAITING };
+
+// Small filled triangle (chevron) built from horizontal scanlines, since the
+// display has no polygon primitive. `up` points the apex upward.
+static void intelDrawChevron(Int cx, Int topY, Int halfW, Int h, Bool up, Color color)
+{
+	Int i;
+	for (i = 0; i < h; ++i)
+	{
+		Int frac = up ? i : (h - 1 - i);
+		Int denom = (h > 1) ? (h - 1) : 1;
+		Int ww = (halfW * 2 * frac) / denom;
+		TheDisplay->drawFillRect(cx - ww / 2, topY + i, ww, 1, color);
+	}
+}
+
+static void drawIntelPortrait(GameWindow *win, WinInstanceData * /*inst*/)
+{
+	if (win == NULL || TheDisplay == NULL)
+		return;
+
+	Int x, y, w, h;
+	win->winGetScreenPosition(&x, &y);
+	win->winGetSize(&w, &h);
+
+	// backing plate + border
+	TheDisplay->drawFillRect(x, y, w, h, GameMakeColor(6, 8, 12, 220));
+	TheDisplay->drawOpenRect(x, y, w, h, 1.0f, GameMakeColor(120, 140, 160, 200));
+
+	const Int pad = (w > 40) ? 10 : 4;
+
+	if (s_intelCard.state == INTEL_CARD_NODATA)
+	{
+		Color red = GameMakeColor(200, 40, 40, 220);
+		TheDisplay->drawLine(x + pad, y + pad, x + w - pad, y + h - pad, 2.0f, red);
+		TheDisplay->drawLine(x + w - pad, y + pad, x + pad, y + h - pad, 2.0f, red);
+		return;
+	}
+
+	Int barX = x + pad;
+	Int barW = w - 2 * pad;
+	Int barH = (h > 120) ? 24 : 14;
+	Int barY = y + (h * 5) / 10;
+
+	Color yourC = (s_intelCard.localTeam != 0) ? s_intelCard.yourColor : GameMakeColor(60, 120, 220, 255);
+	Color enemC = (s_intelCard.localTeam != 0) ? s_intelCard.enemyColor : GameMakeColor(200, 60, 60, 255);
+
+	if (s_intelCard.state != INTEL_CARD_READY)
+	{
+		// awaiting: draw an empty gauge so the area reads as "gathering intel"
+		TheDisplay->drawOpenRect(barX, barY, barW, barH, 1.0f, GameMakeColor(120, 140, 160, 160));
+		return;
+	}
+
+	// your win probability (favoredWinProb is the FAVORED team's probability)
+	Real yourProb;
+	if (s_intelCard.localTeam == 0)
+		yourProb = s_intelCard.d.favoredWinProb;
+	else
+		yourProb = (s_intelCard.d.favoredTeam == s_intelCard.localTeam)
+			? s_intelCard.d.favoredWinProb
+			: (1.0f - s_intelCard.d.favoredWinProb);
+	if (yourProb < 0.0f) yourProb = 0.0f;
+	if (yourProb > 1.0f) yourProb = 1.0f;
+
+	Int yourW = (Int)(barW * yourProb + 0.5f);
+	TheDisplay->drawFillRect(barX, barY, yourW, barH, yourC);
+	TheDisplay->drawFillRect(barX + yourW, barY, barW - yourW, barH, enemC);
+	TheDisplay->drawOpenRect(barX, barY, barW, barH, 1.0f, GameMakeColor(230, 230, 230, 230));
+	TheDisplay->drawLine(barX + yourW, barY - 2, barX + yourW, barY + barH + 2, 1.0f, GameMakeColor(255, 255, 255, 255));
+
+	// big percentage number centered above the bar
+	if (s_intelCard.pct != NULL)
+	{
+		Int tw = 0, th = 0;
+		s_intelCard.pct->getSize(&tw, &th);
+		s_intelCard.pct->draw(x + (w - tw) / 2, barY - th - 6,
+			GameMakeColor(255, 255, 255, 255), GameMakeColor(0, 0, 0, 255));
+	}
+
+	// map A/B (lobby team 1/2) onto left(=yours)/right(=enemy)
+	Bool aIsYours = (s_intelCard.localTeam != 2);
+	Bool  lRec = aIsYours ? s_intelCard.d.aHasRecord : s_intelCard.d.bHasRecord;
+	Int   lW   = aIsYours ? s_intelCard.d.aWins      : s_intelCard.d.bWins;
+	Int   lL   = aIsYours ? s_intelCard.d.aLosses    : s_intelCard.d.bLosses;
+	Bool  rRec = aIsYours ? s_intelCard.d.bHasRecord : s_intelCard.d.aHasRecord;
+	Int   rW   = aIsYours ? s_intelCard.d.bWins      : s_intelCard.d.aWins;
+	Int   rL   = aIsYours ? s_intelCard.d.bLosses    : s_intelCard.d.aLosses;
+	Bool  lPair = aIsYours ? s_intelCard.d.aHasPair : s_intelCard.d.bHasPair;
+	Real  lDelta = aIsYours ? s_intelCard.d.aDelta  : s_intelCard.d.bDelta;
+	Bool  rPair = aIsYours ? s_intelCard.d.bHasPair : s_intelCard.d.aHasPair;
+	Real  rDelta = aIsYours ? s_intelCard.d.bDelta  : s_intelCard.d.aDelta;
+
+	Int rowY = barY + barH + 12;
+	Int cellW = (barW - pad) / 2;
+
+	// team color chips
+	TheDisplay->drawFillRect(barX, rowY, 12, 12, yourC);
+	TheDisplay->drawFillRect(barX + barW - 12, rowY, 12, 12, enemC);
+
+	// win/loss ratio bars under each chip (green wins, red losses)
+	Int wlY = rowY + 16;
+	Int wlH = 6;
+	Color green = GameMakeColor(60, 180, 70, 255);
+	Color redl  = GameMakeColor(170, 60, 60, 255);
+	if (lRec && (lW + lL) > 0)
+	{
+		Int gw = (cellW * lW) / (lW + lL);
+		TheDisplay->drawFillRect(barX, wlY, gw, wlH, green);
+		TheDisplay->drawFillRect(barX + gw, wlY, cellW - gw, wlH, redl);
+	}
+	if (rRec && (rW + rL) > 0)
+	{
+		Int rx = barX + barW - cellW;
+		Int gw = (cellW * rW) / (rW + rL);
+		TheDisplay->drawFillRect(rx, wlY, gw, wlH, green);
+		TheDisplay->drawFillRect(rx + gw, wlY, cellW - gw, wlH, redl);
+	}
+
+	// synergy chevrons next to each chip (up=green hot duo, down=red cold duo)
+	if (lPair)
+		intelDrawChevron(barX + 22, rowY, 6, 10, (lDelta >= 0.0f),
+			(lDelta >= 0.0f) ? GameMakeColor(60, 200, 80, 255) : GameMakeColor(210, 70, 70, 255));
+	if (rPair)
+		intelDrawChevron(barX + barW - 22, rowY, 6, 10, (rDelta >= 0.0f),
+			(rDelta >= 0.0f) ? GameMakeColor(60, 200, 80, 255) : GameMakeColor(210, 70, 70, 255));
+}
+#endif // RTS_ZEROHOUR
+
 MultiPlayerLoadScreen::MultiPlayerLoadScreen()
 {
 	m_mapPreview = nullptr;
@@ -1256,6 +1407,17 @@ MultiPlayerLoadScreen::~MultiPlayerLoadScreen()
 	{
 		m_mapPreview->winSetUserData(nullptr);
 	}
+
+#if RTS_ZEROHOUR
+	// The intel card draw func and its cached % string are torn down with the
+	// window; drop our reference so a fresh load screen starts clean.
+	if (s_intelCard.pct != NULL)
+	{
+		TheDisplayStringManager->freeDisplayString(s_intelCard.pct);
+		s_intelCard.pct = nullptr;
+	}
+	s_intelCard.state = INTEL_CARD_AWAITING;
+#endif
 
 	TheAudio->removeAudioEvent( AHSV_StopTheMusicFade );
 //	TheAudio->stopAudio( AudioAffect_Music );
@@ -1323,7 +1485,48 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 		GadgetStaticTextSetText( m_featuresLocalGeneral, awaiting );
 	}
 	m_nameLocalGeneral = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:LocalGeneralName"));
-	GadgetStaticTextSetText( m_nameLocalGeneral, localName );
+	// Show the faction (side) name rather than the specific general's name.
+	{
+		AsciiString sideKey;
+		sideKey.format("SIDE:%s", pt->getSide().str());
+		GadgetStaticTextSetText( m_nameLocalGeneral, TheGameText->fetch(sideKey) );
+	}
+
+	// Replace the general portrait with the battlefield-intel meter card.
+	{
+		s_intelCard.state = INTEL_CARD_AWAITING;
+		s_intelCard.localTeam = 0;
+		s_intelCard.yourColor = GameMakeColor(60, 120, 220, 255);
+		s_intelCard.enemyColor = GameMakeColor(200, 60, 60, 255);
+		const GameSlot *localSlot = game->getConstSlot(game->getLocalSlotNum());
+		if (localSlot)
+		{
+			Int myTeam = localSlot->getTeamNumber(); // 0-based, -1 = none
+			s_intelCard.localTeam = (myTeam >= 0) ? (myTeam + 1) : 0;
+			s_intelCard.yourColor = TheMultiplayerSettings->getColor(localSlot->getApparentColor())->getColor();
+			Int si;
+			for (si = 0; si < MAX_SLOTS; ++si)
+			{
+				const GameSlot *es = game->getConstSlot(si);
+				if (!es || !es->isOccupied())
+					continue;
+				if (es->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+					continue;
+				if (es->getTeamNumber() == myTeam)
+					continue;
+				s_intelCard.enemyColor = TheMultiplayerSettings->getColor(es->getApparentColor())->getColor();
+				break;
+			}
+		}
+		if (s_intelCard.pct == NULL)
+			s_intelCard.pct = TheDisplayStringManager->newDisplayString();
+		if (s_intelCard.pct != NULL && m_portraitLocalGeneral != NULL)
+			s_intelCard.pct->setFont(m_portraitLocalGeneral->winGetFont());
+		if (s_intelCard.pct != NULL)
+			s_intelCard.pct->setText(UnicodeString::TheEmptyString);
+		if (m_portraitLocalGeneral != NULL)
+			m_portraitLocalGeneral->winSetDrawFunc(drawIntelPortrait);
+	}
 #endif
 
 	AsciiString musicName = pt->getLoadScreenMusic();
@@ -1489,20 +1692,51 @@ void MultiPlayerLoadScreen::update( Int percent )
 	{
 		++m_intelWaitCalls;
 		AsciiString intelText;
-		if (RadarvanIntelReady(intelText))
+		Bool ready = RadarvanIntelReady(intelText);
+		Bool pending = RadarvanIntelPending();
+		// Close the ready/pending race: the worker sets "ready" and clears
+		// "pending" together under one lock, so if we saw "not ready" but also
+		// "not pending", it just finished - re-read readiness before giving up.
+		if (!ready && !pending)
+			ready = RadarvanIntelReady(intelText);
+		if (ready)
 		{
 			UnicodeString u;
 			u.translate(intelText);
 			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			// Drive the portrait meter card from the same result.
+			RadarvanIntelReadyData(s_intelCard.d);
+			s_intelCard.state = INTEL_CARD_READY;
+			if (s_intelCard.pct != NULL)
+			{
+				Real yp;
+				if (s_intelCard.localTeam == 0)
+					yp = s_intelCard.d.favoredWinProb;
+				else
+					yp = (s_intelCard.d.favoredTeam == s_intelCard.localTeam)
+						? s_intelCard.d.favoredWinProb
+						: (1.0f - s_intelCard.d.favoredWinProb);
+				Int pctI = (Int)(yp * 100.0f + 0.5f);
+				AsciiString ps;
+				ps.format("%d%%", pctI);
+				UnicodeString pu;
+				pu.translate(ps);
+				s_intelCard.pct->setText(pu);
+			}
 			m_intelResolved = TRUE;
 		}
-		else if (!RadarvanIntelPending() || percent >= 100 || m_intelWaitCalls > 3000)
+		else if (!pending || m_intelWaitCalls > 3000)
 		{
-			// Worker finished without data, or loading is done and radarvan
-			// never answered in time: show the themed fallback and give up.
+			// Worker finished without a usable result (or the long backstop
+			// tripped): show the themed fallback and give up. NOTE: we must NOT
+			// fall back merely because loading hit 100% - after local load the
+			// game spins in a wait-for-players loop calling update(101) ~10x/s,
+			// which is precisely the window a late result arrives in. We keep
+			// polling there and only give up once the worker itself is done.
 			UnicodeString u;
 			u.translate(AsciiString("BATTLEFIELD INTEL\nRecon uplink is down, General.\nNo intel on this engagement.\nTrust your instincts."));
 			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			s_intelCard.state = INTEL_CARD_NODATA;
 			m_intelResolved = TRUE;
 		}
 	}

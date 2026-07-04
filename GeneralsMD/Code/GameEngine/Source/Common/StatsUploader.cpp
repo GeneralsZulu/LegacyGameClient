@@ -2061,6 +2061,8 @@ static bool s_intelPending = false;  // worker running, no result yet
 static bool s_intelReady = false;    // s_intelTextC holds a usable blurb
 static char *s_intelTextC = nullptr; // malloc'd blurb (CRT heap), guarded
 static unsigned long s_intelGen = 0; // bumped per game; stale workers discard
+static RadarvanIntelData s_intelData; // numbers behind the blurb (POD), guarded
+static bool s_intelDataValid = false;  // s_intelData is meaningful
 
 static void ensureIntelCS(void)
 {
@@ -2440,8 +2442,11 @@ static void appendTeamBlock(AsciiString &out, const char *label,
 // Do the calls and build the blurb. Returns "" when there's nothing worth
 // showing (predict URL empty / predict failed / not two teams) so the caller
 // falls back to the themed "recon down" note.
-static AsciiString composeIntel(const IntelJob &job)
+static AsciiString composeIntel(const IntelJob &job, RadarvanIntelData &data)
 {
+	memset(&data, 0, sizeof(data));
+	data.localTeam = job.localTeam;
+
 	if (job.predictUrl[0] == '\0' || job.body[0] == '\0')
 		return AsciiString();
 
@@ -2487,6 +2492,14 @@ static AsciiString composeIntel(const IntelJob &job)
 			standoutPair(synResp.str(), teamB, bPair);
 		}
 	}
+
+	// ---- fill structured data for the load-screen graphic ----
+	data.favoredTeam = (int)favoredTeam;
+	data.favoredWinProb = (float)favoredProb;
+	data.aHasRecord = aHaveRec; data.aWins = aW; data.aLosses = aL;
+	data.bHasRecord = bHaveRec; data.bWins = bW; data.bLosses = bL;
+	data.aHasPair = aPair.valid; data.aDelta = (float)aPair.delta;
+	data.bHasPair = bPair.valid; data.bDelta = (float)bPair.delta;
 
 	// ---- 4) compose ----
 	AsciiString out;
@@ -2542,7 +2555,8 @@ static AsciiString composeIntel(const IntelJob &job)
 static unsigned __stdcall intelThreadProc(void *arg)
 {
 	IntelJob *job = (IntelJob *)arg;
-	AsciiString blurb = composeIntel(*job); // worker-local AsciiString
+	RadarvanIntelData data;
+	AsciiString blurb = composeIntel(*job, data); // worker-local AsciiString
 
 	// Publish a private malloc'd copy of the text so no AsciiString buffer is
 	// shared with the main thread. `blurb` (worker-local) is destroyed here.
@@ -2562,6 +2576,8 @@ static unsigned __stdcall intelThreadProc(void *arg)
 			free(s_intelTextC);
 		s_intelTextC = copy;
 		s_intelReady = (copy != nullptr);
+		s_intelData = data;             // POD copy, no cross-thread sharing
+		s_intelDataValid = (copy != nullptr);
 		s_intelPending = false;
 	}
 	else if (copy != nullptr)
@@ -2581,12 +2597,39 @@ void RadarvanIntelReset(void)
 	++s_intelGen; // any in-flight worker's result will now be discarded
 	s_intelPending = false;
 	s_intelReady = false;
+	s_intelDataValid = false;
 	if (s_intelTextC != nullptr)
 	{
 		free(s_intelTextC);
 		s_intelTextC = nullptr;
 	}
 	LeaveCriticalSection(&s_intelCS);
+}
+
+// Map a player-template store index (what GameSlot::getPlayerTemplate returns,
+// and what the replay stores) to radarvan's General enum. This mirrors
+// radarvan's cncstats_faction_to_general() exactly, so predict/synergy see the
+// same general ids as the historical data ingested from replays. Playable
+// generals are template indices 2..13; anything else (observer/civilian/
+// random/unknown) is UNRECOGNIZED (-1).
+static int templateIndexToGeneral(int tmpl)
+{
+	switch (tmpl)
+	{
+		case 2:  return 0;  // USA
+		case 3:  return 4;  // CHINA
+		case 4:  return 8;  // GLA
+		case 5:  return 3;  // SUPER
+		case 6:  return 2;  // LASER
+		case 7:  return 1;  // AIR
+		case 8:  return 6;  // TANK
+		case 9:  return 7;  // INFANTRY
+		case 10: return 5;  // NUKE
+		case 11: return 9;  // TOXIN
+		case 12: return 11; // DEMO
+		case 13: return 10; // STEALTH
+		default: return -1; // UNRECOGNIZED
+	}
 }
 
 void RadarvanIntelStart(const AsciiString& predictUrl,
@@ -2605,6 +2648,7 @@ void RadarvanIntelStart(const AsciiString& predictUrl,
 	unsigned long gen = s_intelGen;
 	s_intelReady = false;
 	s_intelPending = false;
+	s_intelDataValid = false;
 	if (s_intelTextC != nullptr)
 	{
 		free(s_intelTextC);
@@ -2642,7 +2686,9 @@ void RadarvanIntelStart(const AsciiString& predictUrl,
 		body.concat("{\"name\":\"");
 		appendJsonEscaped(body, players[i].name.isEmpty() ? "" : players[i].name.str());
 		char gb[64];
-		sprintf(gb, "\",\"general\":%d,\"team\":%d}", players[i].general, players[i].team);
+		// players[i].general is the raw template index; predict wants the
+		// General enum, so convert (mirrors radarvan's replay ingestion).
+		sprintf(gb, "\",\"general\":%d,\"team\":%d}", templateIndexToGeneral(players[i].general), players[i].team);
 		body.concat(gb);
 		// track team sizes so we can derive the synergy game_format (NvN)
 		int t = players[i].team;
@@ -2721,4 +2767,19 @@ bool RadarvanIntelPending(void)
 	pending = s_intelPending;
 	LeaveCriticalSection(&s_intelCS);
 	return pending;
+}
+
+bool RadarvanIntelReadyData(RadarvanIntelData& out)
+{
+	if (!s_intelCSInit)
+		return false;
+	bool ready = false;
+	EnterCriticalSection(&s_intelCS);
+	if (s_intelReady && s_intelDataValid)
+	{
+		out = s_intelData; // POD copy
+		ready = true;
+	}
+	LeaveCriticalSection(&s_intelCS);
+	return ready;
 }
