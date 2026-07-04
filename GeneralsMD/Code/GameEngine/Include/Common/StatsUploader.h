@@ -186,6 +186,7 @@ BalanceTeamsResult BalanceTeamsFromServer(const AsciiString& url,
 
 /// One name + general (faction template index, as found in a replay header)
 /// + team (lobby team index from GameSlot::getTeamNumber(); -1 = no team).
+/// Note: MapSummaryFromServer emits team 1-based on the wire (team + 1).
 struct MapSummaryPlayer
 {
 	AsciiString name;

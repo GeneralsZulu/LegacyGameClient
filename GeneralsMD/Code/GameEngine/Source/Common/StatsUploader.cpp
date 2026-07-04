@@ -1085,7 +1085,9 @@ MapSummaryResult MapSummaryFromServer(const AsciiString& url,
 		body.concat("{\"name\":\"");
 		appendJsonEscaped(body, players[i].name.isEmpty() ? "" : players[i].name.str());
 		char gbuf[64];
-		sprintf(gbuf, "\",\"general\":%d,\"team\":%d}", players[i].general, players[i].team);
+		// players[i].team is 0-based (-1 = no team); emit it 1-based in the
+		// map_summary request so teams start at 1 (0 = no team) on the wire.
+		sprintf(gbuf, "\",\"general\":%d,\"team\":%d}", players[i].general, players[i].team + 1);
 		body.concat(gbuf);
 	}
 	body.concat("]}");
