@@ -556,6 +556,36 @@ Int parseMapSummaryUrl(char *args[], int num)
 	return 1;
 }
 
+Int parsePredictUrl(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_predictUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
+Int parseTeamStatsUrl(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_teamStatsUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
+Int parseSynergyUrl(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_synergyUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
 Int parseMapMatchCountsUrl(char *args[], int num)
 {
 	if (num > 1)
@@ -1357,6 +1387,9 @@ static CommandLineParam paramsForStartup[] =
 	// URL the LAN-lobby Randomize button POSTs to fetch a map-history
 	// blurb (printed to lobby chat). Pass an empty string ("") to disable.
 	{ "-mapSummaryUrl", parseMapSummaryUrl },
+	{ "-predictUrl", parsePredictUrl },
+	{ "-teamStatsUrl", parseTeamStatsUrl },
+	{ "-synergyUrl", parseSynergyUrl },
 
 	// URL the map-select dialogs GET to fetch a JSON array of
 	// {map, matchCount} entries, used to annotate each row with how

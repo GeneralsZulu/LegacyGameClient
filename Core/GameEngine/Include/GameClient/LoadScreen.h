@@ -250,6 +250,11 @@ private:
 	GameWindow *m_featuresLocalGeneral;
 	GameWindow *m_nameLocalGeneral;
 
+	// Zero Hour "battlefield intel" panel state: once the radarvan worker
+	// resolves (result or timeout) we stop polling. m_intelWaitCalls is a
+	// backstop deadline in case load progress never reaches 100%.
+	Bool m_intelResolved;
+	Int m_intelWaitCalls;
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////

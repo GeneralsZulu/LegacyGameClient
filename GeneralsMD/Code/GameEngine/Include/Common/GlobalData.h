@@ -157,6 +157,17 @@ public:
 	// after the Randomize button runs. Empty string disables the call.
 	AsciiString m_mapSummaryUrl;
 
+	// URLs for the multiplayer loading-screen "battlefield intel" panel.
+	// When the countdown starts, each client fires these (non-blocking) and
+	// shows a distilled win-prediction / team-chemistry blurb in place of the
+	// general-features text. Any empty string disables that particular call.
+	//   m_predictUrl    : POST /api/predict          -> win probability
+	//   m_teamStatsUrl  : GET  /api/team_stats/      -> full-lineup W/L record
+	//   m_synergyUrl    : GET  /api/player_ratings/synergy/ -> standout duo
+	AsciiString m_predictUrl;
+	AsciiString m_teamStatsUrl;
+	AsciiString m_synergyUrl;
+
 	// URL to GET a JSON array of {map, matchCount} entries the map-select
 	// dialogs use to annotate each listbox row with how often the map has
 	// been played. Empty string disables the call.

@@ -65,7 +65,13 @@
 #include "Common/PlayerList.h"
 #include "Common/PlayerTemplate.h"
 #include "GameClient/CampaignManager.h"
+#include "GameClient/Color.h"
 #include "GameClient/Display.h"
+#include "GameClient/DisplayString.h"
+#include "GameClient/DisplayStringManager.h"
+#include "GameClient/GameFont.h"
+#include "GameClient/Image.h"
+#include <math.h>
 #include "GameClient/GadgetProgressBar.h"
 #include "GameClient/GadgetStaticText.h"
 #include "GameClient/GameText.h"
@@ -74,6 +80,10 @@
 #include "GameClient/Keyboard.h"
 #include "GameClient/LoadScreen.h"
 #include "GameClient/MapUtil.h"
+// Zero Hour only: multiplayer loading-screen "battlefield intel" (radarvan).
+#if RTS_ZEROHOUR
+#include "Common/StatsUploader.h"
+#endif
 #include "GameClient/Mouse.h"
 #include "GameClient/Shell.h"
 #include "GameClient/VideoPlayer.h"
@@ -1227,12 +1237,296 @@ void ShellGameLoadScreen::update( Int percent )
 
 // MultiPlayerLoadScreen Class //////////////////////////////////////////////////
 //-----------------------------------------------------------------------------
+#if RTS_ZEROHOUR
+// ---------------------------------------------------------------------------
+// Battlefield-intel "win probability" card. Replaces the local general's
+// portrait with a procedurally-drawn meter fed by radarvan (see
+// RadarvanIntelReadyData). Rendered each frame through a GameWindow draw
+// callback - no runtime textures and no new art. Only one multiplayer load
+// screen is up at a time, so a single file-static card is sufficient.
+// ---------------------------------------------------------------------------
+enum { INTEL_CARD_AWAITING = 0, INTEL_CARD_READY = 1, INTEL_CARD_NODATA = 2 };
+
+struct IntelCard
+{
+	Int state;
+	RadarvanIntelData d;
+	Color yourColor;
+	Color enemyColor;
+	Int localTeam;       // 1 or 2; 0 = observer/none
+	DisplayString *pct;  // cached "NN%" number (owned by the load screen)
+	const Image *gauge;  // ZuluGaugeDial art, or NULL -> primitive-bar fallback
+};
+static IntelCard s_intelCard = { INTEL_CARD_AWAITING };
+
+// Gauge dial calibration, measured from the source art (fractions of the
+// image rect): the needle pivot (brass hub) and the scale's end angles
+// (degrees, 0 = right, 90 = up). Win% 0 -> 0deg-end, 100 -> 100deg-end.
+static const Real INTEL_GAUGE_HUB_FX = 0.485f;
+static const Real INTEL_GAUGE_HUB_FY = 0.614f;
+static const Real INTEL_GAUGE_ANG0   = 163.3f; // needle angle at 0%
+static const Real INTEL_GAUGE_ANG100 = 19.4f;  // needle angle at 100%
+static const Real INTEL_GAUGE_ASPECT = 341.0f / 512.0f; // dial art h/w
+
+// Small filled triangle (chevron) built from horizontal scanlines, since the
+// display has no polygon primitive. `up` points the apex upward.
+static void intelDrawChevron(Int cx, Int topY, Int halfW, Int h, Bool up, Color color)
+{
+	Int i;
+	for (i = 0; i < h; ++i)
+	{
+		Int frac = up ? i : (h - 1 - i);
+		Int denom = (h > 1) ? (h - 1) : 1;
+		Int ww = (halfW * 2 * frac) / denom;
+		TheDisplay->drawFillRect(cx - ww / 2, topY + i, ww, 1, color);
+	}
+}
+
+// One team row: house-color chip on the left, a tall green/red win-loss bar
+// filling the middle (hollow if the squad has no tracked record), and a
+// hot/cold synergy chevron on the right. Sized to fill the given row height.
+static void intelDrawTeamRow(Int x, Int top, Int w, Int rowH, Color chip,
+                             Bool hasRec, Int wins, Int losses, Bool pair, Real delta)
+{
+	Int chipSz = rowH;
+	Int gap = chipSz / 3;
+	if (gap < 3) gap = 3;
+
+	// house-color chip
+	TheDisplay->drawFillRect(x, top, chipSz, chipSz, chip);
+	TheDisplay->drawOpenRect(x, top, chipSz, chipSz, 1.0f, GameMakeColor(230, 230, 230, 200));
+
+	// synergy chevron on the right (green up = hot duo, red down = cold duo)
+	Int chevW = chipSz;
+	Int chevX = x + w - chevW;
+	if (pair)
+	{
+		Color c = (delta >= 0.0f) ? GameMakeColor(60, 200, 80, 255) : GameMakeColor(210, 70, 70, 255);
+		intelDrawChevron(chevX + chevW / 2, top, chevW / 2, rowH, (delta >= 0.0f), c);
+	}
+
+	// win/loss ratio bar between chip and chevron
+	Int wlX = x + chipSz + gap;
+	Int wlRight = x + w - chevW - gap;
+	Int wlW = wlRight - wlX;
+	if (wlW < 4)
+		return;
+	Int wlH = (rowH * 6) / 10;
+	Int wlY = top + (rowH - wlH) / 2;
+	if (hasRec && (wins + losses) > 0)
+	{
+		Int gw = (wlW * wins) / (wins + losses);
+		TheDisplay->drawFillRect(wlX, wlY, gw, wlH, GameMakeColor(60, 180, 70, 255));
+		TheDisplay->drawFillRect(wlX + gw, wlY, wlW - gw, wlH, GameMakeColor(170, 60, 60, 255));
+		TheDisplay->drawOpenRect(wlX, wlY, wlW, wlH, 1.0f, GameMakeColor(200, 210, 220, 180));
+	}
+	else
+	{
+		// no tracked record ("untested lineup") - hollow bar so the row reads
+		TheDisplay->drawOpenRect(wlX, wlY, wlW, wlH, 1.0f, GameMakeColor(110, 120, 130, 160));
+	}
+}
+
+// Primitive fallback layout (used when the gauge art isn't available):
+// dark plate + odds split bar + two team rows.
+static void drawIntelBar(Int x, Int y, Int w, Int h)
+{
+	// backing plate + border
+	TheDisplay->drawFillRect(x, y, w, h, GameMakeColor(6, 8, 12, 220));
+	TheDisplay->drawOpenRect(x, y, w, h, 1.0f, GameMakeColor(120, 140, 160, 200));
+
+	Int pad = w / 12;
+	if (pad < 8) pad = 8;
+	Int innerX = x + pad;
+	Int innerW = w - 2 * pad;
+
+	Color yourC = (s_intelCard.localTeam != 0) ? s_intelCard.yourColor : GameMakeColor(60, 120, 220, 255);
+	Color enemC = (s_intelCard.localTeam != 0) ? s_intelCard.enemyColor : GameMakeColor(200, 60, 60, 255);
+
+	// odds bar sits in the upper-middle; team rows fill the space below it.
+	Int barY = y + (h * 30) / 100;
+	Int barH = (h * 17) / 100;
+
+	if (s_intelCard.state == INTEL_CARD_NODATA)
+	{
+		Color red = GameMakeColor(200, 40, 40, 220);
+		TheDisplay->drawLine(innerX, y + pad, innerX + innerW, y + h - pad, 2.0f, red);
+		TheDisplay->drawLine(innerX + innerW, y + pad, innerX, y + h - pad, 2.0f, red);
+		return;
+	}
+
+	if (s_intelCard.state != INTEL_CARD_READY)
+	{
+		// awaiting: empty gauge outline so the area reads as "gathering intel"
+		TheDisplay->drawOpenRect(innerX, barY, innerW, barH, 1.0f, GameMakeColor(120, 140, 160, 160));
+		return;
+	}
+
+	// your win probability (favoredWinProb is the FAVORED team's probability)
+	Real yourProb;
+	if (s_intelCard.localTeam == 0)
+		yourProb = s_intelCard.d.favoredWinProb;
+	else
+		yourProb = (s_intelCard.d.favoredTeam == s_intelCard.localTeam)
+			? s_intelCard.d.favoredWinProb
+			: (1.0f - s_intelCard.d.favoredWinProb);
+	if (yourProb < 0.0f) yourProb = 0.0f;
+	if (yourProb > 1.0f) yourProb = 1.0f;
+
+	// big percentage number, centered in the band above the bar
+	if (s_intelCard.pct != NULL)
+	{
+		Int tw = 0, th = 0;
+		s_intelCard.pct->getSize(&tw, &th);
+		Int numY = y + ((barY - y) - th) / 2;
+		if (numY < y + 2) numY = y + 2;
+		s_intelCard.pct->draw(x + (w - tw) / 2, numY,
+			GameMakeColor(255, 255, 255, 255), GameMakeColor(0, 0, 0, 255));
+	}
+
+	// odds split bar (hero)
+	Int yourW = (Int)(innerW * yourProb + 0.5f);
+	TheDisplay->drawFillRect(innerX, barY, yourW, barH, yourC);
+	TheDisplay->drawFillRect(innerX + yourW, barY, innerW - yourW, barH, enemC);
+	TheDisplay->drawOpenRect(innerX, barY, innerW, barH, 1.0f, GameMakeColor(230, 230, 230, 230));
+	TheDisplay->drawLine(innerX + yourW, barY - 3, innerX + yourW, barY + barH + 3, 1.0f, GameMakeColor(255, 255, 255, 255));
+
+	// map A/B (lobby team 1/2) onto left(=yours)/right(=enemy)
+	Bool aIsYours = (s_intelCard.localTeam != 2);
+	Bool  lRec = aIsYours ? s_intelCard.d.aHasRecord : s_intelCard.d.bHasRecord;
+	Int   lW   = aIsYours ? s_intelCard.d.aWins      : s_intelCard.d.bWins;
+	Int   lL   = aIsYours ? s_intelCard.d.aLosses    : s_intelCard.d.bLosses;
+	Bool  rRec = aIsYours ? s_intelCard.d.bHasRecord : s_intelCard.d.aHasRecord;
+	Int   rW   = aIsYours ? s_intelCard.d.bWins      : s_intelCard.d.aWins;
+	Int   rL   = aIsYours ? s_intelCard.d.bLosses    : s_intelCard.d.aLosses;
+	Bool  lPair = aIsYours ? s_intelCard.d.aHasPair : s_intelCard.d.bHasPair;
+	Real  lDelta = aIsYours ? s_intelCard.d.aDelta  : s_intelCard.d.bDelta;
+	Bool  rPair = aIsYours ? s_intelCard.d.bHasPair : s_intelCard.d.aHasPair;
+	Real  rDelta = aIsYours ? s_intelCard.d.bDelta  : s_intelCard.d.aDelta;
+
+	// two team rows, evenly filling the space from below the bar to the bottom
+	Int rowsTop = barY + barH + (h * 8) / 100;
+	Int rowGap = (h * 5) / 100;
+	Int rowH = ((y + h - pad) - rowsTop - rowGap) / 2;
+	if (rowH < 10) rowH = 10;
+	intelDrawTeamRow(innerX, rowsTop, innerW, rowH, yourC, lRec, lW, lL, lPair, lDelta);
+	intelDrawTeamRow(innerX, rowsTop + rowH + rowGap, innerW, rowH, enemC, rRec, rW, rL, rPair, rDelta);
+}
+
+// Gauge layout: the ZuluGaugeDial art fills the top (aspect-preserved) with a
+// house-colored win-probability needle drawn over it and the win% as a digital
+// readout in the dial's lower face; two team rows fill the strip below.
+static void drawIntelGauge(Int x, Int y, Int w, Int h)
+{
+	Int imgH = (Int)(w * INTEL_GAUGE_ASPECT + 0.5f);
+	if (imgH > h)
+		imgH = h;
+	TheDisplay->drawImage(s_intelCard.gauge, x, y, x + w, y + imgH, GameMakeColor(255, 255, 255, 255));
+
+	Color yourC = (s_intelCard.localTeam != 0) ? s_intelCard.yourColor : GameMakeColor(60, 120, 220, 255);
+	Color enemC = (s_intelCard.localTeam != 0) ? s_intelCard.enemyColor : GameMakeColor(200, 60, 60, 255);
+
+	Int hubX = x + (Int)(w * INTEL_GAUGE_HUB_FX + 0.5f);
+	Int hubY = y + (Int)(imgH * INTEL_GAUGE_HUB_FY + 0.5f);
+
+	if (s_intelCard.state == INTEL_CARD_READY)
+	{
+		Real yourProb;
+		if (s_intelCard.localTeam == 0)
+			yourProb = s_intelCard.d.favoredWinProb;
+		else
+			yourProb = (s_intelCard.d.favoredTeam == s_intelCard.localTeam)
+				? s_intelCard.d.favoredWinProb
+				: (1.0f - s_intelCard.d.favoredWinProb);
+		if (yourProb < 0.0f) yourProb = 0.0f;
+		if (yourProb > 1.0f) yourProb = 1.0f;
+
+		// needle angle (deg, 0=right/90=up), interpolated across the scale
+		Real deg = INTEL_GAUGE_ANG0 + (INTEL_GAUGE_ANG100 - INTEL_GAUGE_ANG0) * yourProb;
+		Real rad = deg * 3.14159265f / 180.0f;
+		Int len = (Int)(w * 0.25f + 0.5f);
+		Int tipX = hubX + (Int)(len * (Real)cos(rad));
+		Int tipY = hubY - (Int)(len * (Real)sin(rad)); // screen y is down
+
+		// needle: fixed high-visibility red (readable over any team colors),
+		// with a drop shadow and a bright highlight core.
+		Color needleC = GameMakeColor(220, 40, 40, 255);
+		TheDisplay->drawLine(hubX + 1, hubY + 1, tipX + 1, tipY + 1, 3.0f, GameMakeColor(0, 0, 0, 160));
+		TheDisplay->drawLine(hubX, hubY, tipX, tipY, 3.0f, needleC);
+		TheDisplay->drawLine(hubX, hubY, tipX, tipY, 1.0f, GameMakeColor(255, 235, 235, 220));
+		// hub cap
+		TheDisplay->drawFillRect(hubX - 4, hubY - 4, 8, 8, GameMakeColor(20, 20, 20, 255));
+		TheDisplay->drawOpenRect(hubX - 4, hubY - 4, 8, 8, 1.0f, needleC);
+
+		// win% readout on the dark lower face of the dial
+		if (s_intelCard.pct != NULL)
+		{
+			Int tw = 0, th = 0;
+			s_intelCard.pct->getSize(&tw, &th);
+			Int numY = hubY + (Int)(imgH * 0.06f);
+			if (numY + th > y + imgH)
+				numY = y + imgH - th;
+			s_intelCard.pct->draw(x + (w - tw) / 2, numY,
+				GameMakeColor(255, 240, 200, 255), GameMakeColor(0, 0, 0, 255));
+		}
+
+		// team rows in the strip below the dial
+		Int stripTop = y + imgH + 4;
+		Int avail = (y + h - 4) - stripTop;
+		if (avail >= 20)
+		{
+			Int pad = w / 12;
+			if (pad < 8) pad = 8;
+			Int innerX = x + pad;
+			Int innerW = w - 2 * pad;
+			Int gap = avail / 12;
+			if (gap < 2) gap = 2;
+			Int rowH = (avail - gap) / 2;
+
+			Bool aIsYours = (s_intelCard.localTeam != 2);
+			Bool  lRec = aIsYours ? s_intelCard.d.aHasRecord : s_intelCard.d.bHasRecord;
+			Int   lW   = aIsYours ? s_intelCard.d.aWins      : s_intelCard.d.bWins;
+			Int   lL   = aIsYours ? s_intelCard.d.aLosses    : s_intelCard.d.bLosses;
+			Bool  rRec = aIsYours ? s_intelCard.d.bHasRecord : s_intelCard.d.aHasRecord;
+			Int   rW   = aIsYours ? s_intelCard.d.bWins      : s_intelCard.d.aWins;
+			Int   rL   = aIsYours ? s_intelCard.d.bLosses    : s_intelCard.d.aLosses;
+			Bool  lPair = aIsYours ? s_intelCard.d.aHasPair : s_intelCard.d.bHasPair;
+			Real  lDelta = aIsYours ? s_intelCard.d.aDelta  : s_intelCard.d.bDelta;
+			Bool  rPair = aIsYours ? s_intelCard.d.bHasPair : s_intelCard.d.aHasPair;
+			Real  rDelta = aIsYours ? s_intelCard.d.bDelta  : s_intelCard.d.aDelta;
+
+			intelDrawTeamRow(innerX, stripTop, innerW, rowH, yourC, lRec, lW, lL, lPair, lDelta);
+			intelDrawTeamRow(innerX, stripTop + rowH + gap, innerW, rowH, enemC, rRec, rW, rL, rPair, rDelta);
+		}
+	}
+	// AWAITING / NODATA: leave the dial without a needle (the features text
+	// panel shows the "gathering intel" / "recon down" note).
+}
+
+static void drawIntelPortrait(GameWindow *win, WinInstanceData * /*inst*/)
+{
+	if (win == NULL || TheDisplay == NULL)
+		return;
+
+	Int x, y, w, h;
+	win->winGetScreenPosition(&x, &y);
+	win->winGetSize(&w, &h);
+
+	if (s_intelCard.gauge != NULL)
+		drawIntelGauge(x, y, w, h);
+	else
+		drawIntelBar(x, y, w, h);
+}
+#endif // RTS_ZEROHOUR
+
 MultiPlayerLoadScreen::MultiPlayerLoadScreen()
 {
 	m_mapPreview = nullptr;
 	m_portraitLocalGeneral = nullptr;
 	m_featuresLocalGeneral = nullptr;
 	m_nameLocalGeneral = nullptr;
+	m_intelResolved = FALSE;
+	m_intelWaitCalls = 0;
 
 	for(Int i = 0; i < MAX_SLOTS; ++i)
 	{
@@ -1250,6 +1544,17 @@ MultiPlayerLoadScreen::~MultiPlayerLoadScreen()
 	{
 		m_mapPreview->winSetUserData(nullptr);
 	}
+
+#if RTS_ZEROHOUR
+	// The intel card draw func and its cached % string are torn down with the
+	// window; drop our reference so a fresh load screen starts clean.
+	if (s_intelCard.pct != NULL)
+	{
+		TheDisplayStringManager->freeDisplayString(s_intelCard.pct);
+		s_intelCard.pct = nullptr;
+	}
+	s_intelCard.state = INTEL_CARD_AWAITING;
+#endif
 
 	TheAudio->removeAudioEvent( AHSV_StopTheMusicFade );
 //	TheAudio->stopAudio( AudioAffect_Music );
@@ -1304,8 +1609,80 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 	m_featuresLocalGeneral = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:LocalGeneralFeatures"));
 	AsciiString features = pt->getGeneralFeatures();
 	GadgetStaticTextSetText( m_featuresLocalGeneral, TheGameText->fetch( features.isEmpty() ? "GUI:PlayerObserver" : pt->getGeneralFeatures() ) );
+	// The general-features panel is repurposed as the radarvan "battlefield
+	// intel" area. Show a themed placeholder until the (non-blocking) worker
+	// started at countdown returns; update() swaps in the real intel or a
+	// fallback note. Reset the poll state for this game.
+	m_intelResolved = FALSE;
+	m_intelWaitCalls = 0;
+	if (m_featuresLocalGeneral && !TheGlobalData->m_predictUrl.isEmpty())
+	{
+		UnicodeString awaiting;
+		awaiting.translate(AsciiString("BATTLEFIELD INTEL\nRecon inbound, General..."));
+		GadgetStaticTextSetText( m_featuresLocalGeneral, awaiting );
+	}
 	m_nameLocalGeneral = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:LocalGeneralName"));
-	GadgetStaticTextSetText( m_nameLocalGeneral, localName );
+	// Show the faction (side) name rather than the specific general's name.
+	{
+		AsciiString sideKey;
+		sideKey.format("SIDE:%s", pt->getSide().str());
+		GadgetStaticTextSetText( m_nameLocalGeneral, TheGameText->fetch(sideKey) );
+	}
+
+	// Replace the general portrait with the battlefield-intel meter card.
+	{
+		s_intelCard.state = INTEL_CARD_AWAITING;
+		s_intelCard.localTeam = 0;
+		s_intelCard.yourColor = GameMakeColor(60, 120, 220, 255);
+		s_intelCard.enemyColor = GameMakeColor(200, 60, 60, 255);
+		// gauge dial art (shipped in Zulu.big); NULL -> primitive-bar fallback
+		s_intelCard.gauge = TheMappedImageCollection
+			? TheMappedImageCollection->findImageByName("ZuluGaugeDial") : NULL;
+		const GameSlot *localSlot = game->getConstSlot(game->getLocalSlotNum());
+		if (localSlot)
+		{
+			Int myTeam = localSlot->getTeamNumber(); // 0-based, -1 = none
+			s_intelCard.localTeam = (myTeam >= 0) ? (myTeam + 1) : 0;
+			s_intelCard.yourColor = TheMultiplayerSettings->getColor(localSlot->getApparentColor())->getColor();
+			Int si;
+			for (si = 0; si < MAX_SLOTS; ++si)
+			{
+				const GameSlot *es = game->getConstSlot(si);
+				if (!es || !es->isOccupied())
+					continue;
+				if (es->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+					continue;
+				if (es->getTeamNumber() == myTeam)
+					continue;
+				s_intelCard.enemyColor = TheMultiplayerSettings->getColor(es->getApparentColor())->getColor();
+				break;
+			}
+		}
+		if (s_intelCard.pct == NULL)
+			s_intelCard.pct = TheDisplayStringManager->newDisplayString();
+		if (s_intelCard.pct != NULL)
+		{
+			// Give the win% its own large bold font (the portrait's default font
+			// is tiny) so it anchors the top of the card. Size to the box.
+			GameFont *bigFont = NULL;
+			if (m_portraitLocalGeneral != NULL)
+			{
+				Int pw = 0, ph = 0;
+				m_portraitLocalGeneral->winGetSize(&pw, &ph);
+				Int ptSize = ph / 6;
+				if (ptSize < 18) ptSize = 18;
+				if (ptSize > 40) ptSize = 40;
+				bigFont = TheFontLibrary->getFont(AsciiString("Arial"), ptSize, TRUE);
+			}
+			if (bigFont != NULL)
+				s_intelCard.pct->setFont(bigFont);
+			else if (m_portraitLocalGeneral != NULL)
+				s_intelCard.pct->setFont(m_portraitLocalGeneral->winGetFont());
+			s_intelCard.pct->setText(UnicodeString::TheEmptyString);
+		}
+		if (m_portraitLocalGeneral != NULL)
+			m_portraitLocalGeneral->winSetDrawFunc(drawIntelPortrait);
+	}
 #endif
 
 	AsciiString musicName = pt->getLoadScreenMusic();
@@ -1462,6 +1839,64 @@ void MultiPlayerLoadScreen::update( Int percent )
 	//GadgetProgressBarSetProgress(m_progressBars[TheNetwork->getLocalPlayerID()], percent );
 
 	TheMouse->setCursorTooltip(UnicodeString::TheEmptyString);
+
+#if RTS_ZEROHOUR
+	// Poll the radarvan "battlefield intel" worker (started at countdown) and
+	// drop the result into the general-features panel. Purely display; this
+	// never blocks loading. Once resolved (real intel or fallback) we stop.
+	if (!m_intelResolved && m_featuresLocalGeneral)
+	{
+		++m_intelWaitCalls;
+		AsciiString intelText;
+		Bool ready = RadarvanIntelReady(intelText);
+		Bool pending = RadarvanIntelPending();
+		// Close the ready/pending race: the worker sets "ready" and clears
+		// "pending" together under one lock, so if we saw "not ready" but also
+		// "not pending", it just finished - re-read readiness before giving up.
+		if (!ready && !pending)
+			ready = RadarvanIntelReady(intelText);
+		if (ready)
+		{
+			UnicodeString u;
+			u.translate(intelText);
+			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			// Drive the portrait meter card from the same result.
+			RadarvanIntelReadyData(s_intelCard.d);
+			s_intelCard.state = INTEL_CARD_READY;
+			if (s_intelCard.pct != NULL)
+			{
+				Real yp;
+				if (s_intelCard.localTeam == 0)
+					yp = s_intelCard.d.favoredWinProb;
+				else
+					yp = (s_intelCard.d.favoredTeam == s_intelCard.localTeam)
+						? s_intelCard.d.favoredWinProb
+						: (1.0f - s_intelCard.d.favoredWinProb);
+				Int pctI = (Int)(yp * 100.0f + 0.5f);
+				AsciiString ps;
+				ps.format("%d%%", pctI);
+				UnicodeString pu;
+				pu.translate(ps);
+				s_intelCard.pct->setText(pu);
+			}
+			m_intelResolved = TRUE;
+		}
+		else if (!pending || m_intelWaitCalls > 3000)
+		{
+			// Worker finished without a usable result (or the long backstop
+			// tripped): show the themed fallback and give up. NOTE: we must NOT
+			// fall back merely because loading hit 100% - after local load the
+			// game spins in a wait-for-players loop calling update(101) ~10x/s,
+			// which is precisely the window a late result arrives in. We keep
+			// polling there and only give up once the worker itself is done.
+			UnicodeString u;
+			u.translate(AsciiString("BATTLEFIELD INTEL\nRecon uplink is down, General.\nNo intel on this engagement.\nTrust your instincts."));
+			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
+			s_intelCard.state = INTEL_CARD_NODATA;
+			m_intelResolved = TRUE;
+		}
+	}
+#endif
 
 	// Do this last!
 	LoadScreen::update( percent );

@@ -214,6 +214,71 @@ MapSummaryResult MapSummaryFromServer(const AsciiString& url,
                                       const AsciiString& mapName,
                                       const std::vector<MapSummaryPlayer>& players);
 
+// ---------------------------------------------------------------------------
+// Multiplayer loading-screen "battlefield intel".
+//
+// A background worker calls radarvan's predict / team_stats / synergy
+// endpoints and composes a short, display-ready blurb for the multiplayer
+// load screen (shown in place of the general-features text). Everything here
+// is best-effort and non-blocking: the worker runs on its own thread, writes
+// its result under a lock, and the load screen polls each frame. If nothing
+// comes back before loading finishes, the caller simply shows a themed
+// fallback note - the game never waits on radarvan.
+// ---------------------------------------------------------------------------
+
+/// Kick off the intel worker for one game. Copies its arguments and returns
+/// immediately; the actual HTTP happens on a detached thread. Safe to call
+/// with empty URLs (it just resets to the "no intel" state and starts
+/// nothing). Any in-flight state from a previous game is cleared.
+///
+/// @param predictUrl    POST /api/predict endpoint (the anchor call; if this
+///                      URL is empty or the request fails, no intel is shown)
+/// @param teamStatsUrl  GET /api/team_stats/ endpoint ("" to skip)
+/// @param synergyUrl    GET /api/player_ratings/synergy/ endpoint ("" to skip)
+/// @param mapName       Display name of the map being loaded
+/// @param localTeam     Local player's 1-based team (0 = observer/none; the
+///                      panel then uses neutral "Team 1/Team 2" labels)
+/// @param players       Roster; MapSummaryPlayer::team must be 1-based here
+///                      (predict rejects team 0), MapSummaryPlayer::general is
+///                      the faction/general template index
+void RadarvanIntelStart(const AsciiString& predictUrl,
+                        const AsciiString& teamStatsUrl,
+                        const AsciiString& synergyUrl,
+                        const AsciiString& mapName,
+                        int localTeam,
+                        const std::vector<MapSummaryPlayer>& players);
+
+/// Clear all intel state (no pending request, no result). Used to make sure a
+/// fresh game never shows a previous game's blurb.
+void RadarvanIntelReset(void);
+
+/// True once the worker has produced a non-empty blurb; copies it into
+/// outText. Non-blocking; returns false while still pending or on failure.
+bool RadarvanIntelReady(AsciiString& outText);
+
+/// True while a request is in flight (worker started, not yet finished).
+/// When this is false and RadarvanIntelReady() is also false, the worker
+/// either was never started or finished without data -> show the fallback.
+bool RadarvanIntelPending(void);
+
+/// The raw numbers behind the intel blurb, for the load-screen graphic.
+/// Teams A/B here are predict's team_a (lobby team 1) and team_b (team 2).
+struct RadarvanIntelData
+{
+	int   favoredTeam;     ///< 1 or 2; 0 if unknown
+	int   localTeam;       ///< local player's 1-based team; 0 = observer/none
+	float favoredWinProb;  ///< probability the favored team wins (0..1)
+	bool  aHasRecord; int aWins; int aLosses;
+	bool  bHasRecord; int bWins; int bLosses;
+	bool  aHasPair;   float aDelta; ///< team A standout-duo win_prob_delta
+	bool  bHasPair;   float bDelta; ///< team B standout-duo win_prob_delta
+};
+
+/// Copy the structured intel numbers for the current game into `out`.
+/// Returns true only when a result is ready (same gate as RadarvanIntelReady,
+/// which returns the formatted text). Non-blocking.
+bool RadarvanIntelReadyData(RadarvanIntelData& out);
+
 /// Result of a map_vote/<N>/choose API call.
 struct ChooseMapResult
 {
