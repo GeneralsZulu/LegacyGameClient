@@ -2505,16 +2505,18 @@ static AsciiString composeIntel(const IntelJob &job, RadarvanIntelData &data)
 	AsciiString out;
 	out.concat("BATTLEFIELD INTEL\n");
 
-	int oddsPct = pctSigned(favoredProb);
 	char oddsLine[128];
 	if (job.localTeam == 1 || job.localTeam == 2)
 	{
-		const char *who = (favoredTeam == (unsigned int)job.localTeam) ? "your side" : "the enemy";
-		sprintf(oddsLine, "Victory odds: %d%% - %s", oddsPct, who);
+		// Always report the local player's own odds (matches the gauge/needle).
+		double yourProb = (favoredTeam == (unsigned int)job.localTeam)
+			? favoredProb : (1.0 - favoredProb);
+		sprintf(oddsLine, "Victory odds: %d%%", pctSigned(yourProb));
 	}
 	else
 	{
-		sprintf(oddsLine, "Odds favor Team %u - %d%%", favoredTeam, oddsPct);
+		// Observer: no "your" side, so name the favored team.
+		sprintf(oddsLine, "Odds favor Team %u - %d%%", favoredTeam, pctSigned(favoredProb));
 	}
 	out.concat(oddsLine);
 	out.concat('\n');
