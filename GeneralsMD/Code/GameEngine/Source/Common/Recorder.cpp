@@ -951,52 +951,52 @@ void RecorderClass::stopRecording() {
 			fflush(stdout);
 		}
 
-		if (wasCollecting && hasMinHumans && !TheGlobalData->m_replayUrl.isEmpty())
+		// Local player identity for the telemetry uploads below (replay + logs).
+		// The lobby display name is UTF-8 encoded for the replay upload's
+		// optional form field; localPlayerSlot is kept as a stable fallback id
+		// for the per-player log grouping. Computed once, under the shared gate.
+		AsciiString playerNameUtf8;
+		Int localPlayerSlot = -1;
+		if (wasCollecting && hasMinHumans && TheGameInfo != nullptr)
 		{
-			AsciiString replayPath = getReplayDir();
-			replayPath.concat(m_fileName);
-
-			// Look up the local lobby slot's display name and UTF-8 encode
-			// it so the server can record who uploaded this copy of the
-			// replay. The radarvan endpoint accepts this as an optional
-			// form field; if we can't determine it, we send empty and the
-			// upload helper just omits the field.
-			AsciiString playerNameUtf8;
-			if (TheGameInfo != nullptr)
+			localPlayerSlot = TheGameInfo->getLocalSlotNum();
+			if (localPlayerSlot >= 0)
 			{
-				Int localSlot = TheGameInfo->getLocalSlotNum();
-				if (localSlot >= 0)
+				const GameSlot *s = TheGameInfo->getConstSlot(localPlayerSlot);
+				if (s != nullptr)
 				{
-					const GameSlot *s = TheGameInfo->getConstSlot(localSlot);
-					if (s != nullptr)
+					UnicodeString w = s->getName();
+					const WideChar *p = w.str();
+					if (p != nullptr)
 					{
-						UnicodeString w = s->getName();
-						const WideChar *p = w.str();
-						if (p != nullptr)
+						for (; *p != L'\0'; ++p)
 						{
-							for (; *p != L'\0'; ++p)
+							unsigned int c = static_cast<unsigned int>(*p);
+							if (c < 0x80)
 							{
-								unsigned int c = static_cast<unsigned int>(*p);
-								if (c < 0x80)
-								{
-									playerNameUtf8.concat(static_cast<char>(c));
-								}
-								else if (c < 0x800)
-								{
-									playerNameUtf8.concat(static_cast<char>(0xC0 | (c >> 6)));
-									playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
-								}
-								else
-								{
-									playerNameUtf8.concat(static_cast<char>(0xE0 | (c >> 12)));
-									playerNameUtf8.concat(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
-									playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
-								}
+								playerNameUtf8.concat(static_cast<char>(c));
+							}
+							else if (c < 0x800)
+							{
+								playerNameUtf8.concat(static_cast<char>(0xC0 | (c >> 6)));
+								playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
+							}
+							else
+							{
+								playerNameUtf8.concat(static_cast<char>(0xE0 | (c >> 12)));
+								playerNameUtf8.concat(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+								playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
 							}
 						}
 					}
 				}
 			}
+		}
+
+		if (wasCollecting && hasMinHumans && !TheGlobalData->m_replayUrl.isEmpty())
+		{
+			AsciiString replayPath = getReplayDir();
+			replayPath.concat(m_fileName);
 
 			FILE *rf = fopen(replayPath.str(), "rb");
 			if (rf != nullptr)
@@ -1037,6 +1037,29 @@ void RecorderClass::stopRecording() {
 				printf("[replay] ERROR: Failed to read %s for upload\n", replayPath.str());
 				fflush(stdout);
 			}
+		}
+
+		// Per-match debug/observer log upload. Same gate as the replay/map
+		// uploads. Each log is gzip'd client-side and the server groups them
+		// under <seed>/<player>/, so every client's copy of the match logs is
+		// retrievable together. The debug log only exists in logging builds;
+		// the observer log only when this client observed, so UploadLogsToServer
+		// silently skips whichever source files are absent.
+		if (wasCollecting && hasMinHumans && !TheGlobalData->m_logsUrl.isEmpty())
+		{
+			AsciiString playerId = playerNameUtf8;
+			if (playerId.isEmpty())
+				playerId.format("slot%d", localPlayerSlot);
+
+			AsciiString logPaths[2];
+			unsigned int logCount = 0;
+#ifdef DEBUG_LOGGING
+			logPaths[logCount++] = DebugGetLogFileName(); // main debug log (absolute path)
+#endif
+			logPaths[logCount++] = "ObserverLog.txt";     // observer log (written next to the exe)
+
+			UploadLogsToServer(TheGlobalData->m_logsUrl, GetGameLogicRandomSeed(),
+				playerId, logPaths, logCount);
 		}
 
 		// Map check + conditional map upload. Runs after the replay step;
