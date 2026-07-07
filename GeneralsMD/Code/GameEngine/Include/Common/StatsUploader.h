@@ -29,6 +29,23 @@
 /// @param seed Game seed for the X-Game-Seed header
 void UploadStatsToServer(const AsciiString& url, const void *data, unsigned int dataLen, unsigned int seed);
 
+/// Upload one or more client log files (e.g. the debug log and the observer
+/// log) to the cncstats /logs endpoint via HTTP POST as multipart/form-data.
+/// Each file is read from disk, gzip-compressed in memory, and sent as its own
+/// file part named "<basename>.gz". Sends the X-Game-Seed header (match id) and
+/// the X-Player header (which client the logs belong to); the server groups
+/// stored logs under <seed>/<player>/. Missing or empty source files are
+/// skipped. Best-effort and blocking; logs status to stdout.
+/// @param url Full URL of the /logs endpoint (empty disables)
+/// @param seed Game seed for the X-Game-Seed header
+/// @param player Identifier for the X-Player header (uploading client). Header-
+///        sanitized internally; the call no-ops if it reduces to empty.
+/// @param filePaths Array of on-disk log file paths to upload
+/// @param fileCount Number of entries in filePaths
+void UploadLogsToServer(const AsciiString& url, unsigned int seed,
+                        const AsciiString& player,
+                        const AsciiString *filePaths, unsigned int fileCount);
+
 /// Upload a replay file to a REST endpoint via HTTP POST as
 /// multipart/form-data. Sends the binary replay as the "file" part and
 /// up to four optional identifier fields the radarvan server stores on

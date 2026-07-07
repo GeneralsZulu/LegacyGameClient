@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <zlib.h>
 #include <map>
 #include <vector>
 
@@ -308,6 +309,7 @@ static void httpPostMultipartFile(const AsciiString& url,
                                   unsigned int dataLen,
                                   const MultipartTextField *textFields,
                                   unsigned int textFieldCount,
+                                  const char *extraHeaders,
                                   unsigned int seed,
                                   const char *logTag)
 {
@@ -373,7 +375,7 @@ static void httpPostMultipartFile(const AsciiString& url,
 	char contentType[128];
 	sprintf(contentType, "multipart/form-data; boundary=%s", boundary);
 
-	httpPostBytes(url, body, bodyLen, contentType, nullptr, seed, logTag);
+	httpPostBytes(url, body, bodyLen, contentType, extraHeaders, seed, logTag);
 
 	free(body);
 }
@@ -638,7 +640,207 @@ void UploadReplayToServer(const AsciiString& url, const void *data, unsigned int
 	fields[3].value = (TheVersion != nullptr) ? TheVersion->getAsciiVersion() : AsciiString();
 
 	httpPostMultipartFile(url, "file", nameBuf, data, dataLen,
-		fields, 4, seed, "Replay upload");
+		fields, 4, nullptr, seed, "Replay upload");
+}
+
+// ---------------------------------------------------------------------------
+// Per-match client log upload (gzip'd multipart to cncstats /logs).
+// ---------------------------------------------------------------------------
+
+// Compress srcLen bytes of src into a genuine gzip (.gz) stream returned via
+// *outBuf / *outLen (caller frees with free()). Returns false on any failure.
+//
+// zlib 1.1.4 (the bundled version) can't emit a gzip wrapper directly: its
+// deflateInit2 only accepts windowBits 8..15 - no negative "raw" or +16 "gzip"
+// modes. So we let compress2() produce a zlib stream (a 2-byte zlib header, the
+// raw DEFLATE payload, then a 4-byte Adler-32) and re-wrap just the DEFLATE
+// payload in the gzip container (10-byte header + payload + CRC-32 + ISIZE).
+// The DEFLATE bytes are identical to what a native gzip encoder would carry.
+static bool gzipBuffer(const unsigned char *src, unsigned int srcLen,
+                       unsigned char **outBuf, unsigned int *outLen)
+{
+	*outBuf = nullptr;
+	*outLen = 0;
+	if (src == nullptr || srcLen == 0)
+		return false;
+
+	// zlib 1.1.4 has no compressBound(); its documented worst case for
+	// compress2() is srcLen + srcLen/1000 + 12. Add slack on top.
+	uLong zbufCap = (uLong)srcLen + (uLong)srcLen / 1000u + 64u;
+	unsigned char *zbuf = (unsigned char *)malloc((size_t)zbufCap);
+	if (zbuf == nullptr)
+		return false;
+
+	uLong zlen = zbufCap;
+	if (compress2(zbuf, &zlen, src, (uLong)srcLen, Z_BEST_COMPRESSION) != Z_OK
+		|| zlen < 6)
+	{
+		free(zbuf);
+		return false;
+	}
+
+	// Strip the 2-byte zlib header and the trailing 4-byte Adler-32; compress2
+	// never uses a preset dictionary, so the header is always exactly 2 bytes.
+	const unsigned char *deflateData = zbuf + 2;
+	unsigned int deflateLen = (unsigned int)zlen - 6u;
+
+	static const unsigned char gzHeader[10] = {
+		0x1F, 0x8B,             // magic
+		0x08,                   // CM = DEFLATE
+		0x00,                   // FLG (no optional fields)
+		0x00, 0x00, 0x00, 0x00, // MTIME (unknown)
+		0x00,                   // XFL
+		0xFF                    // OS = unknown
+	};
+
+	unsigned int gzLen = (unsigned int)sizeof(gzHeader) + deflateLen + 8u;
+	unsigned char *gz = (unsigned char *)malloc(gzLen);
+	if (gz == nullptr)
+	{
+		free(zbuf);
+		return false;
+	}
+
+	unsigned int pos = 0;
+	memcpy(gz + pos, gzHeader, sizeof(gzHeader));
+	pos += (unsigned int)sizeof(gzHeader);
+	memcpy(gz + pos, deflateData, deflateLen);
+	pos += deflateLen;
+
+	// CRC-32 of the uncompressed data, little-endian.
+	uLong crc = crc32(0L, src, srcLen);
+	gz[pos++] = (unsigned char)(crc & 0xFF);
+	gz[pos++] = (unsigned char)((crc >> 8) & 0xFF);
+	gz[pos++] = (unsigned char)((crc >> 16) & 0xFF);
+	gz[pos++] = (unsigned char)((crc >> 24) & 0xFF);
+
+	// ISIZE: uncompressed size mod 2^32, little-endian.
+	gz[pos++] = (unsigned char)(srcLen & 0xFF);
+	gz[pos++] = (unsigned char)((srcLen >> 8) & 0xFF);
+	gz[pos++] = (unsigned char)((srcLen >> 16) & 0xFF);
+	gz[pos++] = (unsigned char)((srcLen >> 24) & 0xFF);
+
+	free(zbuf);
+	*outBuf = gz;
+	*outLen = gzLen;
+	return true;
+}
+
+// Read an entire file into a malloc'd buffer. Returns false (out params left
+// zeroed) if the file can't be opened, can't be read whole, or is empty.
+static bool readWholeFile(const char *path, unsigned char **outBuf, unsigned int *outLen)
+{
+	*outBuf = nullptr;
+	*outLen = 0;
+	FILE *fp = fopen(path, "rb");
+	if (fp == nullptr)
+		return false;
+	fseek(fp, 0, SEEK_END);
+	long size = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	if (size <= 0)
+	{
+		fclose(fp);
+		return false;
+	}
+	unsigned char *buf = (unsigned char *)malloc((size_t)size);
+	if (buf == nullptr)
+	{
+		fclose(fp);
+		return false;
+	}
+	size_t got = fread(buf, 1, (size_t)size, fp);
+	fclose(fp);
+	if (got != (size_t)size)
+	{
+		free(buf);
+		return false;
+	}
+	*outBuf = buf;
+	*outLen = (unsigned int)size;
+	return true;
+}
+
+// Reduce an arbitrary player identifier to a header-safe, single-segment token:
+// map anything that would break an HTTP header line or a path component to '_',
+// and cap the length.
+static void sanitizeHeaderToken(const AsciiString& in, char *out, unsigned int outCap)
+{
+	if (outCap == 0)
+		return;
+	unsigned int n = 0;
+	const char *p;
+	for (p = in.str(); *p != '\0' && n + 1 < outCap; ++p)
+	{
+		unsigned char c = (unsigned char)*p;
+		if (c < 0x20 || c == 0x7F || c == '\r' || c == '\n' ||
+			c == '/' || c == '\\' || c == '"' || c == ':')
+			c = '_';
+		out[n++] = (char)c;
+	}
+	out[n] = '\0';
+}
+
+void UploadLogsToServer(const AsciiString& url, unsigned int seed,
+                        const AsciiString& player,
+                        const AsciiString *filePaths, unsigned int fileCount)
+{
+	if (url.isEmpty() || filePaths == nullptr || fileCount == 0)
+		return;
+
+	char playerToken[128];
+	sanitizeHeaderToken(player, playerToken, sizeof(playerToken));
+	if (playerToken[0] == '\0')
+	{
+		printf("Log upload: no usable X-Player id; skipping\n");
+		fflush(stdout);
+		return;
+	}
+
+	char playerHeader[192];
+	int hdrLen = sprintf(playerHeader, "X-Player: %s\r\n", playerToken);
+	if (hdrLen <= 0)
+		return;
+
+	unsigned int i;
+	for (i = 0; i < fileCount; ++i)
+	{
+		if (filePaths[i].isEmpty())
+			continue;
+
+		unsigned char *raw = nullptr;
+		unsigned int rawLen = 0;
+		if (!readWholeFile(filePaths[i].str(), &raw, &rawLen))
+		{
+			// Missing/empty is expected for e.g. ObserverLog.txt when this
+			// client wasn't an observer; skip quietly.
+			continue;
+		}
+
+		unsigned char *gz = nullptr;
+		unsigned int gzLen = 0;
+		bool didGzip = gzipBuffer(raw, rawLen, &gz, &gzLen);
+		free(raw);
+		if (!didGzip)
+			continue;
+
+		// Upload filename = "<basename>.gz". httpPostMultipartFile reduces the
+		// name to its basename; the .gz suffix advertises the gzip encoding.
+		char baseBuf[256];
+		sanitizeMultipartFilename(filePaths[i].str(), baseBuf, sizeof(baseBuf));
+		char nameBuf[280];
+		_snprintf(nameBuf, sizeof(nameBuf), "%.255s.gz", baseBuf);
+		nameBuf[sizeof(nameBuf) - 1] = '\0';
+
+		printf("Log upload: %s -> %u bytes gzipped (%u raw) as %s\n",
+			filePaths[i].str(), gzLen, rawLen, nameBuf);
+		fflush(stdout);
+
+		httpPostMultipartFile(url, "file", nameBuf, gz, gzLen,
+			nullptr, 0, playerHeader, seed, "Log upload");
+
+		free(gz);
+	}
 }
 
 void *AppendZuluUploadTag(const void *fileData, unsigned int fileLen,
