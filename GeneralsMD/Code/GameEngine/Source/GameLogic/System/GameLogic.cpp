@@ -110,6 +110,7 @@
 #include "GameNetwork/GameSpy/ThreadUtils.h"
 #include "GameNetwork/LANAPICallbacks.h"
 #include "GameNetwork/NetworkInterface.h"
+#include "GameNetwork/RandomAssign.h"
 #include "GameNetwork/GameSpy/PersistentStorageThread.h"
 
 #include <rts/profile.h>
@@ -807,21 +808,20 @@ static void populateRandomSideAndColor( GameInfo *game )
 
 // ------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------
+static Int gameLogicStartSpotRandom(Int lo, Int hi)
+{
+	return GameLogicRandomValue(lo, hi);
+}
+
 static const WaypointMap s_emptyWaypoints = WaypointMap();
 
-static void populateRandomStartPosition( GameInfo *game )
+// The greedy placement that predates ZULU_AI_FEATURE_SPOT_SOLVER, kept
+// byte-for-byte for playback of replays recorded before the global solver:
+// the spot choices AND the number of GameLogicRandomValue draws must match
+// the recording exactly or the whole sim diverges.
+static void legacyPopulateRandomStartPosition( GameInfo *game, Int numPlayers, const MapMetaData *md )
 {
-	if(!game)
-		return;
-
 	Int i;
-	Int numPlayers = MAX_SLOTS;
-	const MapMetaData *md = TheMapCache->findMap( game->getMap() );
-	if (md)
-		numPlayers = md->m_numPlayers;
-	else
-		printf("Could not find map \"%s\"\n", game->getMap().str());
-	DEBUG_ASSERTCRASH( md , ("Could not find map %s in the mapcache", game->getMap().str()));
 
 	// generate a map of start spot distances
 	Real startSpotDistance[MAX_SLOTS][MAX_SLOTS];
@@ -878,76 +878,6 @@ static void populateRandomStartPosition( GameInfo *game )
 		}
 	}
 
-#if 0  //GS  The old way puts everyone as far apart as possible.
-	// now pick non-observer spots
-	for (i=0; i<MAX_SLOTS; ++i)
-	{
-		GameSlot *slot = game->getSlot(i);
-
-		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
-			continue;
-
-		// clean up random start spots
-		Int posIdx = slot->getStartPos();
-		if (posIdx < 0 || posIdx >= numPlayers)
-		{
-			DEBUG_ASSERTCRASH(posIdx == -1, ("Non-random bad start position %d in slot %d", posIdx, i));
-			if (hasStartSpotBeenPicked)
-			{
-				// pick the farthest spot away
-				Real farthestDistance = 0.0f;
-				Int farthestIndex = -1;
-				for (posIdx = 0; posIdx < numPlayers; ++posIdx)
-				{
-					if (!taken[posIdx])
-					{
-						if (farthestIndex < 0)
-						{
-							farthestIndex = posIdx; // take this one as best if none else
-							for (Int n=0; n<numPlayers; ++n)
-							{
-								if (taken[n] && n != posIdx)
-									farthestDistance += startSpotDistance[posIdx][n];
-							}
-						}
-						else
-						{
-							Real dist = 0.0f;
-							for (Int n=0; n<numPlayers; ++n)
-							{
-								if (taken[n] && n != posIdx)
-									dist += startSpotDistance[posIdx][n];
-							}
-							if (dist > farthestDistance)
-							{
-								farthestDistance = dist;
-								farthestIndex = posIdx;
-							}
-						}
-					}
-				}
-				DEBUG_ASSERTCRASH(farthestIndex >= 0, ("Couldn't find a farthest spot!"));
-				slot->setStartPos(farthestIndex);
-				taken[farthestIndex] = TRUE;
-			}
-			else
-			{
-				// We're the first real spot.  Pick randomly.
-				// This while loop shouldn't be necessary, since we're first.  Why not, though?
-				while (posIdx == -1)
-				{
-					posIdx = GameLogicRandomValue(0, numPlayers-1);
-					if (game->isStartPositionTaken(posIdx))
-						posIdx = -1;
-				}
-				DEBUG_LOG(("Setting start position %d to %d (random choice)", i, posIdx));
-				slot->setStartPos(posIdx);
-				taken[posIdx] = TRUE;
-				hasStartSpotBeenPicked = TRUE;
-			}
-		}
-	}
-#else  //GS  The new way puts teammates next to each other.
 	Int teamPosIdx[MAX_SLOTS];
 	for (i=0; i<MAX_SLOTS; ++i)
 		teamPosIdx[i] = -1;  //team has no starting position yet
@@ -1042,7 +972,34 @@ static void populateRandomStartPosition( GameInfo *game )
 			}
 		}
 	}
-#endif // 0
+}
+
+static void populateRandomStartPosition( GameInfo *game )
+{
+	if(!game)
+		return;
+
+	Int i;
+	Int numPlayers = MAX_SLOTS;
+	const MapMetaData *md = TheMapCache->findMap( game->getMap() );
+	if (md)
+		numPlayers = md->m_numPlayers;
+	else
+		printf("Could not find map \"%s\"\n", game->getMap().str());
+	DEBUG_ASSERTCRASH( md , ("Could not find map %s in the mapcache", game->getMap().str()));
+
+	// All combatants go through the shared global solver (see
+	// GameNetwork/RandomAssign.h): every team-to-spot assignment is scored
+	// as a whole (teams far apart, teammates close together) using
+	// ground-path distances from the map cache when available, so the last
+	// player to place can no longer get stranded beside the enemy team.
+	// GameLogicRandomValue keeps the result identical on every peer.
+	// Replays recorded before the solver existed must re-run the old greedy
+	// placement instead, or the spots and RNG draws diverge from the recording.
+	if (TheRecorder && !TheRecorder->isAIFeatureEnabled(RecorderClass::ZULU_AI_FEATURE_SPOT_SOLVER))
+		legacyPopulateRandomStartPosition( game, numPlayers, md );
+	else
+		assignStartPositionsGlobal( game, gameLogicStartSpotRandom );
 
 	// now go back & assign observer spots
 	Int numPlayersInGame = 0;
