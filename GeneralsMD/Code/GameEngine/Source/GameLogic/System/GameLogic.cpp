@@ -813,6 +813,167 @@ static Int gameLogicStartSpotRandom(Int lo, Int hi)
 	return GameLogicRandomValue(lo, hi);
 }
 
+static const WaypointMap s_emptyWaypoints = WaypointMap();
+
+// The greedy placement that predates ZULU_AI_FEATURE_SPOT_SOLVER, kept
+// byte-for-byte for playback of replays recorded before the global solver:
+// the spot choices AND the number of GameLogicRandomValue draws must match
+// the recording exactly or the whole sim diverges.
+static void legacyPopulateRandomStartPosition( GameInfo *game, Int numPlayers, const MapMetaData *md )
+{
+	Int i;
+
+	// generate a map of start spot distances
+	Real startSpotDistance[MAX_SLOTS][MAX_SLOTS];
+	for (i=0; i<MAX_SLOTS; ++i)
+	{
+		for (Int j=0; j<MAX_SLOTS; ++j)
+		{
+			if (i != j && (i<numPlayers && j<numPlayers))
+			{
+				const WaypointMap& waypoints = md ? md->m_waypoints : s_emptyWaypoints;
+				AsciiString w1, w2;
+				w1.format("Player_%d_Start", i+1);
+				w2.format("Player_%d_Start", j+1);
+				WaypointMap::const_iterator c1 = waypoints.find(w1);
+				WaypointMap::const_iterator c2 = waypoints.find(w2);
+				if (c1 == waypoints.end() || c2 == waypoints.end())
+				{
+					// couldn't find a waypoint.  must be kinda far away.
+					startSpotDistance[i][j] = 1000000.0f;
+				}
+				else
+				{
+					Coord3D p1 = c1->second;
+					Coord3D p2 = c2->second;
+					startSpotDistance[i][j] = sqrt( sqr(p1.x-p2.x) + sqr(p1.y-p2.y) );
+				}
+			}
+			else
+			{
+				startSpotDistance[i][j] = 0.0f; // not gonna need this
+			}
+		}
+	}
+
+	// see if a start spot has been chosen at all yet
+	Bool hasStartSpotBeenPicked = FALSE;
+	Bool taken[MAX_SLOTS];
+	for (i=0; i<MAX_SLOTS; ++i)
+	{
+		taken[i] = (i<numPlayers)?FALSE:TRUE;
+	}
+	for (i=0; i<MAX_SLOTS; ++i)
+	{
+		GameSlot *slot = game->getSlot(i);
+
+		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+			continue;
+
+		Int posIdx = slot->getStartPos();
+		if (posIdx >= 0 || posIdx >= numPlayers)
+		{
+			hasStartSpotBeenPicked = TRUE;
+			taken[posIdx] = TRUE;
+		}
+	}
+
+	Int teamPosIdx[MAX_SLOTS];
+	for (i=0; i<MAX_SLOTS; ++i)
+		teamPosIdx[i] = -1;  //team has no starting position yet
+
+	// now pick non-observer spots
+	for (i=0; i<MAX_SLOTS; ++i)
+	{
+		GameSlot *slot = game->getSlot(i);
+
+		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+			continue;  //slot not used
+
+		Int posIdx = slot->getStartPos();
+		if (posIdx >= 0  &&  posIdx < numPlayers)
+			continue;  //position already assigned
+		DEBUG_ASSERTCRASH(posIdx == -1, ("Non-random bad start position %d in slot %d", posIdx, i));
+
+		//choose a starting position
+		Int team = slot->getTeamNumber();
+		if( !hasStartSpotBeenPicked )
+		{	// We're the first real spot.  Pick randomly.
+			while (posIdx == -1)
+			{	// This while loop shouldn't be neccessary, since we're first.  Why not, though?
+				posIdx = GameLogicRandomValue(0, numPlayers-1);
+				if (game->isStartPositionTaken(posIdx))
+					posIdx = -1;
+			}
+			DEBUG_LOG(("Setting start position %d to %d (random choice)", i, posIdx));
+			hasStartSpotBeenPicked = TRUE;
+			slot->setStartPos(posIdx);
+			taken[posIdx] = TRUE;
+			if( team > -1 )
+				teamPosIdx[team] = posIdx;  //remember where this team is
+		} else
+		{	//pick teams far apart, team members close together
+			if( team < 0  ||  teamPosIdx[ team ] == -1 )  //if team None or team not yet placed
+			{	//pick position furthest from all other teams
+				Real farthestDistance = 0.0f;
+				Int farthestIndex = -1;
+				for (posIdx = 0; posIdx < numPlayers; ++posIdx)
+				{
+					if (taken[posIdx])
+						continue;  //skip occupied positions
+
+					if (farthestIndex < 0)
+					{	//take this one as best if none else
+						farthestIndex = posIdx;
+						for (Int n=0; n<numPlayers; ++n)
+						{
+							if (taken[n] && n != posIdx)
+								farthestDistance += startSpotDistance[posIdx][n];
+						}
+					}
+					else
+					{	//find empty position furthest from all taken positions
+						Real dist = 0.0f;
+						for (Int n=0; n<numPlayers; ++n)
+						{
+							if (taken[n] && n != posIdx)
+								dist += startSpotDistance[posIdx][n];
+						}
+						if (dist > farthestDistance)
+						{
+							farthestDistance = dist;
+							farthestIndex = posIdx;
+						}
+					}
+				}
+
+				DEBUG_ASSERTCRASH(farthestIndex >= 0, ("Couldn't find a farthest spot!"));
+				slot->setStartPos(farthestIndex);
+				taken[farthestIndex] = TRUE;
+				if( team > -1 )
+					teamPosIdx[team] = farthestIndex;  //remember where this team is
+			}
+			else  //team already has a starting position
+			{	//pick position closest to team
+				Real closestDist = FLT_MAX;
+				Int  closestIdx = 0;
+				for( Int n=0;  n < numPlayers;  ++n )
+				{
+					Real dist = startSpotDistance[ teamPosIdx[team] ][n];
+					if( !taken[n]  &&  dist < closestDist )
+					{	//found a better match
+						closestDist = dist;
+						closestIdx = n;
+					}
+				}
+				DEBUG_ASSERTCRASH( closestDist < FLT_MAX, ("Couldn't find a closest starting position!"));
+				slot->setStartPos(closestIdx);
+				taken[closestIdx] = TRUE;
+			}
+		}
+	}
+}
+
 static void populateRandomStartPosition( GameInfo *game )
 {
 	if(!game)
@@ -833,7 +994,12 @@ static void populateRandomStartPosition( GameInfo *game )
 	// ground-path distances from the map cache when available, so the last
 	// player to place can no longer get stranded beside the enemy team.
 	// GameLogicRandomValue keeps the result identical on every peer.
-	assignStartPositionsGlobal( game, gameLogicStartSpotRandom );
+	// Replays recorded before the solver existed must re-run the old greedy
+	// placement instead, or the spots and RNG draws diverge from the recording.
+	if (TheRecorder && !TheRecorder->isAIFeatureEnabled(RecorderClass::ZULU_AI_FEATURE_SPOT_SOLVER))
+		legacyPopulateRandomStartPosition( game, numPlayers, md );
+	else
+		assignStartPositionsGlobal( game, gameLogicStartSpotRandom );
 
 	// now go back & assign observer spots
 	Int numPlayersInGame = 0;
