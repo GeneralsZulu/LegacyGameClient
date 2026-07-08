@@ -50,6 +50,7 @@
 #include "GameLogic/GameLogic.h"
 #include "Common/RandomValue.h"
 #include "Common/CRCDebug.h"
+#include "Common/ReleaseLog.h"
 #include "Common/OptionPreferences.h"
 #include "Common/StatsExporter.h"
 #include "Common/StatsUploader.h"
@@ -908,6 +909,11 @@ void RecorderClass::startRecording(GameDifficulty diff, Int originalGameMode, In
  */
 void RecorderClass::stopRecording() {
 	logGameEnd();
+
+	// Release diagnostics (always compiled): mark the end of the match in the
+	// uploadable release log.
+	ReleaseLog("=== Match end: frame=%d desync=%d ===",
+		TheGameLogic ? TheGameLogic->getFrame() : -1, (int)m_wasDesync);
 	if (TheNetwork)
 	{
 		//if (TheLAN)
@@ -1041,6 +1047,7 @@ void RecorderClass::stopRecording() {
 				up.logFilePaths.push_back(AsciiString(DebugGetLogFileName())); // absolute path
 #endif
 				up.logFilePaths.push_back(AsciiString("ObserverLog.txt"));      // next to the exe
+				up.logFilePaths.push_back(AsciiString(ReleaseGetLogFileName())); // always-on release log
 			}
 
 			// Map check + conditional map upload. Look up the played map's CRC
@@ -1502,6 +1509,12 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 
 			DEBUG_LOG(("Replay has gone out of sync!\nInGame:%8.8X Replay:%8.8X\nFrame:%d",
 				playbackCRC, newCRC, mismatchFrame));
+
+			// Release diagnostics (always compiled): record the divergence and
+			// dump the recent CRC history to the uploadable release log.
+			ReleaseLog("Replay out of sync: InGame=%8.8X Replay=%8.8X frame=%d",
+				playbackCRC, newCRC, mismatchFrame);
+			ReleaseLogDumpCRCHistory();
 
 			// Print Mismatch in case we are simulating replays from console.
 			printf("CRC Mismatch in Frame %d\n", mismatchFrame);

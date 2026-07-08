@@ -33,6 +33,7 @@
 #include "Common/AudioHandleSpecialValues.h"
 #include "Common/BuildAssistant.h"
 #include "Common/CRCDebug.h"
+#include "Common/ReleaseLog.h"
 #include "Common/FramePacer.h"
 #include "Common/GameAudio.h"
 #include "Common/GameEngine.h"
@@ -1285,6 +1286,17 @@ void GameLogic::startNewGame( Bool loadingSaveGame )
 
 	LANObsLog("startNewGame: past early-return; doing actual loading. mapName='%s'",
 		TheGlobalData ? TheGlobalData->m_mapName.str() : "(null)");
+
+	// Release diagnostic log: begin a fresh CRC history for this match and
+	// record a one-line header describing it. Always compiled (unlike DEBUG_LOG).
+	ReleaseLogResetCRCHistory();
+	{
+		const Bool relIsMP = (TheRecorder && TheRecorder->isMultiplayer());
+		const Int relCRCInterval = TheGameInfo ? TheGameInfo->getCRCInterval() : 0;
+		ReleaseLog("=== Match start: map='%s' mode=%d multiplayer=%d crcInterval=%d ===",
+			TheGlobalData ? TheGlobalData->m_mapName.str() : "(null)",
+			(int)m_gameMode, (int)relIsMP, (int)relCRCInterval);
+	}
 
 	// update the loadscreen
 	if(m_loadScreen)
@@ -2664,6 +2676,17 @@ void GameLogic::processCommandList( CommandList *list )
 
 		if (sawCRCMismatch)
 		{
+			// Release diagnostics (always compiled): record which players' CRCs we
+			// saw and dump the recent CRC history so a shipping build's uploaded
+			// log pinpoints the divergence. Player names are omitted here (index is
+			// enough to identify the slot) to keep this off the wide-string path.
+			ReleaseLog("CRC MISMATCH on frame %d - saw %d CRCs from %d players",
+				m_frame, m_cachedCRCs.size(), numPlayers);
+			for (std::map<Int, UnsignedInt>::const_iterator relIt = m_cachedCRCs.begin(); relIt != m_cachedCRCs.end(); ++relIt)
+			{
+				ReleaseLog("  player %d CRC=%8.8X", relIt->first, relIt->second);
+			}
+			ReleaseLogDumpCRCHistory();
 #ifdef DEBUG_LOGGING
 			DEBUG_LOG(("CRC Mismatch - saw %d CRCs from %d players", m_cachedCRCs.size(), numPlayers));
 			for (std::map<Int, UnsignedInt>::const_iterator crcIt = m_cachedCRCs.begin(); crcIt != m_cachedCRCs.end(); ++crcIt)
@@ -3767,6 +3790,11 @@ void GameLogic::update()
 		messageList->appendMessage(msg);
 
 		DEBUG_LOG(("Appended %sCRC on frame %d: %8.8X", isPlayback ? "Playback " : "", m_frame, m_CRC));
+
+		// Tier-2 release diagnostics: keep an in-memory ring of recent overall
+		// CRCs so a shipping build can dump the run-up to a desync. In-memory
+		// only; nothing hits disk unless a mismatch triggers a dump.
+		ReleaseLogRecordFrameCRC(m_frame, m_CRC);
 	}
 
 	// collect stats
@@ -4162,6 +4190,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC at start of frame %d is 0x%8.8X", m_frame, xferCRC->getCRC()));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "start", xferCRC->getCRC());
 	}
 
 	marker = "MARKER:Objects";
@@ -4174,6 +4204,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC after objects for frame %d is 0x%8.8X", m_frame, xferCRC->getCRC()));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "objects", xferCRC->getCRC());
 	}
 
 	if (isInGameLogicUpdate())
@@ -4190,6 +4222,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC after partition manager for frame %d is 0x%8.8X", m_frame, xferCRC->getCRC()));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "partition", xferCRC->getCRC());
 	}
 
 #ifdef DEBUG_CRC
@@ -4212,6 +4246,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC after PlayerList for frame %d is 0x%8.8X", m_frame, xferCRC->getCRC()));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "playerlist", xferCRC->getCRC());
 	}
 
 	marker = "MARKER:TheAI";
@@ -4220,6 +4256,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC after AI for frame %d is 0x%8.8X", m_frame, xferCRC->getCRC()));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "ai", xferCRC->getCRC());
 	}
 
 	if (xferCRC->getXferMode() == XFER_SAVE)
@@ -4239,6 +4277,8 @@ UnsignedInt GameLogic::getCRC( Int mode, AsciiString deepCRCFileName )
 	if (isInGameLogicUpdate())
 	{
 		CRCGEN_LOG(("CRC for frame %d is 0x%8.8X", m_frame, theCRC));
+		if (TheReleaseLogSubsystemCRCs)
+			ReleaseLogRecordSubsystemCRC(m_frame, "final", theCRC);
 	}
 	return theCRC;
 }
