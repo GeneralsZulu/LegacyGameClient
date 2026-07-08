@@ -2987,3 +2987,263 @@ bool RadarvanIntelReadyData(RadarvanIntelData& out)
 	LeaveCriticalSection(&s_intelCS);
 	return ready;
 }
+
+// ---------------------------------------------------------------------------
+// Background match-telemetry upload.
+//
+// stopRecording used to run the stats/replay/log/map uploads inline on the main
+// thread, so a slow or unreachable server stalled the whole game at end of
+// match (each channel is a blocking WinINet round-trip under default timeouts).
+// We now snapshot the volatile inputs on the main thread and hand a plain-C job
+// to a detached worker that does all the HTTP. Mirrors the RadarvanIntel worker:
+// no AsciiStringData is shared across threads (the worker rebuilds AsciiStrings
+// from char buffers), and every buffer handed over is malloc'd and freed by the
+// worker. Best-effort - if the game exits mid-upload the worker is simply torn
+// down with the process.
+// ---------------------------------------------------------------------------
+
+struct TelemetryLogBuf
+{
+	unsigned char *bytes;    // raw (ungzipped) log contents; the worker gzips it
+	unsigned int   len;
+	char           name[64]; // basename for the multipart filename (".gz" appended)
+};
+
+struct TelemetryJob
+{
+	unsigned int seed;
+
+	bool haveStats;
+	char statsUrl[512];
+	unsigned char *statsBytes;
+	unsigned int statsLen;
+
+	bool haveReplay;
+	char replayUrl[512];
+	unsigned char *replayBytes;   // already carries the ZUTG upload trailer
+	unsigned int replayLen;
+	char replayFileName[128];
+	char playerNameUtf8[192];
+
+	bool haveLogs;
+	char logsUrl[512];
+	char playerId[128];
+	TelemetryLogBuf logs[4];
+	unsigned int logCount;
+
+	bool haveMap;
+	char mapCheckUrl[512];
+	char mapUploadUrl[512];
+	unsigned int mapCRC;
+	char mapFilePath[512];
+	unsigned int mapContentsMask;
+};
+
+static void freeTelemetryJob(TelemetryJob *job)
+{
+	if (job == nullptr)
+		return;
+	if (job->statsBytes != nullptr)
+		free(job->statsBytes);
+	if (job->replayBytes != nullptr)
+		free(job->replayBytes);
+	unsigned int i;
+	for (i = 0; i < job->logCount; ++i)
+		if (job->logs[i].bytes != nullptr)
+			free(job->logs[i].bytes);
+	free(job);
+}
+
+static void copyCStr(char *dst, unsigned int cap, const char *src)
+{
+	if (cap == 0)
+		return;
+	if (src == nullptr)
+	{
+		dst[0] = '\0';
+		return;
+	}
+	strncpy(dst, src, cap - 1);
+	dst[cap - 1] = '\0';
+}
+
+static unsigned __stdcall telemetryThreadProc(void *arg)
+{
+	TelemetryJob *job = (TelemetryJob *)arg;
+
+	// Stats: the gzipped JSON was snapshotted on the main thread.
+	if (job->haveStats && job->statsBytes != nullptr)
+	{
+		printf("[stats] Uploading %u bytes to %s\n", job->statsLen, job->statsUrl);
+		fflush(stdout);
+		UploadStatsToServer(AsciiString(job->statsUrl), job->statsBytes, job->statsLen, job->seed);
+	}
+
+	// Replay: bytes already include the ZUTG trailer (applied on the main
+	// thread before the on-disk file could be overwritten by the next game).
+	if (job->haveReplay && job->replayBytes != nullptr)
+	{
+		printf("[replay] Uploading %u bytes to %s\n", job->replayLen, job->replayUrl);
+		fflush(stdout);
+		UploadReplayToServer(AsciiString(job->replayUrl), job->replayBytes, job->replayLen,
+			AsciiString(job->replayFileName), job->seed, AsciiString(job->playerNameUtf8));
+	}
+
+	// Logs: gzip each raw snapshot here (CPU work off the main thread) and POST
+	// it as its own multipart file part, grouped under X-Player on the server.
+	if (job->haveLogs && job->logCount > 0)
+	{
+		char playerToken[128];
+		sanitizeHeaderToken(AsciiString(job->playerId), playerToken, sizeof(playerToken));
+		if (playerToken[0] != '\0')
+		{
+			char playerHeader[192];
+			sprintf(playerHeader, "X-Player: %s\r\n", playerToken);
+
+			unsigned int i;
+			for (i = 0; i < job->logCount; ++i)
+			{
+				if (job->logs[i].bytes == nullptr || job->logs[i].len == 0)
+					continue;
+
+				unsigned char *gz = nullptr;
+				unsigned int gzLen = 0;
+				if (!gzipBuffer(job->logs[i].bytes, job->logs[i].len, &gz, &gzLen))
+					continue;
+
+				char nameBuf[80];
+				_snprintf(nameBuf, sizeof(nameBuf), "%.63s.gz", job->logs[i].name);
+				nameBuf[sizeof(nameBuf) - 1] = '\0';
+
+				printf("Log upload: %s -> %u bytes gzipped (%u raw)\n",
+					nameBuf, gzLen, job->logs[i].len);
+				fflush(stdout);
+
+				httpPostMultipartFile(AsciiString(job->logsUrl), "file", nameBuf, gz, gzLen,
+					nullptr, 0, playerHeader, job->seed, "Log upload");
+
+				free(gz);
+			}
+		}
+		else
+		{
+			printf("Log upload: no usable X-Player id; skipping\n");
+			fflush(stdout);
+		}
+	}
+
+	// Map: static assets, read from disk here (they aren't overwritten between
+	// games). Does its own missing-from-server check first.
+	if (job->haveMap)
+	{
+		UploadAllMapAssetsIfMissing(AsciiString(job->mapCheckUrl), AsciiString(job->mapUploadUrl),
+			job->mapCRC, AsciiString(job->mapFilePath), job->mapContentsMask, job->seed);
+	}
+
+	freeTelemetryJob(job);
+	return 0;
+}
+
+void StartMatchTelemetryUpload(const MatchTelemetryUpload& p)
+{
+	TelemetryJob *job = (TelemetryJob *)calloc(1, sizeof(TelemetryJob));
+	if (job == nullptr)
+		return;
+	job->seed = p.seed;
+
+	// Stats: snapshot the gzipped JSON file into memory.
+	if (!p.statsUrl.isEmpty() && !p.statsFilePath.isEmpty())
+	{
+		unsigned char *b = nullptr;
+		unsigned int n = 0;
+		if (readWholeFile(p.statsFilePath.str(), &b, &n))
+		{
+			copyCStr(job->statsUrl, sizeof(job->statsUrl), p.statsUrl.str());
+			job->statsBytes = b;
+			job->statsLen = n;
+			job->haveStats = true;
+		}
+	}
+
+	// Replay: snapshot the .rep and append the ZUTG upload trailer now, so the
+	// on-disk file is free to be overwritten by the next game immediately.
+	if (!p.replayUrl.isEmpty() && !p.replayFilePath.isEmpty())
+	{
+		unsigned char *raw = nullptr;
+		unsigned int rawLen = 0;
+		if (readWholeFile(p.replayFilePath.str(), &raw, &rawLen))
+		{
+			unsigned int taggedLen = 0;
+			void *tagged = AppendZuluUploadTag(raw, rawLen, &taggedLen);
+			free(raw);
+			if (tagged != nullptr)
+			{
+				copyCStr(job->replayUrl, sizeof(job->replayUrl), p.replayUrl.str());
+				copyCStr(job->replayFileName, sizeof(job->replayFileName), p.replayFileName.str());
+				copyCStr(job->playerNameUtf8, sizeof(job->playerNameUtf8), p.playerNameUtf8.str());
+				job->replayBytes = (unsigned char *)tagged;
+				job->replayLen = taggedLen;
+				job->haveReplay = true;
+			}
+		}
+	}
+
+	// Logs: snapshot each present file's raw bytes (the worker gzips them). An
+	// absent/empty log (e.g. ObserverLog.txt when this client wasn't observing)
+	// is simply skipped.
+	if (!p.logsUrl.isEmpty() && !p.logFilePaths.empty())
+	{
+		copyCStr(job->logsUrl, sizeof(job->logsUrl), p.logsUrl.str());
+		copyCStr(job->playerId, sizeof(job->playerId), p.playerId.str());
+
+		size_t i;
+		const size_t maxLogs = sizeof(job->logs) / sizeof(job->logs[0]);
+		for (i = 0; i < p.logFilePaths.size() && job->logCount < maxLogs; ++i)
+		{
+			if (p.logFilePaths[i].isEmpty())
+				continue;
+
+			unsigned char *b = nullptr;
+			unsigned int n = 0;
+			if (!readWholeFile(p.logFilePaths[i].str(), &b, &n))
+				continue;
+
+			TelemetryLogBuf *slot = &job->logs[job->logCount];
+			slot->bytes = b;
+			slot->len = n;
+			sanitizeMultipartFilename(p.logFilePaths[i].str(), slot->name, sizeof(slot->name));
+			++job->logCount;
+		}
+		job->haveLogs = (job->logCount > 0);
+	}
+
+	// Map: static assets read lazily by the worker; just carry the identifiers.
+	if (!p.mapCheckUrl.isEmpty() && !p.mapFilePath.isEmpty() && p.mapCRC != 0)
+	{
+		copyCStr(job->mapCheckUrl, sizeof(job->mapCheckUrl), p.mapCheckUrl.str());
+		copyCStr(job->mapUploadUrl, sizeof(job->mapUploadUrl), p.mapUploadUrl.str());
+		copyCStr(job->mapFilePath, sizeof(job->mapFilePath), p.mapFilePath.str());
+		job->mapCRC = p.mapCRC;
+		job->mapContentsMask = p.mapContentsMask;
+		job->haveMap = true;
+	}
+
+	// Nothing survived the snapshot step? Don't spawn a worker.
+	if (!job->haveStats && !job->haveReplay && !job->haveLogs && !job->haveMap)
+	{
+		freeTelemetryJob(job);
+		return;
+	}
+
+	// _beginthreadex returns the handle as an integer type; VC6 has no
+	// uintptr_t, so capture it straight into a HANDLE.
+	unsigned threadId = 0;
+	HANDLE hThread = (HANDLE)_beginthreadex(nullptr, 0, telemetryThreadProc, job, 0, &threadId);
+	if (hThread == NULL)
+	{
+		// Couldn't spawn; telemetry is best-effort, so just drop it.
+		freeTelemetryJob(job);
+		return;
+	}
+	CloseHandle(hThread); // detached; the worker frees the job when it finishes
+}

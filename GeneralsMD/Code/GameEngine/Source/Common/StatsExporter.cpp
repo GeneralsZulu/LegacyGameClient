@@ -853,19 +853,20 @@ static void writePlayerJson(gzFile f, Player *player, Int gameIndex)
 
 //-----------------------------------------------------------------------------
 
-void ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replayFileName)
+AsciiString ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replayFileName,
+                                Bool uploadInline)
 {
 	// No-op if collection wasn't started for this game (e.g. non-host LAN
 	// peers, replay viewing). Lets callers like Recorder::stopRecording
 	// invoke this unconditionally.
 	if (!s_state.exportingActive)
-		return;
+		return AsciiString();
 
 	if (ThePlayerList == nullptr || TheGameLogic == nullptr || TheGlobalData == nullptr)
 	{
 		s_state.resetData();
 		s_state.exportingActive = FALSE;
-		return;
+		return AsciiString();
 	}
 
 	// Strip any directory components from the replay filename
@@ -897,7 +898,7 @@ void ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replay
 		fflush(stdout);
 		s_state.resetData();
 		s_state.exportingActive = FALSE;
-		return;
+		return AsciiString();
 	}
 
 	gzputs(f, "{\n\"version\":2,\n\"game\":{");
@@ -943,7 +944,11 @@ void ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replay
 	// games with fewer than two human players: solo skirmishes / campaign
 	// missions / replay watches don't represent humans-vs-humans data and
 	// would just pollute the cncstats dataset.
-	if (!TheGlobalData->m_statsUrl.isEmpty() && StatsExporterHasMinHumansForUpload())
+	//
+	// When uploadInline is FALSE the caller (Recorder::stopRecording) takes
+	// ownership of shipping this file via the background telemetry worker, so
+	// we only write it here and hand back the path.
+	if (uploadInline && !TheGlobalData->m_statsUrl.isEmpty() && StatsExporterHasMinHumansForUpload())
 	{
 		FILE *rf = fopen(statsPath.str(), "rb");
 		if (rf != nullptr)
@@ -976,4 +981,5 @@ void ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replay
 
 	s_state.resetData();
 	s_state.exportingActive = FALSE;
+	return statsPath;
 }

@@ -937,7 +937,9 @@ void RecorderClass::stopRecording() {
 	if (!m_fileName.isEmpty())
 	{
 		const bool wasCollecting = StatsExporterIsActive();
-		ExportGameStatsJSON(getReplayDir(), m_fileName);
+		// Write the stats JSON on this (main) thread - it reads live game state -
+		// but defer the actual upload to the background telemetry worker below.
+		const AsciiString statsFilePath = ExportGameStatsJSON(getReplayDir(), m_fileName, FALSE);
 
 		// Telemetry uploads (replay + map) only fire if the game had at
 		// least two human players. Mirrors the gate inside
@@ -993,102 +995,78 @@ void RecorderClass::stopRecording() {
 			}
 		}
 
-		if (wasCollecting && hasMinHumans && !TheGlobalData->m_replayUrl.isEmpty())
+		// Gather every telemetry channel into one request and hand it to the
+		// background worker. Everything below only reads main-thread-only state
+		// (TheGameInfo / TheMapCache / TheGlobalData); StartMatchTelemetryUpload
+		// snapshots the volatile files (replay, logs) before it returns, so the
+		// next game is free to overwrite them while the upload is still in flight.
+		// Nothing here blocks on HTTP.
+		if (wasCollecting && hasMinHumans)
 		{
-			AsciiString replayPath = getReplayDir();
-			replayPath.concat(m_fileName);
+			MatchTelemetryUpload up;
+			up.seed = GetGameLogicRandomSeed();
+			up.mapCRC = 0;
+			up.mapContentsMask = 0;
 
-			FILE *rf = fopen(replayPath.str(), "rb");
-			if (rf != nullptr)
+			// Stats: the gzipped JSON we just wrote (upload deferred here).
+			if (!TheGlobalData->m_statsUrl.isEmpty() && !statsFilePath.isEmpty())
 			{
-				fseek(rf, 0, SEEK_END);
-				long size = ftell(rf);
-				fseek(rf, 0, SEEK_SET);
-				if (size > 0)
-				{
-					void *fileData = malloc(static_cast<size_t>(size));
-					if (fileData != nullptr)
-					{
-						if (fread(fileData, 1, static_cast<size_t>(size), rf) == static_cast<size_t>(size))
-						{
-							// Append a ZUTG trailer so the server can distinguish
-							// uploads sourced from the Zulu client from third-party
-							// (e.g. gentool) uploads of the same on-disk file. The
-							// disk file itself is not modified.
-							unsigned int uploadLen = 0;
-							void *uploadBuf = AppendZuluUploadTag(fileData, static_cast<unsigned int>(size), &uploadLen);
-							if (uploadBuf != nullptr)
-							{
-								printf("[replay] Uploading %u bytes (incl. %u-byte ZUTG trailer) to %s\n",
-									uploadLen, uploadLen - static_cast<unsigned int>(size), TheGlobalData->m_replayUrl.str());
-								fflush(stdout);
-								UploadReplayToServer(TheGlobalData->m_replayUrl, uploadBuf, uploadLen, m_fileName,
-									GetGameLogicRandomSeed(), playerNameUtf8);
-								free(uploadBuf);
-							}
-						}
-						free(fileData);
-					}
-				}
-				fclose(rf);
+				up.statsUrl = TheGlobalData->m_statsUrl;
+				up.statsFilePath = statsFilePath;
 			}
-			else
+
+			// Replay.
+			if (!TheGlobalData->m_replayUrl.isEmpty())
 			{
-				printf("[replay] ERROR: Failed to read %s for upload\n", replayPath.str());
-				fflush(stdout);
+				AsciiString replayPath = getReplayDir();
+				replayPath.concat(m_fileName);
+				up.replayUrl = TheGlobalData->m_replayUrl;
+				up.replayFilePath = replayPath;
+				up.replayFileName = m_fileName;
+				up.playerNameUtf8 = playerNameUtf8;
 			}
-		}
 
-		// Per-match debug/observer log upload. Same gate as the replay/map
-		// uploads. Each log is gzip'd client-side and the server groups them
-		// under <seed>/<player>/, so every client's copy of the match logs is
-		// retrievable together. The debug log only exists in logging builds;
-		// the observer log only when this client observed, so UploadLogsToServer
-		// silently skips whichever source files are absent.
-		if (wasCollecting && hasMinHumans && !TheGlobalData->m_logsUrl.isEmpty())
-		{
-			AsciiString playerId = playerNameUtf8;
-			if (playerId.isEmpty())
-				playerId.format("slot%d", localPlayerSlot);
-
-			AsciiString logPaths[2];
-			unsigned int logCount = 0;
+			// Per-match debug/observer logs. The server groups them under
+			// <seed>/<player>/, so every client's copy is retrievable together.
+			// The debug log only exists in logging builds; the observer log only
+			// when this client observed - absent files are skipped by the worker.
+			if (!TheGlobalData->m_logsUrl.isEmpty())
+			{
+				AsciiString playerId = playerNameUtf8;
+				if (playerId.isEmpty())
+					playerId.format("slot%d", localPlayerSlot);
+				up.logsUrl = TheGlobalData->m_logsUrl;
+				up.playerId = playerId;
 #ifdef DEBUG_LOGGING
-			logPaths[logCount++] = DebugGetLogFileName(); // main debug log (absolute path)
+				up.logFilePaths.push_back(AsciiString(DebugGetLogFileName())); // absolute path
 #endif
-			logPaths[logCount++] = "ObserverLog.txt";     // observer log (written next to the exe)
-
-			UploadLogsToServer(TheGlobalData->m_logsUrl, GetGameLogicRandomSeed(),
-				playerId, logPaths, logCount);
-		}
-
-		// Map check + conditional map upload. Runs after the replay step;
-		// independent of whether the replay/stats upload succeeded. We
-		// look up the played map's CRC from the cache, ask the server
-		// whether it already has it, and (if not) upload the .map plus
-		// every sidecar present on disk. The helper handles the missing-
-		// from-server check internally and silently skips sidecars that
-		// don't exist (sidecars are optional per-map).
-		if (wasCollecting && hasMinHumans && !TheGlobalData->m_mapCheckUrl.isEmpty()
-			&& TheMapCache != nullptr && TheGlobalData != nullptr)
-		{
-			AsciiString mapName = TheGlobalData->m_mapName;
-			const MapMetaData *md = TheMapCache->findMap(mapName);
-			if (md == nullptr || md->m_CRC == 0)
-			{
-				printf("[map] No cached metadata for \"%s\", skipping map check\n", mapName.str());
-				fflush(stdout);
+				up.logFilePaths.push_back(AsciiString("ObserverLog.txt"));      // next to the exe
 			}
-			else
+
+			// Map check + conditional map upload. Look up the played map's CRC
+			// from the cache; the worker asks the server whether it already has
+			// it and, if not, uploads the .map plus every sidecar on disk.
+			// 0xFE = all sidecar bits set (2|4|8|16|32|64).
+			if (!TheGlobalData->m_mapCheckUrl.isEmpty() && TheMapCache != nullptr)
 			{
-				// 0xFE = all sidecar bits set (2|4|8|16|32|64). The helper
-				// uploads whichever ones actually exist on disk; missing
-				// sidecars are skipped without warning.
-				UploadAllMapAssetsIfMissing(TheGlobalData->m_mapCheckUrl,
-					TheGlobalData->m_mapUploadUrl,
-					md->m_CRC, md->m_fileName, 0xFE,
-					GetGameLogicRandomSeed());
+				AsciiString mapName = TheGlobalData->m_mapName;
+				const MapMetaData *md = TheMapCache->findMap(mapName);
+				if (md == nullptr || md->m_CRC == 0)
+				{
+					printf("[map] No cached metadata for \"%s\", skipping map check\n", mapName.str());
+					fflush(stdout);
+				}
+				else
+				{
+					up.mapCheckUrl = TheGlobalData->m_mapCheckUrl;
+					up.mapUploadUrl = TheGlobalData->m_mapUploadUrl;
+					up.mapCRC = md->m_CRC;
+					up.mapFilePath = md->m_fileName;
+					up.mapContentsMask = 0xFE;
+				}
 			}
+
+			StartMatchTelemetryUpload(up);
 		}
 	}
 

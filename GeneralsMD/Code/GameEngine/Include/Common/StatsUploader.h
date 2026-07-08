@@ -21,6 +21,51 @@
 
 #include <vector>
 
+/// All inputs needed to ship one match's telemetry (stats JSON, replay,
+/// per-client logs, and map assets) at end-of-match. Every field is read on the
+/// calling (main) thread only; see StartMatchTelemetryUpload.
+struct MatchTelemetryUpload
+{
+	unsigned int seed;              ///< X-Game-Seed correlation for every channel
+
+	// Stats: the gzipped game-stats JSON already written to disk by
+	// ExportGameStatsJSON(..., uploadInline=FALSE).
+	AsciiString statsUrl;           ///< empty disables the stats upload
+	AsciiString statsFilePath;      ///< path to the .gamestats.json.gz to upload
+
+	// Replay.
+	AsciiString replayUrl;          ///< empty disables the replay upload
+	AsciiString replayFilePath;     ///< on-disk .rep to snapshot and ZUTG-tag
+	AsciiString replayFileName;     ///< filename advertised in the multipart part
+	AsciiString playerNameUtf8;     ///< uploader's in-game name (UTF-8); empty to omit
+
+	// Per-client logs (debug + observer). Absent files are skipped.
+	AsciiString logsUrl;            ///< empty disables the log upload
+	AsciiString playerId;           ///< X-Player grouping id
+	std::vector<AsciiString> logFilePaths;
+
+	// Map assets (the .map plus whatever sidecars contentsMask flags).
+	AsciiString mapCheckUrl;        ///< empty disables the map check + upload
+	AsciiString mapUploadUrl;
+	unsigned int mapCRC;            ///< 0 disables the map check + upload
+	AsciiString mapFilePath;
+	unsigned int mapContentsMask;
+};
+
+/// Snapshot everything in `p` that a subsequent game could overwrite (the
+/// replay and log files are read into memory here; the ZUTG replay trailer is
+/// applied here too), then perform all its uploads on a detached background
+/// thread. Returns immediately - the game never blocks on end-of-match HTTP.
+///
+/// Best-effort: if no channel is configured or the worker thread can't be
+/// spawned, the whole upload is silently dropped. Map assets are static on
+/// disk, so the worker reads them lazily rather than snapshotting here.
+///
+/// Threading: mirrors the RadarvanIntel worker - the worker rebuilds its own
+/// AsciiStrings from plain char buffers, so no AsciiStringData is shared across
+/// threads (AsciiString's refCount is non-atomic).
+void StartMatchTelemetryUpload(const MatchTelemetryUpload& p);
+
 /// Upload gzip-compressed stats data to a REST endpoint via HTTP POST.
 /// Sends Content-Type: application/gzip with the X-Game-Seed header.
 /// @param url Full URL including path (e.g. "http://server:8080/stats")

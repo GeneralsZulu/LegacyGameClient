@@ -17,15 +17,24 @@
 
 #pragma once
 
-class AsciiString;
+#include "Common/AsciiString.h"
+
 class Object;
 class Player;
 class DamageInfo;
 
-/// Export game statistics as a JSON file alongside the replay file.
+/// Export game statistics as a gzipped JSON file alongside the replay file.
 /// @param replayDir Directory containing replays (e.g. "[UserDataPath]/Replays/")
 /// @param replayFileName Replay filename with extension (e.g. "LastReplay.rep")
-void ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replayFileName);
+/// @param uploadInline When TRUE (the default) the written file is also POSTed
+///        to the cncstats stats endpoint synchronously, as before. Recorder
+///        passes FALSE so the upload can be handed to the background telemetry
+///        worker instead of blocking the main thread at end-of-match.
+/// @return The path of the .gamestats.json.gz that was written, or an empty
+///         AsciiString if nothing was written (collection inactive, missing
+///         globals, or the file couldn't be opened).
+AsciiString ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString& replayFileName,
+                                Bool uploadInline = TRUE);
 
 /// Collect a time-series snapshot of all players' stats (called every game logic frame).
 /// Snapshots are taken every 30 frames (~1 second) and stored in memory.
