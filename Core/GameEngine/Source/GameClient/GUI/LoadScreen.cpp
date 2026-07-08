@@ -1862,6 +1862,13 @@ void MultiPlayerLoadScreen::update( Int percent )
 			GadgetStaticTextSetText(m_featuresLocalGeneral, u);
 			// Drive the portrait meter card from the same result.
 			RadarvanIntelReadyData(s_intelCard.d);
+			// Use the team the worker actually predicted against (data.localTeam
+			// == job.localTeam) for the win% math, not the raw slot team derived
+			// at setup. They differ in a 1v1 with no teams assigned: the worker
+			// synthesizes team 1 vs 2, but the slot's getTeamNumber() is -1 there,
+			// which would leave localTeam == 0 and make the needle/readout show
+			// the FAVORED team's odds instead of the local player's own.
+			s_intelCard.localTeam = s_intelCard.d.localTeam;
 			s_intelCard.state = INTEL_CARD_READY;
 			if (s_intelCard.pct != NULL)
 			{
