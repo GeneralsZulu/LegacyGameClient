@@ -64,6 +64,8 @@
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/NetworkDefs.h"
 
+#include <math.h>
+
 
 //-------------------------------------------------------------------------------
 // PRIVATE DATA ///////////////////////////////////////////////////////////////////////////////////
@@ -73,7 +75,7 @@ static const char *mapExtension = ".map";
 // MapCache.ini files that earlier Zulu builds polluted with cratePosition /
 // techDerrickPosition fields (which crash the retail vanilla parser). Bump
 // when the on-disk Zulu cache format gains new fields the engine relies on.
-static const char *MAP_CACHE_FORMAT_VERSION_TAG = "; MapCacheFormatVersion = 4";
+static const char *MAP_CACHE_FORMAT_VERSION_TAG = "; MapCacheFormatVersion = 5";
 
 static Bool hasZuluFormatSentinel(const AsciiString &filename)
 {
@@ -148,6 +150,369 @@ static Coord3DList	m_garrisonablePositions;
 static Int m_mapDX = 0;
 static Int m_mapDY = 0;
 
+#if RTS_ZEROHOUR
+//-------------------------------------------------------------------------------
+// Start-spot ground-path distances (Zulu).
+// Built from data already parsed at cache time: the raw heightmap, water
+// polygon triggers, and bridge map objects. A cell is impassable when its
+// corner-height spread exceeds the pathfind cliff limit (same rule as
+// WorldHeightMap::setCellCliffFlagFromHeights) or its center lies under a
+// water area; bridge spans stamp a passable corridor back in. An 8-way
+// grid flood fill (cost 10 straight / 14 diagonal) then yields the ground
+// distance between every pair of Player_N_Start waypoints.
+
+// Must match PATHFIND_CLIFF_SLOPE_LIMIT_F in WorldHeightMap.cpp.
+static const Real CACHE_CLIFF_SLOPE_LIMIT = 9.8f;
+
+struct CachedWaterArea
+{
+	std::vector<ICoord3D> points;
+	Real waterZ;
+	IRegion2D bounds;
+};
+
+struct CachedBridgeSpan
+{
+	Coord3D from;
+	Coord3D to;
+};
+
+static std::vector<CachedWaterArea> m_waterAreas;
+static std::vector<CachedBridgeSpan> m_bridgeSpans;
+static Coord3D m_pendingBridgeStart;
+static Bool m_havePendingBridgeStart = FALSE;
+
+// Same crossing test as PolygonTrigger::pointInTrigger, run against a local
+// copy of the polygon. The real PolygonTrigger class self-registers in the
+// global trigger list that belongs to the running game, which the cache
+// build must not touch.
+static Bool waterAreaContains(const CachedWaterArea &area, Int px, Int py)
+{
+	if (px < area.bounds.lo.x || py < area.bounds.lo.y || px > area.bounds.hi.x || py > area.bounds.hi.y)
+		return FALSE;
+
+	Bool inside = FALSE;
+	const Int numPoints = (Int)area.points.size();
+	Int i;
+	for (i = 0; i < numPoints; ++i)
+	{
+		ICoord3D pt1 = area.points[i];
+		ICoord3D pt2 = area.points[(i + 1 == numPoints) ? 0 : i + 1];
+		if (pt1.y == pt2.y)
+			continue; // ignore horizontal lines
+		if (pt1.y < py && pt2.y < py) continue;
+		if (pt1.y >= py && pt2.y >= py) continue;
+		if (pt1.x < px && pt2.x < px) continue;
+		Int dy = pt2.y - pt1.y;
+		Int dx = pt2.x - pt1.x;
+		Real intersectionX = pt1.x + (dx * (py - pt1.y)) / ((Real)dy);
+		if (intersectionX >= px)
+			inside = !inside;
+	}
+	return inside;
+}
+
+static void finalizeWaterArea(CachedWaterArea &area)
+{
+	area.waterZ = (Real)area.points[0].z;
+	area.bounds.lo.x = area.bounds.hi.x = area.points[0].x;
+	area.bounds.lo.y = area.bounds.hi.y = area.points[0].y;
+	Int i;
+	for (i = 1; i < (Int)area.points.size(); ++i)
+	{
+		if (area.points[i].x < area.bounds.lo.x) area.bounds.lo.x = area.points[i].x;
+		if (area.points[i].x > area.bounds.hi.x) area.bounds.hi.x = area.points[i].x;
+		if (area.points[i].y < area.bounds.lo.y) area.bounds.lo.y = area.points[i].y;
+		if (area.points[i].y > area.bounds.hi.y) area.bounds.hi.y = area.points[i].y;
+	}
+	m_waterAreas.push_back(area);
+}
+
+// Minimal reader for the PolygonTriggers chunk keeping only water areas.
+// Field layout follows PolygonTrigger::ParsePolygonTriggersDataChunk.
+static Bool ParseWaterAreasDataChunk(DataChunkInput &file, DataChunkInfo *info, void *userData)
+{
+	Int count = file.readInt();
+	while (count > 0)
+	{
+		count--;
+		file.readAsciiString();	// trigger name
+		if (info->version >= K_TRIGGERS_VERSION_4)
+			file.readAsciiString();	// layer name
+		file.readInt();	// trigger id
+		Bool isWater = FALSE;
+		if (info->version >= K_TRIGGERS_VERSION_2)
+			isWater = file.readByte();
+		if (info->version >= K_TRIGGERS_VERSION_3)
+		{
+			file.readByte();	// isRiver
+			file.readInt();	// riverStart
+		}
+		Int numPoints = file.readInt();
+		CachedWaterArea area;
+		Int i;
+		for (i = 0; i < numPoints; ++i)
+		{
+			ICoord3D pt;
+			pt.x = file.readInt();
+			pt.y = file.readInt();
+			pt.z = file.readInt();
+			if (isWater)
+				area.points.push_back(pt);
+		}
+		if (isWater && (Int)area.points.size() >= 3)
+			finalizeWaterArea(area);
+	}
+	if (info->version == K_TRIGGERS_VERSION_1)
+	{
+		// Maps from before water areas existed imply a default global water
+		// plane at the old water position (see the real parser).
+		CachedWaterArea area;
+		ICoord3D pt;
+		pt.z = 7;
+		pt.x = (Int)(-30 * MAP_XY_FACTOR);
+		pt.y = (Int)(-30 * MAP_XY_FACTOR);
+		area.points.push_back(pt);
+		pt.x = (Int)(30 * MAP_XY_FACTOR + TheGlobalData->m_waterExtentX);
+		area.points.push_back(pt);
+		pt.y = (Int)(30 * MAP_XY_FACTOR + TheGlobalData->m_waterExtentY);
+		area.points.push_back(pt);
+		pt.x = (Int)(-30 * MAP_XY_FACTOR);
+		area.points.push_back(pt);
+		finalizeWaterArea(area);
+	}
+	DEBUG_ASSERTCRASH(file.atEndOfChunk(), ("Incorrect data file length."));
+	return TRUE;
+}
+
+static void computeStartSpotPathDistances(MapMetaData *md)
+{
+	Int numSpots = md->m_waypoints.m_numStartSpots;
+	if (numSpots > MAX_MAP_START_SPOTS)
+		numSpots = MAX_MAP_START_SPOTS;
+	if (numSpots < 2 || m_data == nullptr || m_width < 2 || m_height < 2)
+		return;
+
+	const Int cellsX = m_width - 1;
+	const Int cellsY = m_height - 1;
+	const Int numCells = cellsX * cellsY;
+
+	// Passability grid: cells outside the playable area are blocked (units
+	// cannot detour through the decorative border), then the cliff rule on
+	// the cell's four corner heights, then water areas against the cell
+	// center.
+	std::vector<UnsignedByte> passable(numCells);
+	Int x, y;
+	for (y = 0; y < cellsY; ++y)
+	{
+		for (x = 0; x < cellsX; ++x)
+		{
+			if (x < m_borderSize || x > m_width - 2 - m_borderSize ||
+			    y < m_borderSize || y > m_height - 2 - m_borderSize)
+			{
+				passable[y * cellsX + x] = 0;
+				continue;
+			}
+			Real h1 = m_data[y * m_width + x] * MAP_HEIGHT_SCALE;
+			Real h2 = m_data[y * m_width + x + 1] * MAP_HEIGHT_SCALE;
+			Real h3 = m_data[(y + 1) * m_width + x] * MAP_HEIGHT_SCALE;
+			Real h4 = m_data[(y + 1) * m_width + x + 1] * MAP_HEIGHT_SCALE;
+			Real minZ = h1;
+			if (h2 < minZ) minZ = h2;
+			if (h3 < minZ) minZ = h3;
+			if (h4 < minZ) minZ = h4;
+			Real maxZ = h1;
+			if (h2 > maxZ) maxZ = h2;
+			if (h3 > maxZ) maxZ = h3;
+			if (h4 > maxZ) maxZ = h4;
+			Bool ok = (maxZ - minZ <= CACHE_CLIFF_SLOPE_LIMIT);
+			if (ok && !m_waterAreas.empty())
+			{
+				Real terrainZ = (h1 + h2 + h3 + h4) * 0.25f;
+				Int wx = REAL_TO_INT_FLOOR((x - m_borderSize + 0.5f) * MAP_XY_FACTOR);
+				Int wy = REAL_TO_INT_FLOOR((y - m_borderSize + 0.5f) * MAP_XY_FACTOR);
+				Int w;
+				for (w = 0; w < (Int)m_waterAreas.size(); ++w)
+				{
+					if (terrainZ < m_waterAreas[w].waterZ && waterAreaContains(m_waterAreas[w], wx, wy))
+					{
+						ok = FALSE;
+						break;
+					}
+				}
+			}
+			passable[y * cellsX + x] = (UnsignedByte)(ok ? 1 : 0);
+		}
+	}
+
+	// Bridges reconnect the grid across the water/chasm they span.
+	Int b;
+	for (b = 0; b < (Int)m_bridgeSpans.size(); ++b)
+	{
+		Real fx = m_bridgeSpans[b].from.x;
+		Real fy = m_bridgeSpans[b].from.y;
+		Real tx = m_bridgeSpans[b].to.x;
+		Real ty = m_bridgeSpans[b].to.y;
+		Real len = (Real)sqrt(sqr(tx - fx) + sqr(ty - fy));
+		Int steps = REAL_TO_INT_FLOOR(len / (MAP_XY_FACTOR * 0.5f)) + 1;
+		Int s;
+		for (s = 0; s <= steps; ++s)
+		{
+			Real t = (Real)s / (Real)steps;
+			Int cx = REAL_TO_INT_FLOOR((fx + (tx - fx) * t) / MAP_XY_FACTOR) + m_borderSize;
+			Int cy = REAL_TO_INT_FLOOR((fy + (ty - fy) * t) / MAP_XY_FACTOR) + m_borderSize;
+			Int dx, dy;
+			for (dy = -1; dy <= 1; ++dy)
+			{
+				for (dx = -1; dx <= 1; ++dx)
+				{
+					Int nx = cx + dx;
+					Int ny = cy + dy;
+					if (nx >= 0 && nx < cellsX && ny >= 0 && ny < cellsY)
+						passable[ny * cellsX + nx] = 1;
+				}
+			}
+		}
+	}
+
+	// Map each start waypoint to its grid cell, nudged to the nearest
+	// passable cell within a small radius (spots can sit against a cliff
+	// edge that the coarse cell test flags impassable).
+	Int spotCell[MAX_MAP_START_SPOTS];
+	Coord3D spotPos[MAX_MAP_START_SPOTS];
+	Int i, j;
+	for (i = 0; i < numSpots; ++i)
+	{
+		spotCell[i] = -1;
+		AsciiString wname;
+		wname.format("Player_%d_Start", i + 1);
+		WaypointMap::const_iterator it = md->m_waypoints.find(wname);
+		if (it == md->m_waypoints.end())
+			continue;
+		spotPos[i] = it->second;
+		Int cx = REAL_TO_INT_FLOOR(it->second.x / MAP_XY_FACTOR) + m_borderSize;
+		Int cy = REAL_TO_INT_FLOOR(it->second.y / MAP_XY_FACTOR) + m_borderSize;
+		if (cx < 0) cx = 0;
+		if (cx > cellsX - 1) cx = cellsX - 1;
+		if (cy < 0) cy = 0;
+		if (cy > cellsY - 1) cy = cellsY - 1;
+		if (!passable[cy * cellsX + cx])
+		{
+			Bool found = FALSE;
+			Int radius;
+			for (radius = 1; radius <= 5 && !found; ++radius)
+			{
+				Int dx, dy;
+				for (dy = -radius; dy <= radius && !found; ++dy)
+				{
+					for (dx = -radius; dx <= radius && !found; ++dx)
+					{
+						Int nx = cx + dx;
+						Int ny = cy + dy;
+						if (nx >= 0 && nx < cellsX && ny >= 0 && ny < cellsY && passable[ny * cellsX + nx])
+						{
+							cx = nx;
+							cy = ny;
+							found = TRUE;
+						}
+					}
+				}
+			}
+		}
+		spotCell[i] = cy * cellsX + cx;
+	}
+
+	// Flood fill from each spot: Dial's algorithm on a 15-slot bucket ring
+	// (all in-flight costs lie within 14 of the current cost, so residues
+	// mod 15 never collide).
+	std::vector<Int> dist(numCells);
+	for (i = 0; i < numSpots - 1; ++i)
+	{
+		if (spotCell[i] < 0)
+			continue;
+
+		Int c;
+		for (c = 0; c < numCells; ++c)
+			dist[c] = -1;
+
+		std::vector<Int> buckets[15];
+		dist[spotCell[i]] = 0;
+		buckets[0].push_back(spotCell[i]);
+		Int pending = 1;
+		Int curCost = 0;
+		while (pending > 0)
+		{
+			std::vector<Int> &bucket = buckets[curCost % 15];
+			if (bucket.empty())
+			{
+				++curCost;
+				continue;
+			}
+			Int cell = bucket.back();
+			bucket.pop_back();
+			--pending;
+			if (dist[cell] != curCost)
+				continue; // stale entry, a shorter path got there first
+			Int cx = cell % cellsX;
+			Int cy = cell / cellsX;
+			Int dx, dy;
+			for (dy = -1; dy <= 1; ++dy)
+			{
+				for (dx = -1; dx <= 1; ++dx)
+				{
+					if (dx == 0 && dy == 0)
+						continue;
+					Int nx = cx + dx;
+					Int ny = cy + dy;
+					if (nx < 0 || nx >= cellsX || ny < 0 || ny >= cellsY)
+						continue;
+					Int ncell = ny * cellsX + nx;
+					if (!passable[ncell])
+						continue;
+					if (dx != 0 && dy != 0)
+					{
+						// no cutting corners between two blocked cells
+						if (!passable[cy * cellsX + nx] || !passable[ny * cellsX + cx])
+							continue;
+					}
+					Int ncost = curCost + ((dx != 0 && dy != 0) ? 14 : 10);
+					if (dist[ncell] < 0 || ncost < dist[ncell])
+					{
+						dist[ncell] = ncost;
+						buckets[ncost % 15].push_back(ncell);
+						++pending;
+					}
+				}
+			}
+		}
+
+		for (j = i + 1; j < numSpots; ++j)
+		{
+			if (spotCell[j] < 0)
+				continue;
+			Real euclid = (Real)sqrt(sqr(spotPos[i].x - spotPos[j].x) + sqr(spotPos[i].y - spotPos[j].y));
+			Real d;
+			if (dist[spotCell[j]] >= 0)
+			{
+				d = dist[spotCell[j]] * (MAP_XY_FACTOR / 10.0f);
+				// The grid metric can undershoot slightly on pure diagonals,
+				// and 0 is reserved for "not computed".
+				if (d < euclid)
+					d = euclid;
+			}
+			else
+			{
+				// Disconnected (island vs island): very far, but keep the
+				// straight-line ordering between such pairs.
+				d = 1000000.0f + euclid;
+			}
+			md->m_startSpotPathDist[i][j] = d;
+			md->m_startSpotPathDist[j][i] = d;
+		}
+	}
+}
+#endif // RTS_ZEROHOUR
+
 static UnsignedInt calcCRC( AsciiString fname )
 {
 	CRC theCRC;
@@ -201,6 +566,49 @@ static Bool ParseObjectDataChunk(DataChunkInput &file, DataChunkInfo *info, void
 														TheThingFactory->findTemplate( name, FALSE ) );
 
 //DEBUG_LOG(("obj %s owner %s",name.str(),d.getAsciiString(TheKey_originalOwner).str()));
+
+#if RTS_ZEROHOUR
+	// Bridge spans for the start-spot path-distance grid. Sectional river
+	// bridges are two consecutive map objects flagged BRIDGE_POINT1 then
+	// BRIDGE_POINT2 (same adjacency rule as W3DBridgeBuffer::loadBridges);
+	// landmark bridges are a single KINDOF_BRIDGE object whose span runs
+	// along its facing angle for its geometry's major radius in each
+	// direction.
+	if (flags & FLAG_BRIDGE_POINT1)
+	{
+		m_pendingBridgeStart = loc;
+		m_havePendingBridgeStart = TRUE;
+	}
+	else if (flags & FLAG_BRIDGE_POINT2)
+	{
+		if (m_havePendingBridgeStart)
+		{
+			CachedBridgeSpan span;
+			span.from = m_pendingBridgeStart;
+			span.to = loc;
+			m_bridgeSpans.push_back(span);
+			m_havePendingBridgeStart = FALSE;
+		}
+	}
+	else
+	{
+		m_havePendingBridgeStart = FALSE;
+		if (pThisOne->getThingTemplate() && pThisOne->getThingTemplate()->isKindOf(KINDOF_BRIDGE))
+		{
+			Real halfSpan = pThisOne->getThingTemplate()->getTemplateGeometryInfo().getMajorRadius();
+			Real dirX = (Real)cos(angle);
+			Real dirY = (Real)sin(angle);
+			CachedBridgeSpan span;
+			span.from.x = loc.x - dirX * halfSpan;
+			span.from.y = loc.y - dirY * halfSpan;
+			span.from.z = loc.z;
+			span.to.x = loc.x + dirX * halfSpan;
+			span.to.y = loc.y + dirY * halfSpan;
+			span.to.z = loc.z;
+			m_bridgeSpans.push_back(span);
+		}
+	}
+#endif // RTS_ZEROHOUR
 
 	if (pThisOne->getProperties()->getType(TheKey_waypointID) == Dict::DICT_INT)
 	{
@@ -296,8 +704,10 @@ static Bool ParseSizeOnly(DataChunkInput &file, DataChunkInfo *info, void *userD
 			m_boundaries[i].y = file.readInt();
 		}
 	}
-	return true;
 
+	// Despite the function's name, read the height samples too: the
+	// start-spot path-distance computation needs them. The chunk framing
+	// makes any unread remainder harmless, so this stays compatible.
 	m_dataSize = file.readInt();
 	m_data = NEW UnsignedByte[m_dataSize];	// pool[]ify
 	if (m_dataSize <= 0 || (m_dataSize != (m_width*m_height))) {
@@ -343,6 +753,9 @@ static Bool loadMap( AsciiString filename )
 	file.registerParser( "HeightMapData", AsciiString::TheEmptyString, ParseSizeOnlyInChunk );
 	file.registerParser( "WorldInfo", AsciiString::TheEmptyString, ParseWorldDictDataChunk );
 	file.registerParser( "ObjectsList", AsciiString::TheEmptyString, ParseObjectsDataChunk );
+#if RTS_ZEROHOUR
+	file.registerParser( "PolygonTriggers", AsciiString::TheEmptyString, ParseWaterAreasDataChunk );
+#endif
 	if (!file.parse(nullptr)) {
 		throw(ERROR_CORRUPT_FILE_FORMAT);
 	}
@@ -366,6 +779,12 @@ static void resetMap()
 	m_cratePositions.clear();
 	m_techDerrickPositions.clear();
 	m_garrisonablePositions.clear();
+
+#if RTS_ZEROHOUR
+	m_waterAreas.clear();
+	m_bridgeSpans.clear();
+	m_havePendingBridgeStart = FALSE;
+#endif
 }
 
 static void getExtent( Region3D *extent )
@@ -526,6 +945,17 @@ void MapCache::writeCacheINI( const AsciiString &mapDir )
 				pos = *itc3d;
 				fprintf(fp, "  garrisonablePosition = X:%2.2f Y:%2.2f Z:%2.2f\n", pos.x, pos.y, pos.z);
 			}
+#if RTS_ZEROHOUR
+			Int si, sj;
+			for (si = 0; si < md.m_numPlayers && si < MAX_MAP_START_SPOTS; ++si)
+			{
+				for (sj = si + 1; sj < md.m_numPlayers && sj < MAX_MAP_START_SPOTS; ++sj)
+				{
+					if (md.m_startSpotPathDist[si][sj] > 0.0f)
+						fprintf(fp, "  startSpotPathDist_%d_%d = %2.2f\n", si + 1, sj + 1, md.m_startSpotPathDist[si][sj]);
+				}
+			}
+#endif
 			fprintf(fp, "END\n\n");
 		}
 		else
@@ -871,6 +1301,10 @@ Bool MapCache::addMap(
 	}
 
 	getExtent(&(md.m_extent));
+
+#if RTS_ZEROHOUR
+	computeStartSpotPathDistances(&md);
+#endif
 
 	(*this)[lowerFname] = md;
 

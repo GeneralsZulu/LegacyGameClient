@@ -70,9 +70,19 @@ public:
 
 typedef std::list <Coord3D> Coord3DList;
 
+enum { MAX_MAP_START_SPOTS = 8 };	// mirrors MAX_SLOTS (GameNetwork/NetworkDefs.h)
+
 class MapMetaData
 {
 public:
+	MapMetaData()
+	{
+		Int i, j;
+		for (i = 0; i < MAX_MAP_START_SPOTS; ++i)
+			for (j = 0; j < MAX_MAP_START_SPOTS; ++j)
+				m_startSpotPathDist[i][j] = 0.0f;
+	}
+
 	UnicodeString m_displayName;
 	AsciiString m_nameLookupTag;
 	Region3D m_extent;
@@ -92,6 +102,16 @@ public:
 	Coord3DList m_cratePositions;        ///< KINDOF_CRATE objects
 	Coord3DList m_techDerrickPositions;  ///< Tech buildings whose template name contains "Derrick"
 	Coord3DList m_garrisonablePositions; ///< KINDOF_GARRISONABLE_UNTIL_DESTROYED civilian buildings
+
+	// Ground-path distance between start waypoints in world units, 0-based
+	// spot indices, symmetric. Computed at cache build by flood-filling the
+	// heightmap passability grid (cliff slope rule + water areas, with bridge
+	// spans stamped passable). 0 means "not computed" (missing spot, or cache
+	// entry from before this field existed); consumers must fall back to
+	// straight-line distance for such pairs. Unreachable pairs are stored as
+	// 1000000 + straight-line distance so they still order sensibly.
+	Real m_startSpotPathDist[MAX_MAP_START_SPOTS][MAX_MAP_START_SPOTS];
+
 	AsciiString m_fileName;
 };
 

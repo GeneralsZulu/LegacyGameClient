@@ -89,10 +89,322 @@ static void assignRandomFactions(GameInfo *game, const std::vector<Int> &validTe
 	}
 }
 
-// Phase 2: Assign start positions using distance-based placement.
-// Mirrors populateRandomStartPosition (GameLogic.cpp:787-1053).
-// Different teams are placed far apart, teammates close together.
-// Only touches slots that have startPos == -1.
+// ------------------------------------------------------------------------------------------------
+// Global start-position solver.
+//
+// Instead of placing players one at a time (which can strand the last player
+// next to the enemy team), enumerate every distinct team-to-spot assignment
+// and score the whole arrangement. There are at most 8 spots and players on
+// the same team are interchangeable, so the search space is tiny (a 4v4 on an
+// 8-spot map is 70 groupings; a full 8-player FFA is 8! = 40320).
+//
+// Scoring is lexicographic: first maximize the smallest distance between any
+// two players on different teams (no one gets stranded in enemy territory),
+// then minimize the summed distance between teammates (allies group up).
+// Distances come from the map cache's ground-path matrix when the cache build
+// computed one (so a river or cliff between two spots makes them "far" even
+// when they look adjacent), falling back to straight-line otherwise.
+//
+// Assignments within 10% of the best on both criteria are treated as
+// equivalent and one is picked at random, keeping spawn variety on symmetric
+// maps. All randomness flows through the caller-supplied randFunc, so the
+// deterministic game-start path (GameLogicRandomValue) and the host-only
+// lobby path (rand) both work.
+// ------------------------------------------------------------------------------------------------
+
+struct SpotSolverState
+{
+	Int numSpots;
+	Real dist[MAX_SLOTS][MAX_SLOTS];
+
+	Int numPlayers;               // combatants (fixed and unfixed)
+	Int playerTeam[MAX_SLOTS];    // -1 = no team
+	Int playerSlot[MAX_SLOTS];    // lobby slot index
+	Int playerSpot[MAX_SLOTS];    // current assignment, -1 = unassigned
+	Bool playerFixed[MAX_SLOTS];  // spot was already chosen deliberately
+
+	Int unfixed[MAX_SLOTS];       // player indices needing a spot, teammates adjacent
+	Int numUnfixed;
+
+	Bool spotUsed[MAX_SLOTS];
+
+	// pass thresholds
+	Real bestMinCross;
+	Real bestIntra;
+	Real crossThresh;
+	Real intraThresh;
+
+	// reservoir pick among equivalent assignments
+	StartSpotRandomFunc randFunc;
+	Int tieCount;
+	Int chosenSpot[MAX_SLOTS];
+
+	Int pass; // 0: max minCross, 1: min intra among cross-eligible, 2: pick
+};
+
+static void scoreCurrentAssignment(const SpotSolverState *st, Real *outMinCross, Real *outIntra)
+{
+	Real minCross = FLT_MAX;
+	Real intra = 0.0f;
+	Int i, j;
+	for (i = 0; i < st->numPlayers; ++i)
+	{
+		if (st->playerSpot[i] < 0)
+			continue;
+		for (j = i + 1; j < st->numPlayers; ++j)
+		{
+			if (st->playerSpot[j] < 0)
+				continue;
+			Real d = st->dist[st->playerSpot[i]][st->playerSpot[j]];
+			if (st->playerTeam[i] >= 0 && st->playerTeam[i] == st->playerTeam[j])
+				intra += d;
+			else if (d < minCross)
+				minCross = d;
+		}
+	}
+	*outMinCross = minCross;
+	*outIntra = intra;
+}
+
+static void visitAssignment(SpotSolverState *st)
+{
+	Real minCross, intra;
+	scoreCurrentAssignment(st, &minCross, &intra);
+	switch (st->pass)
+	{
+	case 0:
+		if (minCross > st->bestMinCross)
+			st->bestMinCross = minCross;
+		break;
+	case 1:
+		if (minCross >= st->crossThresh && intra < st->bestIntra)
+			st->bestIntra = intra;
+		break;
+	case 2:
+		if (minCross >= st->crossThresh && intra <= st->intraThresh)
+		{
+			// reservoir sampling: the nth eligible assignment survives with
+			// probability 1/n, giving a uniform pick without storing them all
+			++st->tieCount;
+			if (st->randFunc(0, st->tieCount - 1) == 0)
+			{
+				Int i;
+				for (i = 0; i < st->numPlayers; ++i)
+					st->chosenSpot[i] = st->playerSpot[i];
+			}
+		}
+		break;
+	}
+}
+
+static void enumerateAssignments(SpotSolverState *st, Int depth)
+{
+	if (depth == st->numUnfixed)
+	{
+		visitAssignment(st);
+		return;
+	}
+	Int p = st->unfixed[depth];
+	Int minSpot = 0;
+	if (depth > 0)
+	{
+		// Teammates are interchangeable for scoring, so force ascending spot
+		// order within a team to visit each grouping exactly once.
+		Int q = st->unfixed[depth - 1];
+		if (st->playerTeam[p] >= 0 && st->playerTeam[p] == st->playerTeam[q])
+			minSpot = st->playerSpot[q] + 1;
+	}
+	Int s;
+	for (s = minSpot; s < st->numSpots; ++s)
+	{
+		if (st->spotUsed[s])
+			continue;
+		st->playerSpot[p] = s;
+		st->spotUsed[s] = TRUE;
+		enumerateAssignments(st, depth + 1);
+		st->spotUsed[s] = FALSE;
+		st->playerSpot[p] = -1;
+	}
+}
+
+void assignStartPositionsGlobal(GameInfo *game, StartSpotRandomFunc randFunc)
+{
+	if (!game || !randFunc)
+		return;
+
+	Int numSpots = MAX_SLOTS;
+	const MapMetaData *md = TheMapCache ? TheMapCache->findMap(game->getMap()) : NULL;
+	if (md)
+		numSpots = md->m_numPlayers;
+	if (numSpots <= 0 || numSpots > MAX_SLOTS)
+		return;
+
+	SpotSolverState st;
+	st.numSpots = numSpots;
+	st.randFunc = randFunc;
+
+	// Distance matrix: ground-path distance from the map cache when
+	// available, straight-line between start waypoints otherwise.
+	static const WaypointMap s_emptyWaypoints;
+	const WaypointMap &waypoints = md ? md->m_waypoints : s_emptyWaypoints;
+	Int i, j;
+	for (i = 0; i < MAX_SLOTS; ++i)
+		for (j = 0; j < MAX_SLOTS; ++j)
+			st.dist[i][j] = 0.0f;
+	for (i = 0; i < numSpots; ++i)
+	{
+		for (j = i + 1; j < numSpots; ++j)
+		{
+			Real d = 0.0f;
+			if (md && md->m_startSpotPathDist[i][j] > 0.0f)
+			{
+				d = md->m_startSpotPathDist[i][j];
+			}
+			else
+			{
+				AsciiString w1, w2;
+				w1.format("Player_%d_Start", i + 1);
+				w2.format("Player_%d_Start", j + 1);
+				WaypointMap::const_iterator c1 = waypoints.find(w1);
+				WaypointMap::const_iterator c2 = waypoints.find(w2);
+				if (c1 == waypoints.end() || c2 == waypoints.end())
+				{
+					d = 1000000.0f;
+				}
+				else
+				{
+					Coord3D p1 = c1->second;
+					Coord3D p2 = c2->second;
+					d = sqrt(sqr(p1.x - p2.x) + sqr(p1.y - p2.y));
+				}
+			}
+			st.dist[i][j] = st.dist[j][i] = d;
+		}
+	}
+
+	// Collect combatants; spots that were deliberately chosen stay fixed and
+	// still participate in scoring.
+	Int s;
+	for (s = 0; s < MAX_SLOTS; ++s)
+		st.spotUsed[s] = (s < numSpots) ? FALSE : TRUE;
+	st.numPlayers = 0;
+	for (i = 0; i < MAX_SLOTS; ++i)
+	{
+		GameSlot *slot = game->getSlot(i);
+		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
+			continue;
+		Int p = st.numPlayers++;
+		st.playerSlot[p] = i;
+		st.playerTeam[p] = slot->getTeamNumber();
+		st.playerSpot[p] = -1;
+		st.playerFixed[p] = FALSE;
+		Int posIdx = slot->getStartPos();
+		if (posIdx >= 0 && posIdx < numSpots && !st.spotUsed[posIdx])
+		{
+			st.playerSpot[p] = posIdx;
+			st.playerFixed[p] = TRUE;
+			st.spotUsed[posIdx] = TRUE;
+		}
+	}
+
+	// Unfixed players, with teammates adjacent (required by the ascending
+	// spot-order pruning in enumerateAssignments).
+	Bool added[MAX_SLOTS];
+	for (i = 0; i < MAX_SLOTS; ++i)
+		added[i] = FALSE;
+	st.numUnfixed = 0;
+	for (i = 0; i < st.numPlayers; ++i)
+	{
+		if (st.playerFixed[i] || added[i])
+			continue;
+		st.unfixed[st.numUnfixed++] = i;
+		added[i] = TRUE;
+		if (st.playerTeam[i] >= 0)
+		{
+			for (j = i + 1; j < st.numPlayers; ++j)
+			{
+				if (!st.playerFixed[j] && !added[j] && st.playerTeam[j] == st.playerTeam[i])
+				{
+					st.unfixed[st.numUnfixed++] = j;
+					added[j] = TRUE;
+				}
+			}
+		}
+	}
+	if (st.numUnfixed == 0)
+		return;
+
+	Int freeSpots = 0;
+	for (s = 0; s < numSpots; ++s)
+	{
+		if (!st.spotUsed[s])
+			++freeSpots;
+	}
+	if (st.numUnfixed > freeSpots)
+	{
+		// More players than start spots shouldn't happen; fill sequentially
+		// rather than leave anyone without a position.
+		s = 0;
+		for (i = 0; i < st.numUnfixed && s < numSpots; ++i)
+		{
+			while (s < numSpots && st.spotUsed[s])
+				++s;
+			if (s < numSpots)
+			{
+				GameSlot *slot = game->getSlot(st.playerSlot[st.unfixed[i]]);
+				if (slot)
+					slot->setStartPos(s);
+				st.spotUsed[s] = TRUE;
+			}
+		}
+		return;
+	}
+
+	// Pass 0: widest achievable separation between opposing players.
+	st.pass = 0;
+	st.bestMinCross = -1.0f;
+	enumerateAssignments(&st, 0);
+	if (st.bestMinCross >= FLT_MAX)
+		st.crossThresh = FLT_MAX; // no opposing pairs at all (everyone allied)
+	else
+		st.crossThresh = st.bestMinCross * 0.90f;
+
+	// Pass 1: tightest team grouping among well-separated assignments.
+	st.pass = 1;
+	st.bestIntra = FLT_MAX;
+	enumerateAssignments(&st, 0);
+	st.intraThresh = st.bestIntra * 1.10f + 1.0f;
+
+	// Pass 2: pick uniformly among assignments that are (near-)optimal on
+	// both criteria, for spawn variety on symmetric maps.
+	st.pass = 2;
+	st.tieCount = 0;
+	for (i = 0; i < MAX_SLOTS; ++i)
+		st.chosenSpot[i] = -1;
+	enumerateAssignments(&st, 0);
+	if (st.tieCount == 0)
+		return;
+
+	for (i = 0; i < st.numPlayers; ++i)
+	{
+		if (st.playerFixed[i] || st.chosenSpot[i] < 0)
+			continue;
+		GameSlot *slot = game->getSlot(st.playerSlot[i]);
+		if (slot)
+			slot->setStartPos(st.chosenSpot[i]);
+	}
+}
+
+// Phase 2: Assign start positions.
+// Combatants go through the global solver above; observers then attach to a
+// random occupied position. Only touches slots that have startPos == -1.
+static Int lobbyRandomValue(Int lo, Int hi)
+{
+	if (hi <= lo)
+		return lo;
+	return lo + (rand() % (hi - lo + 1));
+}
+
 static void assignRandomPositions(GameInfo *game)
 {
 	Int i;
@@ -104,161 +416,7 @@ static void assignRandomPositions(GameInfo *game)
 	if (numPlayers <= 0)
 		return;
 
-	// Build distance matrix between all start positions using map waypoints
-	static const WaypointMap s_emptyWaypoints;
-	const WaypointMap &waypoints = md ? md->m_waypoints : s_emptyWaypoints;
-	Real startSpotDistance[MAX_SLOTS][MAX_SLOTS];
-	for (i = 0; i < MAX_SLOTS; ++i)
-	{
-		for (Int j = 0; j < MAX_SLOTS; ++j)
-		{
-			if (i != j && i < numPlayers && j < numPlayers)
-			{
-				AsciiString w1, w2;
-				w1.format("Player_%d_Start", i + 1);
-				w2.format("Player_%d_Start", j + 1);
-				WaypointMap::const_iterator c1 = waypoints.find(w1);
-				WaypointMap::const_iterator c2 = waypoints.find(w2);
-				if (c1 == waypoints.end() || c2 == waypoints.end())
-				{
-					startSpotDistance[i][j] = 1000000.0f;
-				}
-				else
-				{
-					Coord3D p1 = c1->second;
-					Coord3D p2 = c2->second;
-					startSpotDistance[i][j] = sqrt(sqr(p1.x - p2.x) + sqr(p1.y - p2.y));
-				}
-			}
-			else
-			{
-				startSpotDistance[i][j] = 0.0f;
-			}
-		}
-	}
-
-	// Track which positions are already taken (deliberately assigned)
-	Bool taken[MAX_SLOTS];
-	for (i = 0; i < MAX_SLOTS; ++i)
-		taken[i] = (i < numPlayers) ? FALSE : TRUE;
-
-	Bool hasStartSpotBeenPicked = FALSE;
-	for (i = 0; i < MAX_SLOTS; ++i)
-	{
-		GameSlot *slot = game->getSlot(i);
-		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
-			continue;
-
-		Int posIdx = slot->getStartPos();
-		if (posIdx >= 0 && posIdx < numPlayers)
-		{
-			hasStartSpotBeenPicked = TRUE;
-			taken[posIdx] = TRUE;
-		}
-	}
-
-	// Track first position per team for teammate clustering
-	Int teamPosIdx[MAX_SLOTS];
-	for (i = 0; i < MAX_SLOTS; ++i)
-		teamPosIdx[i] = -1;
-
-	// Seed teamPosIdx from already-assigned slots
-	for (i = 0; i < MAX_SLOTS; ++i)
-	{
-		const GameSlot *slot = game->getConstSlot(i);
-		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
-			continue;
-		Int posIdx = slot->getStartPos();
-		if (posIdx >= 0 && posIdx < numPlayers)
-		{
-			Int team = slot->getTeamNumber();
-			if (team >= 0 && teamPosIdx[team] == -1)
-				teamPosIdx[team] = posIdx;
-		}
-	}
-
-	// Assign positions for non-observer slots that don't have one yet
-	for (i = 0; i < MAX_SLOTS; ++i)
-	{
-		GameSlot *slot = game->getSlot(i);
-		if (!slot || !slot->isOccupied() || slot->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER)
-			continue;
-
-		Int posIdx = slot->getStartPos();
-		if (posIdx >= 0 && posIdx < numPlayers)
-			continue; // already assigned
-
-		Int team = slot->getTeamNumber();
-
-		if (!hasStartSpotBeenPicked)
-		{
-			// First player: pick randomly
-			posIdx = -1;
-			for (Int attempt = 0; attempt < numPlayers * 2 && posIdx == -1; ++attempt)
-			{
-				Int candidate = rand() % numPlayers;
-				if (!taken[candidate])
-					posIdx = candidate;
-			}
-			if (posIdx < 0)
-				continue;
-			hasStartSpotBeenPicked = TRUE;
-			slot->setStartPos(posIdx);
-			taken[posIdx] = TRUE;
-			if (team >= 0)
-				teamPosIdx[team] = posIdx;
-		}
-		else if (team < 0 || teamPosIdx[team] == -1)
-		{
-			// New team or no team: pick position farthest from all taken positions
-			Real farthestDistance = 0.0f;
-			Int farthestIndex = -1;
-			for (posIdx = 0; posIdx < numPlayers; ++posIdx)
-			{
-				if (taken[posIdx])
-					continue;
-
-				Real dist = 0.0f;
-				for (Int n = 0; n < numPlayers; ++n)
-				{
-					if (taken[n] && n != posIdx)
-						dist += startSpotDistance[posIdx][n];
-				}
-				if (farthestIndex < 0 || dist > farthestDistance)
-				{
-					farthestDistance = dist;
-					farthestIndex = posIdx;
-				}
-			}
-
-			if (farthestIndex >= 0)
-			{
-				slot->setStartPos(farthestIndex);
-				taken[farthestIndex] = TRUE;
-				if (team >= 0)
-					teamPosIdx[team] = farthestIndex;
-			}
-		}
-		else
-		{
-			// Teammate: pick position closest to team's existing position
-			Real closestDist = FLT_MAX;
-			Int closestIdx = -1;
-			for (Int n = 0; n < numPlayers; ++n)
-			{
-				if (!taken[n] && startSpotDistance[teamPosIdx[team]][n] < closestDist)
-				{
-					closestDist = startSpotDistance[teamPosIdx[team]][n];
-					closestIdx = n;
-				}
-			}
-			if (closestIdx >= 0)
-			{
-				slot->setStartPos(closestIdx);
-				taken[closestIdx] = TRUE;
-			}
-		}
-	}
+	assignStartPositionsGlobal(game, lobbyRandomValue);
 
 	// Assign observer slots to an existing player's position
 	Int numPlayersInGame = 0;

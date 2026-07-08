@@ -43,6 +43,16 @@
 class MapMetaDataReader
 {
 public:
+	MapMetaDataReader()
+	{
+		// Path-distance fields are optional in the cache INI (only pairs the
+		// build actually computed get written), so they must default to 0
+		// ("not computed") rather than stack garbage.
+		Int k;
+		for (k = 0; k < MAX_SLOTS * (MAX_SLOTS - 1) / 2; ++k)
+			m_startSpotPathDist[k] = 0.0f;
+	}
+
 	Region3D m_extent;
 	Int m_numPlayers;
 	Bool m_isMultiplayer;
@@ -55,6 +65,7 @@ public:
 	UnsignedInt m_CRC;
 
 	Coord3D m_waypoints[MAX_SLOTS];
+	Real m_startSpotPathDist[MAX_SLOTS * (MAX_SLOTS - 1) / 2];
 	Coord3D m_initialCameraPosition;
 	Coord3DList m_supplyPositions;
 	Coord3DList m_techPositions;
@@ -137,6 +148,37 @@ const FieldParse MapMetaDataReader::m_mapFieldParseTable[] =
 	{ "Player_6_Start",					INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_waypoints ) + sizeof(Coord3D) * 5 },
 	{ "Player_7_Start",					INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_waypoints ) + sizeof(Coord3D) * 6 },
 	{ "Player_8_Start",					INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_waypoints ) + sizeof(Coord3D) * 7 },
+
+	// Ground-path distances between start spots (1-based spot pairs), flat
+	// array in (i ascending, j ascending) order. See MapCache::writeCacheINI.
+	{ "startSpotPathDist_1_2",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 0 },
+	{ "startSpotPathDist_1_3",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 1 },
+	{ "startSpotPathDist_1_4",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 2 },
+	{ "startSpotPathDist_1_5",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 3 },
+	{ "startSpotPathDist_1_6",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 4 },
+	{ "startSpotPathDist_1_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 5 },
+	{ "startSpotPathDist_1_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 6 },
+	{ "startSpotPathDist_2_3",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 7 },
+	{ "startSpotPathDist_2_4",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 8 },
+	{ "startSpotPathDist_2_5",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 9 },
+	{ "startSpotPathDist_2_6",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 10 },
+	{ "startSpotPathDist_2_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 11 },
+	{ "startSpotPathDist_2_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 12 },
+	{ "startSpotPathDist_3_4",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 13 },
+	{ "startSpotPathDist_3_5",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 14 },
+	{ "startSpotPathDist_3_6",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 15 },
+	{ "startSpotPathDist_3_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 16 },
+	{ "startSpotPathDist_3_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 17 },
+	{ "startSpotPathDist_4_5",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 18 },
+	{ "startSpotPathDist_4_6",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 19 },
+	{ "startSpotPathDist_4_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 20 },
+	{ "startSpotPathDist_4_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 21 },
+	{ "startSpotPathDist_5_6",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 22 },
+	{ "startSpotPathDist_5_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 23 },
+	{ "startSpotPathDist_5_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 24 },
+	{ "startSpotPathDist_6_7",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 25 },
+	{ "startSpotPathDist_6_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 26 },
+	{ "startSpotPathDist_7_8",	INI::parseReal,	nullptr,	offsetof( MapMetaDataReader, m_startSpotPathDist ) + sizeof(Real) * 27 },
 
 	{ "InitialCameraPosition",	INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_initialCameraPosition ) },
 
@@ -241,6 +283,21 @@ void INI::parseMapCacheDefinition( INI* ini )
 	{
 		md.m_garrisonablePositions.push_front(*it);
 		it++;
+	}
+
+	// Unpack the flat (i ascending, j ascending) pair list back into the
+	// symmetric matrix. Unwritten pairs stay 0 ("not computed").
+	{
+		Int si, sj, k = 0;
+		for (si = 0; si < MAX_SLOTS; ++si)
+		{
+			for (sj = si + 1; sj < MAX_SLOTS; ++sj)
+			{
+				md.m_startSpotPathDist[si][sj] = mdr.m_startSpotPathDist[k];
+				md.m_startSpotPathDist[sj][si] = mdr.m_startSpotPathDist[k];
+				++k;
+			}
+		}
 	}
 
 	if(TheMapCache && !md.m_displayName.isEmpty())
