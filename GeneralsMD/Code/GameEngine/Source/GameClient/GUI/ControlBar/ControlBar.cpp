@@ -1439,6 +1439,71 @@ void ControlBar::update()
 		if((TheGameLogic->getFrame() % (LOGICFRAMES_PER_SECOND/2)) == 0)
 			populateObserverInfoWindow();
 
+		//
+		// viewer-only clients (replay playback and live observers) run the
+		// regular context-sensitive UI for the current selection so they see
+		// exactly what the owning player would see: command buttons with real
+		// availability, production queues, garrison contents, construction
+		// progress. Command issuance is blocked in processCommandUI.
+		//
+		if( isViewerOnlyClient() )
+		{
+			if( TheInGameUI->getSelectCount() == 0 )
+			{
+				// nothing selected: bring the observer windows back if an object
+				// context hid them, restoring the info window when we were
+				// looking at a specific player
+				if( m_currContext != CB_CONTEXT_OBSERVER_LIST )
+				{
+					switchToContext( CB_CONTEXT_OBSERVER_LIST, nullptr );
+					if( m_observerLookAtPlayer )
+					{
+						m_contextParent[ CP_OBSERVER_LIST ]->winHide( TRUE );
+						m_contextParent[ CP_OBSERVER_INFO ]->winHide( FALSE );
+						populateObserverInfoWindow();
+					}
+					showRallyPoint( nullptr );
+				}
+				m_UIDirty = FALSE;
+				return;
+			}
+
+			if( m_UIDirty )
+				evaluateContextUI();
+
+			if( m_currContext == CB_CONTEXT_MULTI_SELECT )
+			{
+				updateContextMultiSelect();
+				return;
+			}
+
+			if( m_currentSelectedDrawable == nullptr ||
+					m_currentSelectedDrawable->getObject() == nullptr )
+				return;
+
+			switch( m_currContext )
+			{
+				case CB_CONTEXT_COMMAND:
+					updateContextCommand();
+					break;
+				case CB_CONTEXT_STRUCTURE_INVENTORY:
+					updateContextStructureInventory();
+					break;
+				case CB_CONTEXT_BEACON:
+					updateContextBeacon();
+					break;
+				case CB_CONTEXT_UNDER_CONSTRUCTION:
+					updateContextUnderConstruction();
+					break;
+				case CB_CONTEXT_OCL_TIMER:
+					updateContextOCLTimer();
+					break;
+				default:
+					break;
+			}
+			return;
+		}
+
 		Drawable *drawToEvaluateFor = nullptr;
 		if( TheInGameUI->getSelectCount() > 1 )
 		{
@@ -1910,7 +1975,11 @@ void ControlBar::evaluateContextUI()
 				switchToContext( CB_CONTEXT_COMMAND, drawToEvaluateFor );
 
 			}
-			else if (obj->getControllingPlayer()->getPlayerTemplate()->getBeaconTemplate().compare(obj->getTemplate()->getName()) == 0)
+			// viewer-only clients can reach here for objects owned by anyone,
+			// including neutral players without a player template
+			else if (obj->getControllingPlayer() &&
+							 obj->getControllingPlayer()->getPlayerTemplate() &&
+							 obj->getControllingPlayer()->getPlayerTemplate()->getBeaconTemplate().compare(obj->getTemplate()->getName()) == 0)
 			{
 				switchToContext( CB_CONTEXT_BEACON, drawToEvaluateFor );
 			}
