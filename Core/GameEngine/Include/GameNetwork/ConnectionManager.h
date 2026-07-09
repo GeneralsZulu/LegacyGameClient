@@ -180,6 +180,11 @@ private:
 	// do not have a player will also be null.
 	Connection *m_connections[MAX_SLOTS];
 
+	// True for slots whose own PLAYERLEAVE command has executed. Such a peer is
+	// tearing down (or already gone) and will never ack anything again, so their
+	// send queue must not hold up the local player's leave (see areAllQueuesEmpty).
+	Bool m_peerLeftGame[MAX_SLOTS];
+
 	Transport *m_transport;
 	UnsignedInt m_localSlot;
 	UnsignedInt m_packetRouterSlot;

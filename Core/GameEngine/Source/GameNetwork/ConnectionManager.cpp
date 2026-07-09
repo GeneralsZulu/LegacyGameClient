@@ -252,6 +252,7 @@ ConnectionManager::ConnectionManager()
 {
 	for (Int i = 0; i < MAX_SLOTS; ++i) {
 		m_frameData[i] = nullptr;
+		m_peerLeftGame[i] = FALSE;
 	}
 	m_transport = nullptr;
 	m_disconnectManager = nullptr;
@@ -277,6 +278,7 @@ void ConnectionManager::init()
 	UnsignedInt i = 0;
 	for (; i < MAX_SLOTS; ++i) {
 		m_connections[i] = nullptr;
+		m_peerLeftGame[i] = FALSE;
 	}
 
 	if (m_pendingCommands == nullptr) {
@@ -354,6 +356,7 @@ void ConnectionManager::reset()
 	for (; i < (UnsignedInt)MAX_SLOTS; ++i) {
 		deleteInstance(m_connections[i]);
 		m_connections[i] = nullptr;
+		m_peerLeftGame[i] = FALSE;
 	}
 
 	for (i=0; i<(UnsignedInt)MAX_SLOTS; ++i)
@@ -1109,6 +1112,11 @@ PlayerLeaveCode ConnectionManager::processPlayerLeave(NetPlayerLeaveCommandMsg *
 		DEBUG_LOG(("ConnectionManager::processPlayerLeave() - setQuitting() on player %d on frame %d", playerID, TheGameLogic->getFrame()));
 		m_connections[playerID]->setQuitting();
 	}
+	if (playerID != m_localSlot) {
+		// This peer left of their own accord; nothing queued to them needs to be
+		// flushed anymore (see areAllQueuesEmpty).
+		m_peerLeftGame[playerID] = TRUE;
+	}
 	DEBUG_ASSERTCRASH(m_frameData[playerID]->getIsQuitting() == FALSE, ("Player %d is already quitting", playerID));
 	if ((playerID != m_localSlot) && (m_frameData[playerID] != nullptr) && (m_frameData[playerID]->getIsQuitting() == FALSE)) {
 		DEBUG_LOG(("ConnectionManager::processPlayerLeave - setQuitFrame on player %d for frame %d", playerID, TheGameLogic->getFrame()+1));
@@ -1152,6 +1160,15 @@ Bool ConnectionManager::areAllQueuesEmpty() {
 	Bool retval = TRUE;
 	for (Int i = 0; (i < MAX_SLOTS) && retval; ++i) {
 		if (m_connections[i] != nullptr) {
+			// A peer whose own PLAYERLEAVE has executed is tearing down and will
+			// never ack again, so an unflushed queue to them can never drain on
+			// its own. Waiting on it just holds the local player in-game at the
+			// victory/defeat screen until Connection's quit-flush timeout wipes
+			// the queue - the common case when everyone auto-exits on the same
+			// frame at the end of a match.
+			if (m_peerLeftGame[i]) {
+				continue;
+			}
 			if (m_connections[i]->isQueueEmpty() == FALSE) {
 				//DEBUG_LOG(("ConnectionManager::areAllQueuesEmpty() - m_connections[%d] is not empty", i));
 				//m_connections[i]->debugPrintCommands();
