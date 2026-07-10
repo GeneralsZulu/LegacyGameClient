@@ -2135,7 +2135,11 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 #endif
 
 	/**/ /// @todo: multiplayer semantics
-	if (currentlySelectedGroup && TheRecorder->isPlaybackMode() && TheGlobalData->m_useCameraInReplay && TheControlBar->getObserverLookAtPlayer() == msgPlayer /*&& !TheRecorder->isMultiplayer()*/)
+	// TheSuperHackers @tweak Only mirror the observed player's selection when
+	// the viewer has nothing selected. The viewer's own selection now brings
+	// up the full owner UI, so it must never be hijacked by the stream.
+	if (currentlySelectedGroup && TheRecorder->isPlaybackMode() && TheGlobalData->m_useCameraInReplay && TheControlBar->getObserverLookAtPlayer() == msgPlayer &&
+			TheInGameUI->getSelectCount() == 0 /*&& !TheRecorder->isMultiplayer()*/)
 	{
 		const VecObjectID& selectedObjects = currentlySelectedGroup->getAllIDs();
 		TheInGameUI->deselectAllDrawables();
