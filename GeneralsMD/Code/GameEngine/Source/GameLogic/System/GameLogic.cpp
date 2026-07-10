@@ -3741,12 +3741,30 @@ void GameLogic::update()
 	// but skip the redundant recorder call further down so updatePlayback's
 	// while loop doesn't apply the same commands twice.
 	Bool recorderUpdatedAtTop = FALSE;
-	if (TheRecorder && TheRecorder->isLiveObserverWaitingForBytes())
+	if (TheRecorder && TheRecorder->isLiveObserverMode() && TheRecorder->isLiveObserverWaitingForBytes())
 	{
 		TheRecorder->UPDATE();
 		recorderUpdatedAtTop = TRUE;
 		if (TheRecorder->isLiveObserverWaitingForBytes())
-			return;
+		{
+			// The stream may never resume: a host that quits to the lobby
+			// keeps the socket open but writes nothing more. Never let the
+			// starvation loop block the local exit path: if the user asked to
+			// leave, fall through and run the tick so processCommandList
+			// handles MSG_CLEAR_GAME_DATA. One extra sim tick past the host's
+			// state doesn't matter when we're tearing the game down.
+			Bool quitPending = FALSE;
+			for (GameMessage *msg = TheCommandList->getFirstMessage(); msg; msg = msg->next())
+			{
+				if (msg->getType() == GameMessage::MSG_CLEAR_GAME_DATA)
+				{
+					quitPending = TRUE;
+					break;
+				}
+			}
+			if (!quitPending)
+				return;
+		}
 	}
 
 	// update (execute) scripts

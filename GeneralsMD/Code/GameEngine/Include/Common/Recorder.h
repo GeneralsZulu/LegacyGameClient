@@ -277,6 +277,7 @@ protected:
 	Int         m_liveObserverRetryPos;
 	Bool        m_liveObserverFpsBoosted;
 	Int         m_liveObserverSavedFpsLimit;
+	UnsignedInt m_liveObserverStarvedSinceMs; ///< wall clock when the byte starvation began, 0 while fed
 };
 
 extern RecorderClass *TheRecorder;

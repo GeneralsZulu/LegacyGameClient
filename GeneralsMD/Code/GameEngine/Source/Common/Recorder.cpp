@@ -317,6 +317,7 @@ RecorderClass::RecorderClass()
 	m_liveObserverRetryPos        = 0;
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
+	m_liveObserverStarvedSinceMs  = 0;
 	init(); // just for the heck of it.
 }
 
@@ -449,6 +450,17 @@ void RecorderClass::init() {
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
 	m_replayEpoch = REPLAY_EPOCH_CURRENT;
 
+	// Live-observer state must not survive a teardown. Quitting while starved
+	// leaves m_liveObserverWaitingForBytes set, and if it leaks into the next
+	// game the starved early-return in GameLogic::update() freezes logic on
+	// its first frame (LAN start countdown hangs, then crashes).
+	m_liveObserverStreamOpen      = FALSE;
+	m_liveObserverWaitingForBytes = FALSE;
+	m_liveObserverRetryPos        = 0;
+	m_liveObserverFpsBoosted      = FALSE;
+	m_liveObserverSavedFpsLimit   = 0;
+	m_liveObserverStarvedSinceMs  = 0;
+
 	OptionPreferences optionPref;
 	m_archiveReplays = optionPref.getArchiveReplaysEnabled();
 }
@@ -555,6 +567,28 @@ void RecorderClass::updatePlayback() {
 			return;
 		}
 
+		// A host that quits without closing the socket (back to the lobby, a
+		// crash behind NAT, ...) leaves the stream open but silent forever.
+		// A live match always produces bytes within a few seconds (logic CRC
+		// messages are recorded on an interval even when nobody issues
+		// orders), so a long silence means the match is over: finalize
+		// instead of waiting forever.
+		const UnsignedInt LIVE_OBSERVER_STARVATION_TIMEOUT_MS = 30000;
+		const UnsignedInt nowMs = timeGetTime();
+		if (m_liveObserverStarvedSinceMs == 0)
+		{
+			m_liveObserverStarvedSinceMs = nowMs;
+		}
+		else if (nowMs - m_liveObserverStarvedSinceMs > LIVE_OBSERVER_STARVATION_TIMEOUT_MS)
+		{
+			DEBUG_LOG(("RecorderClass::updatePlayback - LIVE_OBSERVER starved for %u ms; ending playback", nowMs - m_liveObserverStarvedSinceMs));
+			LANObsLog("updatePlayback: starved %u ms with stream open; ending playback", nowMs - m_liveObserverStarvedSinceMs);
+			m_liveObserverWaitingForBytes = FALSE;
+			m_nextFrame = -1;
+			stopPlayback();
+			return;
+		}
+
 		if (m_file == nullptr)
 		{
 			// We already lost the file (a prior reopen failed); give up.
@@ -581,6 +615,9 @@ void RecorderClass::updatePlayback() {
 		readNextFrame();
 		if (m_liveObserverWaitingForBytes)
 			return;
+
+		// bytes arrived again: the starvation stretch is over
+		m_liveObserverStarvedSinceMs = 0;
 	}
 
 	if (m_nextFrame == -1) {
@@ -1354,6 +1391,7 @@ Bool RecorderClass::playbackFileLiveObserver(AsciiString filename)
 			m_liveObserverFpsBoosted = TRUE;
 			LANObsLog("FPS boost: saved=%d, boosted to 1000", m_liveObserverSavedFpsLimit);
 		}
+		m_liveObserverStarvedSinceMs = 0;
 
 		LANObsLog("mode set to LIVE_OBSERVER; file pos=%d", m_file ? m_file->position() : -1);
 	}
