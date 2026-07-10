@@ -59,7 +59,9 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/KindOf.h"
 #include "Common/Recorder.h"
+#include "Common/ScoreKeeper.h"
 #include "GameClient/ControlBar.h"
+#include "GameClient/Display.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/GadgetPushButton.h"
 #include "GameClient/GadgetStaticText.h"
@@ -95,6 +97,22 @@ static GameWindow *staticTextNumberOfBuildings = nullptr;
 static GameWindow *staticTextNumberOfUnitsKilled = nullptr;
 static GameWindow *staticTextNumberOfUnitsLost = nullptr;
 static GameWindow *staticTextPlayerName = nullptr;
+// TRUE when Window/ZuluObserverBar.wnd loaded and supplies the observer
+// windows (set in initObserverControls)
+static Bool s_useZuluObserverBar = FALSE;
+
+// saved window rects for restoring the installed HUD layout when leaving
+// observer mode (radar / right HUD subtrees)
+struct ZuluSavedWindowRect
+{
+	GameWindow *win;
+	ICoord2D pos;
+	ICoord2D size;
+};
+enum { MAX_ZULU_SAVED_RECTS = 64 };
+static ZuluSavedWindowRect s_zuluHudSavedRects[MAX_ZULU_SAVED_RECTS];
+static Int s_zuluHudSavedRectCount = 0;
+static Bool s_zuluHudLayoutApplied = FALSE;
 
 static NameKeyType s_replayObserverNameKey = NAMEKEY_INVALID;
 
@@ -102,35 +120,227 @@ static NameKeyType s_replayObserverNameKey = NAMEKEY_INVALID;
 // PUBLIC FUNCTIONS ///////////////////////////////////////////////////////////
 //-----------------------------------------------------------------------------
 
-
 void ControlBar::initObserverControls()
 {
-	ObserverPlayerInfoWindow = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ObserverPlayerInfoWindow"));
-	ObserverPlayerListWindow = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ObserverPlayerListWindow"));
+	//
+	// The Zulu observer bar is a standalone window file layered over whatever
+	// ControlBar.wnd the player has installed (stock, ControlBarPro, ...), so
+	// every viewer gets the same observer windows without touching the
+	// in-game bar. When the file is missing we fall back to the observer
+	// windows inside ControlBar.wnd.
+	//
+	const char *prefix = "ControlBar.wnd";
+	const NameKeyType zuluInfoKey = TheNameKeyGenerator->nameToKey("ZuluObserverBar.wnd:ObserverPlayerInfoWindow");
+	if (TheWindowManager->winGetWindowFromId(nullptr, zuluInfoKey) == nullptr)
+		TheWindowManager->winCreateFromScript(AsciiString("ZuluObserverBar.wnd"));
+	s_useZuluObserverBar = TheWindowManager->winGetWindowFromId(nullptr, zuluInfoKey) != nullptr;
+	const Bool useZuluObserverBar = s_useZuluObserverBar;
+	if (useZuluObserverBar)
+		prefix = "ZuluObserverBar.wnd";
+
+	AsciiString tmpString;
+	tmpString.format("%s:ObserverPlayerInfoWindow", prefix);
+	ObserverPlayerInfoWindow = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:ObserverPlayerListWindow", prefix);
+	ObserverPlayerListWindow = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+
+	if (useZuluObserverBar)
+	{
+		// the ControlBar.wnd observer windows are superseded: hide them for
+		// good and route the context switching at our windows instead
+		GameWindow *original = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ObserverPlayerInfoWindow"));
+		if (original)
+			original->winHide(TRUE);
+		original = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ObserverPlayerListWindow"));
+		if (original)
+			original->winHide(TRUE);
+		m_contextParent[ CP_OBSERVER_INFO ] = ObserverPlayerInfoWindow;
+		m_contextParent[ CP_OBSERVER_LIST ] = ObserverPlayerListWindow;
+	}
 
 	for (Int i = 0; i < MAX_BUTTONS; i++)
 	{
-		AsciiString tmpString;
-		tmpString.format("ControlBar.wnd:ButtonPlayer%d", i);
+		tmpString.format("%s:ButtonPlayer%d", prefix, i);
 		buttonPlayerID[i] = TheNameKeyGenerator->nameToKey( tmpString );
 		buttonPlayer[i] = TheWindowManager->winGetWindowFromId( ObserverPlayerListWindow, buttonPlayerID[i] );
-		tmpString.format("ControlBar.wnd:StaticTextPlayer%d", i);
+		tmpString.format("%s:StaticTextPlayer%d", prefix, i);
 		staticTextPlayerID[i] = TheNameKeyGenerator->nameToKey( tmpString );
 		staticTextPlayer[i] = TheWindowManager->winGetWindowFromId( ObserverPlayerListWindow, staticTextPlayerID[i] );
 	}
 
-	staticTextNumberOfUnits = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfUnits"));
-	staticTextNumberOfBuildings = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfBuildings"));
-	staticTextNumberOfUnitsKilled = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfUnitsKilled"));
-	staticTextNumberOfUnitsLost = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfUnitsLost"));
-	staticTextPlayerName = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextPlayerName"));
-	winFlag = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:WinFlag"));
-	winGeneralPortrait = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:WinGeneralPortrait"));
+	tmpString.format("%s:StaticTextNumberOfUnits", prefix);
+	staticTextNumberOfUnits = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:StaticTextNumberOfBuildings", prefix);
+	staticTextNumberOfBuildings = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:StaticTextNumberOfUnitsKilled", prefix);
+	staticTextNumberOfUnitsKilled = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:StaticTextNumberOfUnitsLost", prefix);
+	staticTextNumberOfUnitsLost = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:StaticTextPlayerName", prefix);
+	staticTextPlayerName = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:WinFlag", prefix);
+	winFlag = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	tmpString.format("%s:WinGeneralPortrait", prefix);
+	winGeneralPortrait = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey(tmpString));
+	// the idle worker button stays with the installed control bar layout
 	buttonIdleWorker = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ButtonIdleWorker"));
 
-	buttonCancelID = TheNameKeyGenerator->nameToKey("ControlBar.wnd:ButtonCancel");
+	tmpString.format("%s:ButtonCancel", prefix);
+	buttonCancelID = TheNameKeyGenerator->nameToKey(tmpString);
 
 	s_replayObserverNameKey = TheNameKeyGenerator->nameToKey("ReplayObserver");
+}
+
+//-------------------------------------------------------------------------------------------------
+Bool ControlBar::isUsingZuluObserverBar() const
+{
+	return s_useZuluObserverBar;
+}
+
+//-------------------------------------------------------------------------------------------------
+static void saveWindowRectRecursive(GameWindow *win)
+{
+	if (win == nullptr || s_zuluHudSavedRectCount >= MAX_ZULU_SAVED_RECTS)
+		return;
+	ZuluSavedWindowRect &saved = s_zuluHudSavedRects[s_zuluHudSavedRectCount++];
+	saved.win = win;
+	win->winGetPosition(&saved.pos.x, &saved.pos.y);
+	win->winGetSize(&saved.size.x, &saved.size.y);
+	for (GameWindow *child = win->winGetChild(); child; child = child->winGetNext())
+		saveWindowRectRecursive(child);
+}
+
+//-------------------------------------------------------------------------------------------------
+static void scaleChildrenRecursive(GameWindow *win, Real scaleX, Real scaleY)
+{
+	for (GameWindow *child = win->winGetChild(); child; child = child->winGetNext())
+	{
+		Int x, y, width, height;
+		child->winGetPosition(&x, &y);
+		child->winGetSize(&width, &height);
+		child->winSetPosition(REAL_TO_INT(x * scaleX), REAL_TO_INT(y * scaleY));
+		child->winSetSize(REAL_TO_INT(width * scaleX), REAL_TO_INT(height * scaleY));
+		scaleChildrenRecursive(child, scaleX, scaleY);
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Move win (and proportionally its children) so it covers the given rect,
+	* authored against a 1920x1080 screen, scaled to the actual resolution.
+	* The previous rects are saved for restoring later. */
+//-------------------------------------------------------------------------------------------------
+static void moveWindowTo1080Rect(GameWindow *win, Int x0, Int y0, Int x1, Int y1)
+{
+	if (win == nullptr)
+		return;
+
+	saveWindowRectRecursive(win);
+
+	const Real scaleToScreenX = TheDisplay->getWidth() / 1920.0f;
+	const Real scaleToScreenY = TheDisplay->getHeight() / 1080.0f;
+	const Int targetX = REAL_TO_INT(x0 * scaleToScreenX);
+	const Int targetY = REAL_TO_INT(y0 * scaleToScreenY);
+	const Int targetWidth = REAL_TO_INT((x1 - x0) * scaleToScreenX);
+	const Int targetHeight = REAL_TO_INT((y1 - y0) * scaleToScreenY);
+
+	Int oldWidth, oldHeight;
+	win->winGetSize(&oldWidth, &oldHeight);
+
+	Int parentX = 0, parentY = 0;
+	GameWindow *parent = win->winGetParent();
+	if (parent)
+		parent->winGetScreenPosition(&parentX, &parentY);
+
+	win->winSetPosition(targetX - parentX, targetY - parentY);
+	win->winSetSize(targetWidth, targetHeight);
+	if (oldWidth > 0 && oldHeight > 0)
+		scaleChildrenRecursive(win, targetWidth / (Real)oldWidth, targetHeight / (Real)oldHeight);
+}
+
+//-------------------------------------------------------------------------------------------------
+/** The Zulu observer bar art (drawn by the ZuluObserver control bar scheme)
+	* frames the radar at the lower left and the unit portrait at the lower
+	* right, but those windows sit wherever the installed ControlBar.wnd puts
+	* them. Move them into the art's frames while the observer bar is up and
+	* restore the installed layout when leaving it. Rects are authored
+	* against the 1920x1080 ControlBarPro original. */
+//-------------------------------------------------------------------------------------------------
+void ControlBar::applyZuluObserverHudLayout(Bool enable)
+{
+	if (!s_useZuluObserverBar)
+		return;
+	if (enable == s_zuluHudLayoutApplied)
+		return;
+	s_zuluHudLayoutApplied = enable;
+
+	// the generals experience bar sits at a layout-specific spot and means
+	// nothing to a viewer; hide it while the observer bar is up
+	GameWindow *expBar = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:GeneralsExp"));
+	if (expBar)
+		expBar->winHide(enable);
+	expBar = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ExpBarForeground"));
+	if (expBar)
+		expBar->winHide(enable);
+
+	if (enable)
+	{
+		s_zuluHudSavedRectCount = 0;
+		moveWindowTo1080Rect(TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:LeftHUD")), 5, 753, 327, 1075);
+		moveWindowTo1080Rect(TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:RightHUD")), 1642, 887, 1871, 1071);
+	}
+	else
+	{
+		for (Int i = 0; i < s_zuluHudSavedRectCount; ++i)
+		{
+			const ZuluSavedWindowRect &saved = s_zuluHudSavedRects[i];
+			saved.win->winSetPosition(saved.pos.x, saved.pos.y);
+			saved.win->winSetSize(saved.size.x, saved.size.y);
+		}
+		s_zuluHudSavedRectCount = 0;
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+/** The Zulu observer bar art leaves the middle of the screen open. When the
+	* viewer selects something, the context windows appear over the bare
+	* world, so draw a fitted panel behind each visible context window to
+	* keep them readable. Runs from the W3DCommandBarBackgroundDraw hook
+	* after the scheme background, i.e. underneath the windows. */
+//-------------------------------------------------------------------------------------------------
+void ControlBar::drawObserverContextBackdrop()
+{
+	// the observer player list / info windows carry their own art
+	if( m_currContext == CB_CONTEXT_NONE ||
+			m_currContext == CB_CONTEXT_OBSERVER_LIST ||
+			m_currContext == CB_CONTEXT_OBSERVER_INFO )
+		return;
+
+	static const Color fillColor = GameMakeColor( 0, 0, 0, 170 );
+	static const Color borderColor = GameMakeColor( 110, 110, 110, 200 );
+	const Int pad = 4;
+
+	GameWindow *panels[] =
+	{
+		m_contextParent[ CP_COMMAND ],
+		m_contextParent[ CP_BUILD_QUEUE ],
+		m_contextParent[ CP_BEACON ],
+		m_contextParent[ CP_UNDER_CONSTRUCTION ],
+		m_contextParent[ CP_OCL_TIMER ],
+		m_rightHUDUnitSelectParent,
+	};
+
+	for( Int i = 0; i < ARRAY_SIZE( panels ); ++i )
+	{
+		GameWindow *win = panels[ i ];
+		if( win == nullptr || win->winIsHidden() )
+			continue;
+
+		ICoord2D pos, size;
+		win->winGetScreenPosition( &pos.x, &pos.y );
+		win->winGetSize( &size.x, &size.y );
+		TheDisplay->drawFillRect( pos.x - pad, pos.y - pad, size.x + 2 * pad, size.y + 2 * pad, fillColor );
+		TheDisplay->drawOpenRect( pos.x - pad, pos.y - pad, size.x + 2 * pad, size.y + 2 * pad, 1.0f, borderColor );
+	}
 }
 
 //-------------------------------------------------------------------------------------------------

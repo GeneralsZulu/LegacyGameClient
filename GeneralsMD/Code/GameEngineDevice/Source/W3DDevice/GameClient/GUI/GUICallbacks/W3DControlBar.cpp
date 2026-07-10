@@ -621,7 +621,6 @@ void W3DCommandBarTopDraw( GameWindow *window, WinInstanceData *instData )
 
 void W3DCommandBarBackgroundDraw( GameWindow *window, WinInstanceData *instData )
 {
-
 	ControlBarSchemeManager *man = TheControlBar->getControlBarSchemeManager();
 	if(!man)
 		return;
@@ -640,12 +639,17 @@ void W3DCommandBarBackgroundDraw( GameWindow *window, WinInstanceData *instData 
 	offset.y = pos.y - basePos.y;
 
 	man->drawBackground(offset);
+
+	// the Zulu observer bar art leaves the middle of the screen open; when a
+	// viewer selects something, fitted panels behind the context windows keep
+	// the owner UI readable over the bare world
+	if( TheControlBar->isObserverControlBarOn() && TheControlBar->isUsingZuluObserverBar() )
+		TheControlBar->drawObserverContextBackdrop();
 }
 
 
 void W3DCommandBarForegroundDraw( GameWindow *window, WinInstanceData *instData )
 {
-
 	ControlBarSchemeManager *man = TheControlBar->getControlBarSchemeManager();
 	if(!man)
 		return;
