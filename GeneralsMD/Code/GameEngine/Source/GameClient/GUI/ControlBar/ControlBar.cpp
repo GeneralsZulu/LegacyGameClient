@@ -2837,6 +2837,7 @@ void ControlBar::setControlBarSchemeByPlayer(Player *p)
 	if( !p->isPlayerActive() )
 	{
 		m_isObserverCommandBar = TRUE;
+		applyZuluObserverHudLayout( TRUE );
 		switchToContext( CB_CONTEXT_OBSERVER_LIST, nullptr );
 		DEBUG_LOG(("We're loading the Observer Command Bar"));
 
@@ -2851,6 +2852,7 @@ void ControlBar::setControlBarSchemeByPlayer(Player *p)
 	{
 		switchToContext( CB_CONTEXT_NONE, nullptr );
 		m_isObserverCommandBar = FALSE;
+		applyZuluObserverHudLayout( FALSE );
 
 		if (buttonPlaceBeacon)
 			buttonPlaceBeacon->winHide(
@@ -2882,6 +2884,7 @@ void ControlBar::setControlBarSchemeByPlayerTemplate( const PlayerTemplate *pt)
 	if(pt == ThePlayerTemplateStore->findPlayerTemplate(TheNameKeyGenerator->nameToKey("FactionObserver")))
 	{
 		m_isObserverCommandBar = TRUE;
+		applyZuluObserverHudLayout( TRUE );
 		switchToContext( CB_CONTEXT_OBSERVER_LIST, nullptr );
 		DEBUG_LOG(("We're loading the Observer Command Bar"));
 
@@ -2896,6 +2899,7 @@ void ControlBar::setControlBarSchemeByPlayerTemplate( const PlayerTemplate *pt)
 	{
 		switchToContext( CB_CONTEXT_NONE, nullptr );
 		m_isObserverCommandBar = FALSE;
+		applyZuluObserverHudLayout( FALSE );
 
 		if (buttonPlaceBeacon)
 			buttonPlaceBeacon->winHide(
