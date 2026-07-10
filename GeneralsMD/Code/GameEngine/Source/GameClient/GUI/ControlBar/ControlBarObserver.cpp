@@ -59,11 +59,14 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/KindOf.h"
 #include "Common/Recorder.h"
+#include "Common/ScoreKeeper.h"
 #include "GameClient/ControlBar.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/GadgetPushButton.h"
 #include "GameClient/GadgetStaticText.h"
 #include "GameClient/GameText.h"
+#include "GameClient/HeaderTemplate.h"
+#include "GameClient/GlobalLanguage.h"
 #include "GameNetwork/NetworkDefs.h"
 //-----------------------------------------------------------------------------
 // DEFINES ////////////////////////////////////////////////////////////////////
@@ -95,12 +98,99 @@ static GameWindow *staticTextNumberOfBuildings = nullptr;
 static GameWindow *staticTextNumberOfUnitsKilled = nullptr;
 static GameWindow *staticTextNumberOfUnitsLost = nullptr;
 static GameWindow *staticTextPlayerName = nullptr;
+// income-by-source readout; not part of any shipped ControlBar.wnd, created
+// at runtime by createObserverIncomeText(), so all uses are null-checked
+static GameWindow *staticTextObserverIncome = nullptr;
 
 static NameKeyType s_replayObserverNameKey = NAMEKEY_INVALID;
 
 //-----------------------------------------------------------------------------
 // PUBLIC FUNCTIONS ///////////////////////////////////////////////////////////
 //-----------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------------------------------
+/** The income readout is not part of any shipped ControlBar.wnd, so it is
+	* created at runtime inside the observer info window and works with any
+	* control bar layout (stock, ControlBarPro, ...). If the layout has free
+	* space under its lowest static text the field goes there (ControlBarPro
+	* leaves a strip), otherwise it floats just above the info window (the
+	* stock layout is fully packed). */
+//-------------------------------------------------------------------------------------------------
+static GameWindow *createObserverIncomeText( NameKeyType id )
+{
+	if (ObserverPlayerInfoWindow == nullptr)
+		return nullptr;
+
+	Int parentWidth, parentHeight;
+	ObserverPlayerInfoWindow->winGetSize(&parentWidth, &parentHeight);
+
+	// find the bottom edge of the lowest static text; image/button children
+	// (portrait backdrops and the like) can span the whole window, so only
+	// text fields tell us where the layout's content actually ends
+	Int lowestTextBottom = 0;
+	for (GameWindow *child = ObserverPlayerInfoWindow->winGetChild(); child; child = child->winGetNext())
+	{
+		if (!BitIsSet(child->winGetStyle(), GWS_STATIC_TEXT))
+			continue;
+		Int childX, childY, childWidth, childHeight;
+		child->winGetPosition(&childX, &childY);
+		child->winGetSize(&childWidth, &childHeight);
+		if (childY + childHeight > lowestTextBottom)
+			lowestTextBottom = childY + childHeight;
+	}
+
+	Int fieldHeight = parentHeight / 10;
+	if (fieldHeight < 20)
+		fieldHeight = 20;
+
+	Int fieldY;
+	if (parentHeight - lowestTextBottom >= fieldHeight)
+		fieldY = lowestTextBottom + (parentHeight - lowestTextBottom - fieldHeight) / 2;
+	else
+		fieldY = -fieldHeight;
+
+	const Color textColor = GameMakeColor(254, 254, 254, 255);
+	const Color dropColor = GameMakeColor(0, 0, 0, 255);
+
+	WinInstanceData instData;
+	instData.init();
+	instData.m_style = GWS_STATIC_TEXT;
+	instData.m_status = WIN_STATUS_ENABLED | WIN_STATUS_NO_INPUT;
+	instData.m_id = (Int)id;
+	instData.m_owner = ObserverPlayerInfoWindow;
+	instData.m_enabledText.color = textColor;
+	instData.m_enabledText.borderColor = dropColor;
+	instData.m_disabledText.color = textColor;
+	instData.m_disabledText.borderColor = dropColor;
+	instData.m_hiliteText.color = textColor;
+	instData.m_hiliteText.borderColor = dropColor;
+
+	TextData textData;
+	textData.text = nullptr;
+	textData.centered = TRUE;
+	textData.centeredVertically = TRUE;
+	textData.leftMargin = 0;
+	textData.topMargin = 0;
+
+	// same font the observer info stat fields use in the shipped layouts
+	GameFont *font = TheHeaderTemplateManager ? TheHeaderTemplateManager->getFontFromTemplate("LabelSmall") : nullptr;
+	if (font == nullptr && TheGlobalLanguageData)
+		font = TheWindowManager->winFindFont("Arial", TheGlobalLanguageData->adjustFontSize(10), FALSE);
+	if (font == nullptr)
+		font = ObserverPlayerInfoWindow->winGetFont();
+
+	const Int marginX = parentWidth / 32;
+	GameWindow *win = TheWindowManager->gogoGadgetStaticText(
+			ObserverPlayerInfoWindow,
+			WIN_STATUS_ENABLED | WIN_STATUS_NO_INPUT,
+			marginX, fieldY, parentWidth - 2 * marginX, fieldHeight,
+			&instData, &textData, font, FALSE );
+
+	if (win)
+		GadgetStaticTextSetFont(win, font);
+
+	return win;
+}
 
 
 void ControlBar::initObserverControls()
@@ -124,6 +214,10 @@ void ControlBar::initObserverControls()
 	staticTextNumberOfUnitsKilled = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfUnitsKilled"));
 	staticTextNumberOfUnitsLost = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextNumberOfUnitsLost"));
 	staticTextPlayerName = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextPlayerName"));
+	const NameKeyType incomeKey = TheNameKeyGenerator->nameToKey("ControlBar.wnd:StaticTextObserverIncome");
+	staticTextObserverIncome = TheWindowManager->winGetWindowFromId(nullptr, incomeKey);
+	if (staticTextObserverIncome == nullptr)
+		staticTextObserverIncome = createObserverIncomeText(incomeKey);
 	winFlag = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:WinFlag"));
 	winGeneralPortrait = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:WinGeneralPortrait"));
 	buttonIdleWorker = TheWindowManager->winGetWindowFromId(nullptr, TheNameKeyGenerator->nameToKey("ControlBar.wnd:ButtonIdleWorker"));
@@ -374,6 +468,41 @@ void ControlBar::populateObserverInfoWindow ()
 	GadgetStaticTextSetText(staticTextNumberOfUnitsKilled, uString);
 	uString.format(L"%d",m_observerLookAtPlayer->getScoreKeeper()->getTotalUnitsLost());
 	GadgetStaticTextSetText(staticTextNumberOfUnitsLost, uString);
+
+	// cumulative income by source, nonzero sources only. Deterministic game
+	// state accumulated by ScoreKeeper on every client, so the observer's own
+	// simulation already has every player's numbers.
+	if (staticTextObserverIncome)
+	{
+		static const char *const incomeTypeNames[INCOME_COUNT] =
+		{
+			"other",		// INCOME_OTHER
+			"supply",		// INCOME_SUPPLY
+			"hacker",		// INCOME_HACKER
+			"market",		// INCOME_BLACK_MARKET
+			"drop",			// INCOME_SUPPLY_DROP
+			"derrick",	// INCOME_OIL_DERRICK
+			"bounty",		// INCOME_BOUNTY
+			"salvage",	// INCOME_SALVAGE
+			"crate",		// INCOME_CRATE
+			"theft",		// INCOME_THEFT
+		};
+
+		const ScoreKeeper *scoreKeeper = m_observerLookAtPlayer->getScoreKeeper();
+		UnicodeString breakdown;
+		UnicodeString part;
+		for (Int incomeType = 0; incomeType < INCOME_COUNT; ++incomeType)
+		{
+			const Int amount = scoreKeeper->getIncomeByType(static_cast<IncomeType>(incomeType));
+			if (amount == 0)
+				continue;
+			if (!breakdown.isEmpty())
+				breakdown.concat(L"   ");
+			part.format(L"%hs %d", incomeTypeNames[incomeType], amount);
+			breakdown.concat(part);
+		}
+		GadgetStaticTextSetText(staticTextObserverIncome, breakdown);
+	}
 	GadgetStaticTextSetText(staticTextPlayerName, m_observerLookAtPlayer->getPlayerDisplayName());
 	Color color = m_observerLookAtPlayer->getPlayerColor();
 	staticTextPlayerName->winSetEnabledTextColors(color, GameMakeColor(0,0,0,255));

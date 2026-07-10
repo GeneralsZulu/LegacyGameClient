@@ -811,6 +811,7 @@ protected:
 		{
 			LabelType_Team,
 			LabelType_Money,
+			LabelType_Income,
 			LabelType_Rank,
 			LabelType_Xp,
 
@@ -821,6 +822,7 @@ protected:
 		{
 			ValueType_Team,
 			ValueType_Money,
+			ValueType_Income,
 			ValueType_Rank,
 			ValueType_Xp,
 			ValueType_Name,
