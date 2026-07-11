@@ -37,10 +37,11 @@ public:
 	// TheSuperHackers @feature Per-replay result log for batch reprocessing.
 	// The path lives in TheGlobalData->m_replayResultLog (set via the -resultLog
 	// command-line flag). When set, each simulated replay appends one JSON line
-	// recording its verdict (STARTED / OK / DESYNC / INCOMPLETE / CANT_OPEN),
-	// frame counts, and whether stats were exported. This is the "which replays
-	// failed and why" log and doubles as a resume/crash checkpoint. Worker
-	// processes each append their own line, so the path is forwarded to them.
+	// recording its verdict (STARTED / OK / OK_RETAIL_UNCHECKED / DESYNC /
+	// INCOMPLETE / CANT_OPEN), frame counts, stale command references, and
+	// whether stats were exported. This is the "which replays failed and why"
+	// log and doubles as a resume/crash checkpoint. Worker processes each
+	// append their own line, so the path is forwarded to them.
 
 private:
 
@@ -50,7 +51,8 @@ private:
 
 	// Append one JSON-lines record for a finished (or unopened) replay.
 	static void appendResultLogEntry(const AsciiString &filename, const char *verdict,
-		UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch);
+		UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch,
+		UnsignedInt staleRefs);
 
 private:
 

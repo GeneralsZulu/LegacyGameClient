@@ -81,6 +81,15 @@ public:
 	UnsignedInt getPlaybackFrameCount() const { return m_playbackFrameCount; }			///< valid during playback only
 	void stopPlayback();															///< Stops playback.  Its fine to call this even if not playing back a file.
 	Bool simulateReplay(AsciiString filename);
+
+	// Playback-fidelity signal: replayed commands whose object IDs did not
+	// resolve in our re-simulated world. The recording client only issued
+	// commands against objects that existed for it, so anything beyond the
+	// occasional clicked-a-dying-unit race points at a diverged simulation.
+	// Used by the replay verdict for retail-epoch replays, whose recorded
+	// checksums are unusable (see handleCRCMessage).
+	UnsignedInt getPlaybackStaleObjectRefs() const { return m_playbackStaleObjectRefs; }
+	void notePlaybackStaleObjectRef() { ++m_playbackStaleObjectRefs; }
 #if defined(RTS_DEBUG)
 	Bool analyzeReplay( AsciiString filename );
 #endif
@@ -261,6 +270,8 @@ protected:
 
 	ReplayEpoch m_replayEpoch;										///< CURRENT for live games; derived from the replay's recorded version during playback.
 	static Int s_replayEpochOverride;								///< -replayEpoch command-line override; <0 = auto-detect from header.
+
+	UnsignedInt m_playbackStaleObjectRefs;					///< Replayed commands referencing objects missing from our world; see getPlaybackStaleObjectRefs().
 
 	// LIVE_OBSERVER state. m_liveObserverStreamOpen is owned by the observer
 	// network client and tells us whether to expect more bytes after EOF.
