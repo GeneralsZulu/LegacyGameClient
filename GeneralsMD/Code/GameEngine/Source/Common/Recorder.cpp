@@ -1378,6 +1378,16 @@ Bool RecorderClass::playbackFileLiveObserver(AsciiString filename)
 		m_liveObserverWaitingForBytes = FALSE;
 		m_liveObserverRetryPos        = 0;
 
+		// The stream owner set m_liveObserverStreamOpen before this call, but
+		// when a shell map was loaded, playbackFile() above just tore it down
+		// (clearGameData -> GameEngine::reset -> resetAll -> our init()),
+		// wiping the flag. With it stuck FALSE the first EOF is treated as
+		// end-of-replay and the observer exits the moment it catches up to
+		// live. Re-assert it here: playback is only ever kicked from a
+		// connected client (STATE_READY), and LANAPI::updateObserver turns it
+		// back off within a tick if the socket has already died.
+		m_liveObserverStreamOpen = TRUE;
+
 		// Boost FPS while draining the initial snapshot so the observer
 		// catches up to the live edge fast. updatePlayback drops it back to
 		// the saved value on the first EOF. Same trick RESUME_CATCHUP uses.
