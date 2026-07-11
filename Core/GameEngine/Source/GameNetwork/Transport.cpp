@@ -26,6 +26,7 @@
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
 #include "Common/crc.h"
+#include "Common/ReleaseLog.h"
 #include "GameNetwork/Transport.h"
 #include "GameNetwork/NetworkInterface.h"
 
@@ -119,6 +120,13 @@ Bool Transport::init( UnsignedInt ip, UnsignedShort port )
 	if (retval != 0) {
 		DEBUG_CRASH(("Could not bind to 0x%8.8X:%d", ip, port));
 		DEBUG_LOG(("Transport::init - Failure to bind socket with error code %x", retval));
+		// Bind failures are invisible in release builds but leave this
+		// transport permanently dead (the caller may ignore our return
+		// value), so put the evidence in the uploadable log. status is
+		// UDP::sockStat, e.g. -6 = ADDRINUSE (another process owns the
+		// port, typically a zombie game instance).
+		ReleaseLog("Transport bind FAILED on %d.%d.%d.%d:%d status=%d",
+			(ip>>24)&0xff, (ip>>16)&0xff, (ip>>8)&0xff, ip&0xff, port, retval);
 		delete m_udpsock;
 		m_udpsock = nullptr;
 		return false;

@@ -38,6 +38,7 @@
 #include "Common/PlayerList.h"
 #include "Common/RandomValue.h"
 #include "Common/Recorder.h"
+#include "Common/ReleaseLog.h"
 
 #include "GameClient/Color.h"
 #include "GameClient/Diplomacy.h"
@@ -1634,7 +1635,18 @@ void ConnectionManager::initTransport() {
 	delete m_transport;
 	m_transport = new Transport;
 	m_transport->reset();
-	m_transport->init(m_localAddr, m_localPort);
+	// A failed bind here means the whole match runs with a dead transport:
+	// we load in, receive nothing, and get dropped at the disconnect screen
+	// with no clue why. There's no recovery path this late in game start,
+	// so at minimum leave a definitive line in the uploadable log
+	// (Transport::init already logged the bind error code).
+	if (m_transport->init(m_localAddr, m_localPort)) {
+		ReleaseLog("Game transport bound to %d.%d.%d.%d:%d",
+			(m_localAddr>>24)&0xff, (m_localAddr>>16)&0xff, (m_localAddr>>8)&0xff, m_localAddr&0xff, m_localPort);
+	} else {
+		ReleaseLog("=== Game transport init FAILED on %d.%d.%d.%d:%d - in-game networking is dead, expect disconnect at start ===",
+			(m_localAddr>>24)&0xff, (m_localAddr>>16)&0xff, (m_localAddr>>8)&0xff, m_localAddr&0xff, m_localPort);
+	}
 }
 
 /**
