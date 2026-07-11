@@ -132,8 +132,13 @@ Section "Install ${APPNAME}" SecInstall
     ; and the TCP 8188 observer stream) is silently dropped whenever the
     ; first-listen consent prompt goes unanswered behind the fullscreen
     ; game. We're already elevated, so register the rule here.
-    ; Delete-then-add keeps repeat installs/updates from stacking dupes.
+    ; Two deletes before the add: the name-based one catches our own rule
+    ; from a prior install at a different path; the program-based one wipes
+    ; every other inbound rule for this exe, in particular the block rules
+    ; Windows auto-creates when the consent prompt is dismissed (block
+    ; overrides allow, so a stale one would defeat the rule we add).
     nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${APPNAME} (${EXENAME})"'
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=all dir=in program="$INSTDIR\${EXENAME}"'
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${APPNAME} (${EXENAME})" dir=in action=allow program="$INSTDIR\${EXENAME}" enable=yes profile=any'
 
     ; Silent invocations come from the launcher's update flow. The
