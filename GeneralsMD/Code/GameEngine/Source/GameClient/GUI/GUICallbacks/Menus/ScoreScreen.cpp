@@ -77,6 +77,7 @@
 #include "GameLogic/VictoryConditions.h"
 #include "GameClient/Color.h"
 #include "GameClient/Display.h"
+#include "GameClient/GameFont.h"
 #include "GameClient/GUICallbacks.h"
 #include "GameClient/WindowLayout.h"
 #include "GameClient/GameWindowManager.h"
@@ -433,6 +434,59 @@ void ScoreScreenEnableControls(Bool enable)
 	}
 }
 
+// Addon bigs (ControlBarPro) ship their own ScoreScreen.wnd with larger fonts, but the score
+// screen packs too much data for anything bigger than the retail sizes. These tables mirror the
+// FONT entries of the original ScoreScreen.wnd and win over whatever .wnd the file system loaded.
+static GameFont *getClassicScoreScreenFont( const AsciiString& decoratedName )
+{
+	if( TheFontLibrary == nullptr || decoratedName.isEmpty() )
+		return nullptr;
+
+	const char *shortName = strchr( decoratedName.str(), ':' );
+	if( shortName == nullptr || *(++shortName) == '\0' )
+		return nullptr;
+
+	if( strcmp( shortName, "StaticTextWarSchool" ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Arial"), 14, TRUE );
+
+	if( strcmp( shortName, "GeneralRemarks" ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Arial"), 14, FALSE );
+
+	if( strcmp( shortName, "ChallengeWinLossText" ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Generals"), 20, FALSE );
+
+	if( strcmp( shortName, "ButtonOk" ) == 0
+			|| strcmp( shortName, "ButtonBuddy" ) == 0
+			|| strcmp( shortName, "ButtonContinue" ) == 0
+			|| strcmp( shortName, "ButtonSaveReplay" ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Generals"), 15, FALSE );
+
+	if( strcmp( shortName, "TextEntryChat" ) == 0
+			|| strcmp( shortName, "ButtonEmote" ) == 0
+			|| strcmp( shortName, "ListboxChatWindowScoreScreen" ) == 0
+			|| strcmp( shortName, "ListboxWarschoolAdvice" ) == 0
+			|| strcmp( shortName, "StaticTextGameSaveComplete" ) == 0
+			|| strncmp( shortName, "StaticTextObserver", 18 ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Arial"), 10, FALSE );
+
+	// all the score grid cells and column headers
+	if( strncmp( shortName, "StaticText", 10 ) == 0 )
+		return TheFontLibrary->getFont( AsciiString("Arial"), 9, FALSE );
+
+	return TheFontLibrary->getFont( AsciiString("Times New Roman"), 14, FALSE );
+}
+
+static void enforceClassicScoreScreenFonts( GameWindow *window )
+{
+	GameFont *font = getClassicScoreScreenFont( window->winGetInstanceData()->m_decoratedNameString );
+	if( font )
+		window->winSetFont( font );
+
+	GameWindow *child;
+	for( child = window->winGetChild(); child; child = child->winGetNext() )
+		enforceClassicScoreScreenFonts( child );
+}
+
 extern Bool DontShowMainMenu; //KRIS
 Bool g_playMusic = FALSE;
 Bool ReplayWasPressed = FALSE;
@@ -484,6 +538,12 @@ void ScoreScreenInit( WindowLayout *layout, void *userData )
 	challengeWinLossText = TheWindowManager->winGetWindowFromId( parent, TheNameKeyGenerator->nameToKey("ScoreScreen.wnd:ChallengeWinLossText") );
 	challengeRemarks = TheWindowManager->winGetWindowFromId( parent, TheNameKeyGenerator->nameToKey("ScoreScreen.wnd:GeneralRemarks") );
 	gadgetParent = TheWindowManager->winGetWindowFromId( parent, TheNameKeyGenerator->nameToKey("ScoreScreen.wnd:GadgetParent") );
+
+	// force the classic fonts back on, no matter which .wnd the bigs supplied
+	GameWindow *layoutWindow;
+	for( layoutWindow = layout->getFirstWindow(); layoutWindow; layoutWindow = layoutWindow->winGetNextInLayout() )
+		enforceClassicScoreScreenFonts( layoutWindow );
+
 	// get the replay filename for later (not full path)
 	LastReplayFileName = TheRecorder->getLastReplayFileName().str();
 	staticTextGameSaved->winHide(TRUE);
