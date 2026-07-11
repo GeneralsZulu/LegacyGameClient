@@ -22,13 +22,35 @@
 
 #include "Common/ReleaseLog.h"
 
+#include "Common/GlobalData.h"
+
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <time.h>
 
-// Log file name. Relative (next to the working dir / exe), matching the proven
-// ObserverLog.txt approach so the telemetry uploader can pick it up by name.
+// Log file name. Lives in the per-user data dir (same root as Replays\), not
+// the working directory: unelevated installs can have a read-only game dir,
+// which silently disabled the log while a stale copy kept being re-uploaded.
 static const char *const RELEASE_LOG_FILE_NAME = "ReleaseLog.txt";
+static char s_releaseLogPath[512] = "";
+
+// Full path, resolved lazily because TheGlobalData doesn't exist during very
+// early startup. Returns NULL while the user data dir is still unknown.
+static const char *releaseLogPath()
+{
+	if (s_releaseLogPath[0] != '\0')
+		return s_releaseLogPath;
+	if (TheGlobalData == NULL)
+		return NULL;
+	const AsciiString &dir = TheGlobalData->getPath_UserData();
+	if (dir.isEmpty()
+	    || dir.getLength() + (Int)strlen(RELEASE_LOG_FILE_NAME) + 1 > (Int)sizeof(s_releaseLogPath))
+		return NULL;
+	strcpy(s_releaseLogPath, dir.str());
+	strcat(s_releaseLogPath, RELEASE_LOG_FILE_NAME);
+	return s_releaseLogPath;
+}
 
 // Opened lazily on first write, truncating once per app session so a single
 // file accumulates every match played in that session. fflush after each line
@@ -42,7 +64,10 @@ void ReleaseLog(const char *fmt, ...)
 	{
 		if (s_releaseLogOpenFailed)
 			return;
-		s_releaseLogFile = fopen(RELEASE_LOG_FILE_NAME, "w");
+		const char *path = releaseLogPath();
+		if (path == NULL)
+			return; // user data dir not known yet; try again on the next call
+		s_releaseLogFile = fopen(path, "w");
 		if (s_releaseLogFile == NULL)
 		{
 			// Don't retry every call if the file can't be opened.
@@ -67,7 +92,8 @@ void ReleaseLog(const char *fmt, ...)
 
 const char *ReleaseGetLogFileName()
 {
-	return RELEASE_LOG_FILE_NAME;
+	const char *path = releaseLogPath();
+	return path != NULL ? path : RELEASE_LOG_FILE_NAME;
 }
 
 // ---------------------------------------------------------------------------

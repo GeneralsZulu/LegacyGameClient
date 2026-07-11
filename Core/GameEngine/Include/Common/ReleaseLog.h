@@ -25,9 +25,9 @@
 // match-lifecycle and desync-diagnostic lines are written, so a shipping build
 // produces a small, uploadable log rather than the full debug firehose.
 //
-// Output goes to "ReleaseLog.txt" next to the executable, fflush'd after every
-// line so the file survives a crash. It is picked up by the end-of-match
-// telemetry upload alongside ObserverLog.txt.
+// Output goes to "ReleaseLog.txt" in the per-user data dir (same root as
+// Replays\), fflush'd after every line so the file survives a crash. It is
+// picked up by the end-of-match telemetry upload alongside ObserverLog.txt.
 //
 // Modelled on LANObsLog (GameNetwork/LANObserverStream.h).
 // -----------------------------------------------------------------------------
