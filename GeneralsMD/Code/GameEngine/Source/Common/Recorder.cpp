@@ -312,6 +312,7 @@ RecorderClass::RecorderClass()
 	m_wasDesync = FALSE;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
 	m_replayEpoch = REPLAY_EPOCH_CURRENT;
+	m_playbackStaleObjectRefs = 0;
 	m_liveObserverStreamOpen      = FALSE;
 	m_liveObserverWaitingForBytes = FALSE;
 	m_liveObserverRetryPos        = 0;
@@ -449,6 +450,7 @@ void RecorderClass::init() {
 	m_playbackFrameCount = 0;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
 	m_replayEpoch = REPLAY_EPOCH_CURRENT;
+	m_playbackStaleObjectRefs = 0;
 
 	// Live-observer state must not survive a teardown. Quitting while starved
 	// leaves m_liveObserverWaitingForBytes set, and if it leaks into the next
@@ -1534,6 +1536,19 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 		UnsignedInt playbackCRC = m_crcInfo->readCRC();
 		//DEBUG_LOG(("RecorderClass::handleCRCMessage() - Comparing CRCs of InGame:%8.8X Replay:%8.8X Frame:%d from Player %d",
 		//	playbackCRC, newCRC, TheGameLogic->getFrame()-m_crcInfo->GetQueueSize()-1, playerIndex));
+
+		// Replays recorded by retail-lineage clients ("Version 1.04"/"1.06"
+		// headers) carry Checksum values that never match a re-simulated CRC
+		// at any frame offset -- retail's own playback had the same permanent
+		// mismatch, which is why the warning below was disabled in 2003. A
+		// faithfully re-simulated retail game (verified by outcome) still
+		// mismatches 100% of its checkpoints, so for the retail epoch these
+		// values carry no information: drain the queue and leave the verdict
+		// to the completion and stale-reference checks in ReplaySimulation.
+		// Fork-recorded replays keep the full strict check below.
+		if (getReplayEpoch() == REPLAY_EPOCH_RETAIL)
+			return;
+
 		if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC && !m_crcInfo->sawCRCMismatch())
 		{
 			//Kris: Patch 1.01 November 10, 2003 (integrated changes from Matt Campbell)

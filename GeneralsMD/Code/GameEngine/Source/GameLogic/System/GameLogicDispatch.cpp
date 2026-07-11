@@ -1675,6 +1675,12 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 			for (Int i = 1; i < msg->getArgumentCount(); ++i) {
 				Object *obj = findObjectByID( msg->getArgument( i )->objectID );
 				if (!obj) {
+					// A recorded selection should resolve in a faithful
+					// re-simulation; the recording client selected an object
+					// that existed for it. Counted as a fidelity signal for
+					// the replay verdict (see ReplaySimulation.cpp).
+					if (TheRecorder && TheRecorder->isPlaybackMode())
+						TheRecorder->notePlaybackStaleObjectRef();
 					continue;
 				}
 
@@ -1693,6 +1699,8 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 				ObjectID objID = msg->getArgument(i)->objectID;
 				Object *objToRemove = findObjectByID(objID);
 				if (!objToRemove) {
+					if (TheRecorder && TheRecorder->isPlaybackMode())
+						TheRecorder->notePlaybackStaleObjectRef();
 					continue;
 				}
 

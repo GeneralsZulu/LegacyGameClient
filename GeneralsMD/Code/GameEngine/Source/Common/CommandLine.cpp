@@ -461,8 +461,9 @@ Int parseStatsUrl(char *args[], int num)
 }
 
 // TheSuperHackers @feature Path to a JSON-lines file that batch replay
-// simulation appends a per-replay verdict to (OK / DESYNC / INCOMPLETE /
-// CANT_OPEN). Forwarded to worker processes when using -jobs.
+// simulation appends a per-replay verdict to (OK / OK_RETAIL_UNCHECKED /
+// DESYNC / INCOMPLETE / CANT_OPEN). Forwarded to worker processes when
+// using -jobs.
 Int parseResultLog(char *args[], int num)
 {
 	if (num > 1)
@@ -1350,9 +1351,10 @@ static CommandLineParam paramsForStartup[] =
 	{ "-statsUrl", parseStatsUrl },
 
 	// Path to a JSON-lines result log for batch replay simulation. Each replay
-	// appends one line with its verdict (OK / DESYNC / INCOMPLETE / CANT_OPEN),
-	// frame counts, and whether stats were exported. Stats are only exported/
-	// uploaded for OK replays.
+	// appends one line with its verdict (OK / OK_RETAIL_UNCHECKED / DESYNC /
+	// INCOMPLETE / CANT_OPEN), frame counts, stale command references, and
+	// whether stats were exported. Stats are exported/uploaded for complete
+	// runs; retail-epoch replays skip checksum validation (see Recorder.cpp).
 	{ "-resultLog", parseResultLog },
 
 	// Force the replay determinism epoch (retail/v121/v128/v130/current or the

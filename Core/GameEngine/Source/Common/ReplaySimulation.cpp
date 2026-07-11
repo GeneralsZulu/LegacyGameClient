@@ -78,7 +78,8 @@ AsciiString escapeJsonString(const AsciiString &in)
 } // namespace
 
 void ReplaySimulation::appendResultLogEntry(const AsciiString &filename, const char *verdict,
-	UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch)
+	UnsignedInt framesPlayed, UnsignedInt framesExpected, Bool statsExported, Int epoch,
+	UnsignedInt staleRefs)
 {
 	const AsciiString &logPath = TheGlobalData->m_replayResultLog;
 	if (logPath.isEmpty())
@@ -97,13 +98,14 @@ void ReplaySimulation::appendResultLogEntry(const AsciiString &filename, const c
 	}
 
 	fprintf(fp,
-		"{\"file\":\"%s\",\"verdict\":\"%s\",\"framesPlayed\":%u,\"framesExpected\":%u,\"epoch\":%d,\"statsExported\":%s}\n",
+		"{\"file\":\"%s\",\"verdict\":\"%s\",\"framesPlayed\":%u,\"framesExpected\":%u,\"epoch\":%d,\"statsExported\":%s,\"staleRefs\":%u}\n",
 		escapeJsonString(filename).str(),
 		verdict,
 		framesPlayed,
 		framesExpected,
 		epoch,
-		statsExported ? "true" : "false");
+		statsExported ? "true" : "false",
+		staleRefs);
 
 	fclose(fp);
 }
@@ -148,7 +150,7 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 		// trace: post-processing treats a file whose last line is STARTED as a
 		// crash (usually a hard desync). A clean/desynced run appends a final
 		// line that supersedes it.
-		appendResultLogEntry(filename, "STARTED", 0, 0, FALSE, -1);
+		appendResultLogEntry(filename, "STARTED", 0, 0, FALSE, -1, 0);
 		DWORD startTimeMillis = GetTickCount();
 		if (TheGlobalData->m_exportStats)
 			StatsExporterBeginRecording();
@@ -196,10 +198,22 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 			// mismatch, so a clean run that reached the recorded frame count is
 			// OK; anything short without a mismatch is treated as INCOMPLETE
 			// (allow a 1-second slack for benign end-of-replay off-by-a-few).
+			//
+			// Retail-epoch replays can never be checksum-verified: their
+			// recorded Checksum values don't match a re-simulated CRC on any
+			// engine (see RecorderClass::handleCRCMessage), so the recorder
+			// skips that check for them and a completed run is reported as
+			// OK_RETAIL_UNCHECKED. Consumers should weigh the staleRefs count:
+			// zero means every recorded command resolved against our world,
+			// the strongest fidelity evidence available without checksums.
+			const Bool retailEpoch =
+				(TheRecorder->getReplayEpoch() == RecorderClass::REPLAY_EPOCH_RETAIL);
 			const Bool incomplete = !desynced && framesExpected != 0
 				&& framesPlayed + LOGICFRAMES_PER_SECOND < framesExpected;
 			const Bool isOk = !desynced && !incomplete;
-			const char *verdict = desynced ? "DESYNC" : (incomplete ? "INCOMPLETE" : "OK");
+			const char *verdict = desynced ? "DESYNC"
+				: (incomplete ? "INCOMPLETE"
+				: (retailEpoch ? "OK_RETAIL_UNCHECKED" : "OK"));
 
 			// TheSuperHackers @feature Only export/upload stats for a clean,
 			// complete simulation. A desynced or truncated playback produces a
@@ -213,13 +227,13 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 			}
 
 			appendResultLogEntry(filename, verdict, framesPlayed, framesExpected, statsExported,
-				(Int)TheRecorder->getReplayEpoch());
+				(Int)TheRecorder->getReplayEpoch(), TheRecorder->getPlaybackStaleObjectRefs());
 		}
 		else
 		{
 			printf("Cannot open replay\n");
 			numErrors++;
-			appendResultLogEntry(filename, "CANT_OPEN", 0, 0, FALSE, -1);
+			appendResultLogEntry(filename, "CANT_OPEN", 0, 0, FALSE, -1, 0);
 		}
 	}
 	if (filenames.size() > 1)
