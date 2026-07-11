@@ -6,6 +6,8 @@
 #include "PreRTS.h"
 #include "GameNetwork/LANObserverStream.h"
 
+#include "Common/GlobalData.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -16,11 +18,43 @@
 // with debug logging. fflush after every write so the file survives a
 // crash. Static FILE* opened on first call.
 static FILE* s_obsLogFile = NULL;
+
+// The log lives in the per-user data dir (same root as Replays\), not the
+// working directory: unelevated installs can have a read-only game dir, which
+// silently killed the log and left a stale copy to be re-uploaded forever.
+// Resolved lazily because TheGlobalData doesn't exist during early startup.
+static const char* const OBS_LOG_FILE_NAME = "ObserverLog.txt";
+static char s_obsLogPath[512] = "";
+
+static const char* obsLogPath()
+{
+	if (s_obsLogPath[0] != '\0')
+		return s_obsLogPath;
+	if (TheGlobalData == NULL)
+		return NULL;
+	const AsciiString& dir = TheGlobalData->getPath_UserData();
+	if (dir.isEmpty()
+	    || dir.getLength() + (Int)strlen(OBS_LOG_FILE_NAME) + 1 > (Int)sizeof(s_obsLogPath))
+		return NULL;
+	strcpy(s_obsLogPath, dir.str());
+	strcat(s_obsLogPath, OBS_LOG_FILE_NAME);
+	return s_obsLogPath;
+}
+
+const char* LANObsGetLogFileName()
+{
+	const char* path = obsLogPath();
+	return path != NULL ? path : OBS_LOG_FILE_NAME;
+}
+
 void LANObsLog(const char* fmt, ...)
 {
 	if (!s_obsLogFile)
 	{
-		s_obsLogFile = fopen("ObserverLog.txt", "w");
+		const char* path = obsLogPath();
+		if (!path)
+			return;	// user data dir not known yet; try again on the next call
+		s_obsLogFile = fopen(path, "w");
 		if (!s_obsLogFile)
 			return;
 	}

@@ -26,9 +26,15 @@
 #include <vector>
 
 // Release-mode diagnostic log for the observer feature. Writes to
-// "ObserverLog.txt" next to the .exe, fflush after every line so it
-// survives a crash. Always compiled in (DEBUG_LOG goes away in release).
+// "ObserverLog.txt" in the per-user data dir (same root as Replays\),
+// fflush after every line so it survives a crash. Always compiled in
+// (DEBUG_LOG goes away in release).
 void LANObsLog(const char* fmt, ...);
+
+// Full path/name of the observer log file, for the telemetry uploader.
+// Never null; falls back to the bare filename until the user data dir is
+// known.
+const char* LANObsGetLogFileName();
 
 // Port relative to NETWORK_BASE_PORT_NUMBER (8088) used for the host's
 // observer-stream listen socket. Chosen well above the per-slot ports.

@@ -1083,8 +1083,8 @@ void RecorderClass::stopRecording() {
 #ifdef DEBUG_LOGGING
 				up.logFilePaths.push_back(AsciiString(DebugGetLogFileName())); // absolute path
 #endif
-				up.logFilePaths.push_back(AsciiString("ObserverLog.txt"));      // next to the exe
-				up.logFilePaths.push_back(AsciiString(ReleaseGetLogFileName())); // always-on release log
+				up.logFilePaths.push_back(AsciiString(LANObsGetLogFileName()));   // observer log, in the user data dir
+				up.logFilePaths.push_back(AsciiString(ReleaseGetLogFileName())); // always-on release log, same dir
 			}
 
 			// Map check + conditional map upload. Look up the played map's CRC
