@@ -22,6 +22,8 @@ typedef Int (*StartSpotRandomFunc)(Int lo, Int hi);
 // Distances are ground-path based when the map cache has them (rivers and
 // cliffs separate spots that look adjacent), straight-line otherwise.
 // Deliberately chosen spots are honored and score as fixed points.
+// Which teammate gets which of the team's spots is then shuffled (the
+// enumeration itself hands them out in slot order).
 void assignStartPositionsGlobal(GameInfo *game, StartSpotRandomFunc randFunc);
 
 // If every occupied non-observer slot has team == -1, query the

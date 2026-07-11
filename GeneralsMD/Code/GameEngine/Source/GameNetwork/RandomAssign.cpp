@@ -385,6 +385,41 @@ void assignStartPositionsGlobal(GameInfo *game, StartSpotRandomFunc randFunc)
 	if (st.tieCount == 0)
 		return;
 
+	// The ascending-spot pruning in enumerateAssignments hands a team's spots
+	// to its members in slot order, so without this the lowest slot on a team
+	// always lands on the lowest-numbered spot. Which teammate gets which spot
+	// doesn't affect the score, so Fisher-Yates within each team for variety.
+	// Unteamed players don't need it: all their permutations tie, so the
+	// reservoir pick above is already uniform across them.
+	{
+		Bool inTeamDone[MAX_SLOTS];
+		for (i = 0; i < st.numPlayers; ++i)
+			inTeamDone[i] = FALSE;
+		for (i = 0; i < st.numPlayers; ++i)
+		{
+			if (inTeamDone[i] || st.playerFixed[i] || st.playerTeam[i] < 0 || st.chosenSpot[i] < 0)
+				continue;
+			Int members[MAX_SLOTS];
+			Int numMembers = 0;
+			for (j = i; j < st.numPlayers; ++j)
+			{
+				if (!inTeamDone[j] && !st.playerFixed[j] && st.chosenSpot[j] >= 0 && st.playerTeam[j] == st.playerTeam[i])
+				{
+					members[numMembers++] = j;
+					inTeamDone[j] = TRUE;
+				}
+			}
+			Int k;
+			for (k = numMembers - 1; k > 0; --k)
+			{
+				Int r = randFunc(0, k);
+				Int tmp = st.chosenSpot[members[k]];
+				st.chosenSpot[members[k]] = st.chosenSpot[members[r]];
+				st.chosenSpot[members[r]] = tmp;
+			}
+		}
+	}
+
 	for (i = 0; i < st.numPlayers; ++i)
 	{
 		if (st.playerFixed[i] || st.chosenSpot[i] < 0)
