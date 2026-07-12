@@ -434,9 +434,9 @@ void ScoreScreenEnableControls(Bool enable)
 	}
 }
 
-// Addon bigs (ControlBarPro) ship their own ScoreScreen.wnd with larger fonts, but the score
-// screen packs too much data for anything bigger than the retail sizes. These tables mirror the
-// FONT entries of the original ScoreScreen.wnd and win over whatever .wnd the file system loaded.
+// Addon bigs (ControlBarPro) ship their own ScoreScreen.wnd with larger fonts, which overflow the
+// grid. This table mirrors the FONT entries of the retail ScoreScreen.wnd and wins over whatever
+// .wnd the file system loaded. Keep it in sync with assets/Window/Menus/ScoreScreen.wnd.
 static GameFont *getClassicScoreScreenFont( const AsciiString& decoratedName )
 {
 	if( TheFontLibrary == nullptr || decoratedName.isEmpty() )
@@ -461,17 +461,16 @@ static GameFont *getClassicScoreScreenFont( const AsciiString& decoratedName )
 			|| strcmp( shortName, "ButtonSaveReplay" ) == 0 )
 		return TheFontLibrary->getFont( AsciiString("Generals"), 15, FALSE );
 
+	// the chat area keeps the retail size; a bigger font just fits fewer lines in the box
 	if( strcmp( shortName, "TextEntryChat" ) == 0
 			|| strcmp( shortName, "ButtonEmote" ) == 0
 			|| strcmp( shortName, "ListboxChatWindowScoreScreen" ) == 0
-			|| strcmp( shortName, "ListboxWarschoolAdvice" ) == 0
-			|| strcmp( shortName, "StaticTextGameSaveComplete" ) == 0
-			|| strncmp( shortName, "StaticTextObserver", 18 ) == 0 )
+			|| strcmp( shortName, "ListboxWarschoolAdvice" ) == 0 )
 		return TheFontLibrary->getFont( AsciiString("Arial"), 10, FALSE );
 
-	// all the score grid cells and column headers
+	// every score grid cell, column header and observer row
 	if( strncmp( shortName, "StaticText", 10 ) == 0 )
-		return TheFontLibrary->getFont( AsciiString("Arial"), 9, FALSE );
+		return TheFontLibrary->getFont( AsciiString("Arial"), 12, FALSE );
 
 	return TheFontLibrary->getFont( AsciiString("Times New Roman"), 14, FALSE );
 }

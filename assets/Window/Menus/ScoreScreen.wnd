@@ -155,7 +155,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:PlayerName";
@@ -204,7 +204,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreUnitBuilt";
@@ -253,7 +253,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreUnitLost";
@@ -302,7 +302,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreUnitKilled";
@@ -351,7 +351,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreBldgBuilt";
@@ -400,7 +400,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreBldgLost";
@@ -449,7 +449,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ResourcesCollected";
@@ -498,7 +498,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreEfficiency";
@@ -547,7 +547,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:ScoreBldgKilled";
@@ -1626,7 +1626,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -1675,7 +1675,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -1724,7 +1724,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "##";
@@ -1773,7 +1773,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -1822,7 +1822,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -1871,7 +1871,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -1920,7 +1920,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -1969,7 +1969,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -2018,7 +2018,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -2067,7 +2067,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -2116,7 +2116,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -2165,7 +2165,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -2214,7 +2214,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -2263,7 +2263,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -2312,7 +2312,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -2361,7 +2361,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -2410,7 +2410,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -2459,7 +2459,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -2508,7 +2508,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -2557,7 +2557,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -2606,7 +2606,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -2655,7 +2655,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -2704,7 +2704,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -2753,7 +2753,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -2802,7 +2802,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -2851,7 +2851,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -2900,7 +2900,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -2949,7 +2949,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -2998,7 +2998,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -3047,7 +3047,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -3096,7 +3096,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -3145,7 +3145,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -3194,7 +3194,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -3243,7 +3243,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -3292,7 +3292,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -3341,7 +3341,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -3390,7 +3390,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -3439,7 +3439,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -3488,7 +3488,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -3537,7 +3537,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -3586,7 +3586,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -3635,7 +3635,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -3684,7 +3684,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -3733,7 +3733,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -3782,7 +3782,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -3831,7 +3831,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -3880,7 +3880,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -3929,7 +3929,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -3978,7 +3978,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -4027,7 +4027,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -4076,7 +4076,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -4125,7 +4125,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -4174,7 +4174,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -4223,7 +4223,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -4272,7 +4272,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buidings Built";
@@ -4321,7 +4321,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -4370,7 +4370,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -4419,7 +4419,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -4468,7 +4468,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -4517,7 +4517,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -4566,7 +4566,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -4615,7 +4615,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -4664,7 +4664,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -4713,7 +4713,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Lost";
@@ -4762,7 +4762,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "PlayerName";
@@ -4811,7 +4811,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "##";
@@ -4860,7 +4860,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Lost";
@@ -4909,7 +4909,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Destroyed";
@@ -4958,7 +4958,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Buildings Killed";
@@ -5007,7 +5007,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "$$$";
@@ -5056,7 +5056,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "0%";
@@ -5105,7 +5105,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 9, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "Units Built";
@@ -5154,7 +5154,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5203,7 +5203,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5252,7 +5252,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5301,7 +5301,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5350,7 +5350,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5399,7 +5399,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5448,7 +5448,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -5497,7 +5497,7 @@ WINDOW
       INPUTCALLBACK = "[None]";
       TOOLTIPCALLBACK = "[None]";
       DRAWCALLBACK = "[None]";
-      FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+      FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
       HEADERTEMPLATE = "LabelRegular";
       TOOLTIPDELAY = -1;
       TEXT = "GUI:Observer";
@@ -6069,7 +6069,7 @@ WINDOW
     INPUTCALLBACK = "[None]";
     TOOLTIPCALLBACK = "[None]";
     DRAWCALLBACK = "[None]";
-    FONT = NAME: "Arial", SIZE: 10, BOLD: 0;
+    FONT = NAME: "Arial", SIZE: 12, BOLD: 0;
     HEADERTEMPLATE = "LabelRegular";
     TOOLTIPDELAY = -1;
     TEXT = "GUI:GameSaved";
