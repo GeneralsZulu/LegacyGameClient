@@ -2612,7 +2612,13 @@ Bool isViewerOnlyClient()
 	if (ThePlayerList)
 	{
 		Player *local = ThePlayerList->getLocalPlayer();
-		if (local && local->isPlayerObserver())
+		// A defeated player has no army left to command, so they are as much a
+		// viewer as a lobby observer is. isPlayerActive() is false for both
+		// (!m_observer && !m_isPlayerDead), which promotes the dead player to the
+		// full observer UI -- production queues, garrison contents, income -- and
+		// at the same time extends the command-issuance block in processCommandUI
+		// to them.
+		if (local && !local->isPlayerActive())
 			return TRUE;
 	}
 	return FALSE;
