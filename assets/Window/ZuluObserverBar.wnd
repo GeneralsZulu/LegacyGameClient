@@ -6,8 +6,8 @@ STARTLAYOUTBLOCK
 ENDLAYOUTBLOCK
     WINDOW
       WINDOWTYPE = USER;
-      SCREENRECT = UPPERLEFT: 332 740,
-                   BOTTOMRIGHT: 835 1080,
+      SCREENRECT = UPPERLEFT: 400 868,
+                   BOTTOMRIGHT: 724 1076,
                    CREATIONRESOLUTION: 1920 1080;
       NAME = "ZuluObserverBar.wnd:ObserverPlayerInfoWindow";
       STATUS = ENABLED+SEE_THRU+NOINPUT+NOFOCUS;
@@ -52,8 +52,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = USER;
-        SCREENRECT = UPPERLEFT: 391 885,
-                     BOTTOMRIGHT: 830 1045,
+        SCREENRECT = UPPERLEFT: 400 868,
+                     BOTTOMRIGHT: 724 1028,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:ControlBarProBlockInputObserverPlayerInfoH";
         STATUS = ENABLED;
@@ -69,8 +69,8 @@ ENDLAYOUTBLOCK
       CHILD
 	  WINDOW
         WINDOWTYPE = USER;
-        SCREENRECT = UPPERLEFT: 332 743,
-                     BOTTOMRIGHT: 391 1080,
+        SCREENRECT = UPPERLEFT: 400 1028,
+                     BOTTOMRIGHT: 724 1076,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:ControlBarProBlockInputObserverPlayerInfoV";
         STATUS = ENABLED;
@@ -86,11 +86,11 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = USER;
-        SCREENRECT = UPPERLEFT: 327 824,
-                     BOTTOMRIGHT: 834 1080,
+        SCREENRECT = UPPERLEFT: 400 868,
+                     BOTTOMRIGHT: 724 1028,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:WinGeneralPortrait";
-        STATUS = ENABLED+IMAGE+NOINPUT+NOFOCUS;
+        STATUS = ENABLED+NOINPUT+NOFOCUS;
         STYLE = USER;
         SYSTEMCALLBACK = "[None]";
         INPUTCALLBACK = "GameWinBlockInput";
@@ -102,7 +102,7 @@ ENDLAYOUTBLOCK
         TEXTCOLOR = ENABLED:  255 255 255 0, ENABLEDBORDER:  255 255 255 0,
                     DISABLED: 255 255 255 0, DISABLEDBORDER: 255 255 255 0,
                     HILITE:   255 255 255 0, HILITEBORDER:   255 255 255 0;
-        ENABLEDDRAWDATA = IMAGE: ZuluObsPlayerWindow, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
+        ENABLEDDRAWDATA = IMAGE: NoImage, COLOR: 0 0 0 150, BORDERCOLOR: 44 139 101 255,
                           IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 255,
                           IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 255,
                           IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 255,
@@ -133,11 +133,11 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = USER;
-        SCREENRECT = UPPERLEFT: 0 0,
-                     BOTTOMRIGHT: 100 100,
+        SCREENRECT = UPPERLEFT: 402 870,
+                     BOTTOMRIGHT: 722 1026,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:WinFlag";
-        STATUS = ENABLED+HIDDEN+SEE_THRU;
+        STATUS = ENABLED+IMAGE+NOINPUT+NOFOCUS;
         STYLE = USER;
         SYSTEMCALLBACK = "[None]";
         INPUTCALLBACK = "[None]";
@@ -149,7 +149,7 @@ ENDLAYOUTBLOCK
         TEXTCOLOR = ENABLED:  255 255 255 0, ENABLEDBORDER:  255 255 255 0,
                     DISABLED: 255 255 255 0, DISABLEDBORDER: 255 255 255 0,
                     HILITE:   255 255 255 0, HILITEBORDER:   255 255 255 0;
-        ENABLEDDRAWDATA = IMAGE: BlackSquare, COLOR: 0 0 0 126, BORDERCOLOR: 0 0 0 255,
+        ENABLEDDRAWDATA = IMAGE: BlackSquare, COLOR: 0 0 0 255, BORDERCOLOR: 0 0 0 255,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
@@ -180,8 +180,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = PUSHBUTTON;
-        SCREENRECT = UPPERLEFT: 333 1044,
-                     BOTTOMRIGHT: 433 1074,
+        SCREENRECT = UPPERLEFT: 512 1036,
+                     BOTTOMRIGHT: 612 1066,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:ButtonCancel";
         STATUS = ENABLED+IMAGE+ON_MOUSE_DOWN;
@@ -227,8 +227,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 334 948,
-                     BOTTOMRIGHT: 454 998,
+        SCREENRECT = UPPERLEFT: 478 948,
+                     BOTTOMRIGHT: 718 970,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextObsBuildings";
         STATUS = ENABLED;
@@ -271,13 +271,13 @@ ENDLAYOUTBLOCK
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0;
-        STATICTEXTDATA = CENTERED: 1;
+        STATICTEXTDATA = CENTERED: 0;
       END
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 456 948,
-                     BOTTOMRIGHT: 576 998,
+        SCREENRECT = UPPERLEFT: 478 922,
+                     BOTTOMRIGHT: 718 944,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextObsUnits";
         STATUS = ENABLED;
@@ -320,13 +320,13 @@ ENDLAYOUTBLOCK
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0;
-        STATICTEXTDATA = CENTERED: 1;
+        STATICTEXTDATA = CENTERED: 0;
       END
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 578 948,
-                     BOTTOMRIGHT: 698 998,
+        SCREENRECT = UPPERLEFT: 478 1000,
+                     BOTTOMRIGHT: 718 1022,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextObsUnitsLost";
         STATUS = ENABLED;
@@ -369,13 +369,13 @@ ENDLAYOUTBLOCK
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0;
-        STATICTEXTDATA = CENTERED: 1;
+        STATICTEXTDATA = CENTERED: 0;
       END
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 700 948,
-                     BOTTOMRIGHT: 820 998,
+        SCREENRECT = UPPERLEFT: 478 974,
+                     BOTTOMRIGHT: 718 996,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextObsUnitsKilled";
         STATUS = ENABLED;
@@ -418,13 +418,13 @@ ENDLAYOUTBLOCK
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                          IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0;
-        STATICTEXTDATA = CENTERED: 1;
+        STATICTEXTDATA = CENTERED: 0;
       END
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 334 912,
-                     BOTTOMRIGHT: 698 946,
+        SCREENRECT = UPPERLEFT: 406 874,
+                     BOTTOMRIGHT: 718 918,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextPlayerName";
         STATUS = ENABLED;
@@ -439,7 +439,7 @@ ENDLAYOUTBLOCK
         TEXTCOLOR = ENABLED:  254 254 254 255, ENABLEDBORDER:  0 0 0 255,
                     DISABLED: 192 192 192 255, DISABLEDBORDER: 64 64 64 255,
                     HILITE:   3 196 0 255, HILITEBORDER:   0 66 4 255;
-        ENABLEDDRAWDATA = IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
+        ENABLEDDRAWDATA = IMAGE: NoImage, COLOR: 0 0 0 102, BORDERCOLOR: 0 0 0 255,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
                           IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0,
@@ -471,8 +471,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 578 1000,
-                     BOTTOMRIGHT: 698 1034,
+        SCREENRECT = UPPERLEFT: 406 1000,
+                     BOTTOMRIGHT: 474 1022,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextNumberOfUnitsLost";
         STATUS = ENABLED;
@@ -519,8 +519,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 700 1000,
-                     BOTTOMRIGHT: 820 1034,
+        SCREENRECT = UPPERLEFT: 406 974,
+                     BOTTOMRIGHT: 474 996,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextNumberOfUnitsKilled";
         STATUS = ENABLED;
@@ -567,8 +567,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 334 1000,
-                     BOTTOMRIGHT: 454 1034,
+        SCREENRECT = UPPERLEFT: 406 948,
+                     BOTTOMRIGHT: 474 970,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextNumberOfBuildings";
         STATUS = ENABLED;
@@ -615,8 +615,8 @@ ENDLAYOUTBLOCK
       CHILD
       WINDOW
         WINDOWTYPE = STATICTEXT;
-        SCREENRECT = UPPERLEFT: 454 1000,
-                     BOTTOMRIGHT: 574 1034,
+        SCREENRECT = UPPERLEFT: 406 922,
+                     BOTTOMRIGHT: 474 944,
                      CREATIONRESOLUTION: 1920 1080;
         NAME = "ZuluObserverBar.wnd:StaticTextNumberOfUnits";
         STATUS = ENABLED;
