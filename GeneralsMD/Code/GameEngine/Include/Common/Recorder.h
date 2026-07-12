@@ -156,6 +156,10 @@ public:
 	// catchup ends and the recorder returns to NONE so live input takes over.
 	Bool startResumeCatchup(AsciiString filename, UnsignedInt handoffFrame);
 	void updateResumeCatchup();
+	// At handoff, take the replay file over for recording instead of dropping it, so the
+	// resumed match is recorded and stopRecording() (which is what uploads the replay, the
+	// stats and the per-player logs) actually runs when the game ends.
+	Bool beginRecordingAfterResume();
 	void initControls();															///< Show or Hide the Replay controls
 
 	static AsciiString getReplayDir();								///< Returns the directory that holds the replay files.
@@ -273,6 +277,7 @@ protected:
 	UnsignedInt m_resumeHandoffFrame;								///< During RESUME_CATCHUP, the frame at which to stop injecting replay commands and return to NONE.
 	Int m_resumeSavedFpsLimit;											///< During RESUME_CATCHUP, the FPS limit at start so we can restore at handoff.
 	Int m_resumeSavedNetFrameRate;									///< During RESUME_CATCHUP, the network's logic frame rate at start so we can restore at handoff.
+	Int m_resumeRecordPos;													///< During RESUME_CATCHUP, byte offset just past the last record we replayed; where beginRecordingAfterResume truncates.
 
 	UnsignedInt m_replayAIFeatureVersion;						///< CURRENT for live games; loaded from the replay's extension block during playback.
 

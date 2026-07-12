@@ -319,6 +319,7 @@ RecorderClass::RecorderClass()
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
 	m_replayShortRead             = FALSE;
+	m_resumeRecordPos             = 0;
 	m_liveObserverStarvedSinceMs  = 0;
 	init(); // just for the heck of it.
 }
@@ -463,6 +464,7 @@ void RecorderClass::init() {
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
 	m_replayShortRead             = FALSE;
+	m_resumeRecordPos             = 0;
 	m_liveObserverStarvedSinceMs  = 0;
 
 	OptionPreferences optionPref;
@@ -2529,6 +2531,12 @@ Bool RecorderClass::startResumeCatchup(AsciiString filename, UnsignedInt handoff
 	m_resumeHandoffFrame = handoffFrame;
 	m_currentReplayFilename = filename;
 
+	// Everything up to here is the replay header, and it is the point we would keep if
+	// the handoff arrived before a single command was consumed. beginRecordingAfterResume
+	// truncates here and appends live commands, so this has to be the offset just past the
+	// header and before the first frame number.
+	m_resumeRecordPos = m_file->position();
+
 	// Prime m_nextFrame with the frame number of the first recorded command.
 	readNextFrame();
 
@@ -2564,6 +2572,73 @@ Bool RecorderClass::startResumeCatchup(AsciiString filename, UnsignedInt handoff
 
 	DEBUG_LOG(("RecorderClass::startResumeCatchup - catching up %s to frame %u",
 		filename.str(), handoffFrame));
+	return TRUE;
+}
+
+/**
+ * Hand the replay file over from catchup (reading) to recording (writing), so the rest of
+ * a resumed match is recorded and stopRecording() runs when it ends.
+ *
+ * Resume always arms the last replay, which is the same file startRecording would write,
+ * and it already holds the header plus every frame up to the handoff. So rather than start
+ * a fresh recording -- which would truncate the header and produce a replay that begins
+ * midway through the match -- we keep the bytes we consumed and append live commands to
+ * them. The result is one complete replay of the whole game.
+ *
+ * We truncate at the last record we actually replayed, which drops the tail of the old
+ * recording (including its MSG_CLEAR_GAME_DATA). Leaving that tail in place would put
+ * records for already-played frames after the ones we are about to append, and the frame
+ * numbers would run backwards.
+ */
+Bool RecorderClass::beginRecordingAfterResume()
+{
+	if (m_file == nullptr || m_resumeRecordPos <= 0)
+		return FALSE;
+
+	// Replays are command logs, not state dumps, so the whole prefix is small (a long 8p
+	// match is a few hundred KB). Buffering it is cheaper than any in-place truncate the
+	// File interface does not offer.
+	const Int prefixLen = m_resumeRecordPos;
+	char *prefix = NEW char[prefixLen];
+	m_file->seek(0, File::seekMode::START);
+	const Int got = m_file->read(prefix, prefixLen);
+	m_file->close();
+	m_file = nullptr;
+
+	if (got != prefixLen)
+	{
+		DEBUG_LOG(("RecorderClass::beginRecordingAfterResume - short read of replay prefix (%d of %d)", got, prefixLen));
+		delete [] prefix;
+		return FALSE;
+	}
+
+	AsciiString fileName = getLastReplayFileName();
+	fileName.concat(getReplayExtention());
+
+	AsciiString filepath = getReplayDir();
+	TheFileSystem->createDirectory(filepath);
+	filepath.concat(fileName);
+
+	// WRITE truncates, which is what gives us the truncate-at-prefix we want.
+	m_file = TheFileSystem->openFile(filepath.str(), File::WRITE | File::BINARY);
+	if (m_file == nullptr)
+	{
+		DEBUG_LOG(("RecorderClass::beginRecordingAfterResume - could not reopen %s for recording", filepath.str()));
+		delete [] prefix;
+		return FALSE;
+	}
+
+	m_file->write(prefix, prefixLen);
+	delete [] prefix;
+	m_file->flush();
+
+	// m_fileName is what stopRecording keys the replay/stats/log uploads off, and RECORD
+	// (not NONE) is also what keeps update() pumping the observer host, so live observers
+	// survive the handoff too.
+	m_fileName = fileName;
+	m_mode     = RECORDERMODETYPE_RECORD;
+
+	DEBUG_LOG(("RecorderClass::beginRecordingAfterResume - recording resumed game into %s from offset %d", fileName.str(), prefixLen));
 	return TRUE;
 }
 
@@ -2665,6 +2740,18 @@ void RecorderClass::updateResumeCatchup()
 	while (m_nextFrame == curFrame && curFrame <= m_resumeHandoffFrame)
 	{
 		appendNextCommand();
+		// End of the last record we actually consumed. readNextFrame() below reads the
+		// NEXT record's frame number, so the position after it is already inside a record
+		// we are not going to replay. This is where beginRecordingAfterResume truncates.
+		//
+		// Only advance it on a record we read in FULL. appendNextCommand leaves the file
+		// offset stranded mid-record on a short read (it can only roll back for a live
+		// observer, whose file is still growing), and truncating there would splice a
+		// half-written command into the replay we are about to keep recording into.
+		if (!m_replayShortRead)
+		{
+			m_resumeRecordPos = m_file->position();
+		}
 		readNextFrame();
 	}
 
@@ -2672,12 +2759,22 @@ void RecorderClass::updateResumeCatchup()
 	// ran out of commands before we got there.
 	if (curFrame >= m_resumeHandoffFrame || m_nextFrame == (UnsignedInt)-1)
 	{
-		if (m_file != nullptr)
+		// Take the replay file over for RECORDING rather than just dropping it. Everything
+		// that closes out a match -- the "Match end" release-log line, logGameEnd, the
+		// replay upload, the stats upload and the per-player log upload -- hangs off
+		// stopRecording(), and updateRecord only reaches stopRecording when m_file is
+		// non-null. Going to RECORDERMODETYPE_NONE with a null file meant a resumed game
+		// finished having uploaded nothing at all.
+		if (!beginRecordingAfterResume())
 		{
-			m_file->close();
-			m_file = nullptr;
+			DEBUG_LOG(("RecorderClass::updateResumeCatchup - could not take over the replay file for recording; this game will not upload"));
+			if (m_file != nullptr)
+			{
+				m_file->close();
+				m_file = nullptr;
+			}
+			m_mode = RECORDERMODETYPE_NONE;
 		}
-		m_mode = RECORDERMODETYPE_NONE;
 		m_currentReplayFilename.clear();
 
 		// Hand input back to the players. (Network resync was needed when
