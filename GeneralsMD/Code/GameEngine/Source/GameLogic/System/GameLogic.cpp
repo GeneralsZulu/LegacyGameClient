@@ -43,6 +43,7 @@
 #include "Common/INI.h"
 #include "Common/LatchRestore.h"
 #include "Common/MapObject.h"
+#include "Common/MessageStream.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/OSDisplay.h"
 #include "Common/PerfTimer.h"
@@ -2196,11 +2197,25 @@ void GameLogic::startNewGame( Bool loadingSaveGame )
 		TheNetwork->liteupdate();
 	}
 
-	while(!isProgressComplete())
+	// everything below this point is just waiting on the other players, so from here on the load
+	// screen is allowed to take input. Drop whatever the player clicked while the map was loading
+	// first, or it lands on the load screen the instant we start listening.
+	if(m_loadScreen)
+		m_loadScreen->flushInput();
+
+	while(!isProgressComplete() && !TheGameEngine->getQuitting() && !LoadScreen::isQuitRequested())
 	{
+		if(m_loadScreen)
+			m_loadScreen->serviceInput();
 		updateLoadProgress(101); // keep greater then 100
 		testTimeOut();
 		Sleep(100);
+	}
+
+	if(LoadScreen::isQuitRequested())
+	{
+		abortLoadAndQuitToShell();
+		return;
 	}
 
 	// if we're in a load game, don't fade yet
@@ -4596,6 +4611,55 @@ void GameLogic::testTimeOut()
 	}
 	// if we made it this far, that means everyone has timed out.
 	m_forceGameStartByTimeOut = TRUE;
+}
+
+// ------------------------------------------------------------------------------------------------
+/** The player hit quit on the multiplayer load screen. Abandon the game we are half way through
+	* starting and drop back to the shell, rather than sitting out PROGRESS_COMPLETE_TIMEOUT waiting
+	* on a peer that is never going to report in. */
+// ------------------------------------------------------------------------------------------------
+void GameLogic::abortLoadAndQuitToShell()
+{
+	LoadScreen::setQuitRequested( FALSE );
+
+	if(m_loadScreen)
+	{
+		TheMouse->setVisibility(TRUE);
+		deleteLoadScreen();
+	}
+	TheWritableGlobalData->m_loadScreenRender = FALSE;	///< mark to resume rendering as normal
+
+	// the recorder started recording when it saw MSG_NEW_GAME, and there is no game to record
+	if(TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_RECORD)
+		TheRecorder->stopRecording();
+
+	if(TheNetwork)
+	{
+		// tell the other players we are gone right now, instead of leaving them to notice when
+		// their own load timeout expires
+		TheNetwork->quitGame();
+	}
+
+	//
+	// Network::quitGame() ends in GameLogic::exitGame(), which posts MSG_CLEAR_GAME_DATA rather
+	// than clearing anything. Nothing propagates the message stream from inside startNewGame(), so
+	// those messages would not run now, and by the time they did there would be no game left for
+	// them to act on. Throw them away and tear the game down synchronously instead.
+	//
+	GameMessage *msg = TheMessageStream->getFirstMessage();
+	while(msg)
+	{
+		GameMessage *nextMsg = msg->next();
+		deleteInstance(msg);
+		msg = nextMsg;
+	}
+
+	// FALSE: no score screen, nobody ever got into the game
+	clearGameData(FALSE);
+
+	// hand the player back to the main menu
+	TheShell->showShellMap(TRUE);
+	TheShell->showShell();
 }
 
 // ------------------------------------------------------------------------------------------------

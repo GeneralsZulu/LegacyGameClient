@@ -384,6 +384,7 @@ private:
 	Int m_progressCompleteTimeout[MAX_SLOTS];
 	void testTimeOut();
 	void lastHeardFrom( Int playerId );
+	void abortLoadAndQuitToShell();													///< Bail out of a multiplayer load that the player has given up on
 	Bool m_forceGameStartByTimeOut;													///< If we timeout someone we're waiting to load, set this flag to start the game
 
 #ifdef DUMP_PERF_STATS

@@ -198,3 +198,9 @@ END
 TOOLTIP:EnforceRandom
 "Lock all players to random faction and random team"
 END
+
+// Quit button on the multiplayer load screen: leaves a game a peer is never going to
+// finish loading, instead of waiting out the load timeout.
+GUI:LoadScreenQuit
+"QUIT"
+END

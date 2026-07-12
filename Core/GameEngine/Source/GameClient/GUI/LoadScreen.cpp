@@ -153,6 +153,8 @@ static const Int TELETYPE_UPDATE_FREQ = 2; // how many frames between teletype u
 // LoadScreen Class
 //-----------------------------------------------------------------------------
 
+Bool LoadScreen::s_quitRequested = FALSE;
+
 LoadScreen::LoadScreen()
 {
 	m_loadScreen = nullptr;
@@ -178,6 +180,81 @@ void LoadScreen::update( Int percent )
 	setFPMode();
 }
 
+//-----------------------------------------------------------------------------
+/** Let the player work the gadgets on this load screen.
+	*
+	* A load screen is driven from inside GameLogic::startNewGame(), so TheGameClient is not
+	* running and nothing puts raw input on the message stream, let alone propagates it. Feed the
+	* mouse to the window system by hand. Nothing else about the client is pumped: no keyboard, no
+	* game messages, no logic, so this cannot disturb the game that is being built underneath. */
+//-----------------------------------------------------------------------------
+void LoadScreen::serviceInput()
+{
+	if( TheMouse == nullptr )
+		return;
+
+	TheMouse->update();
+	TheMouse->sendEventsToWindowSystem();
+}
+
+//-----------------------------------------------------------------------------
+/** Throw away input that piled up while the game was busy loading, so that clicks aimed at the
+	* screen we came from cannot land on a load screen gadget the moment we start listening. */
+//-----------------------------------------------------------------------------
+void LoadScreen::flushInput()
+{
+	if( TheMouse == nullptr )
+		return;
+
+	TheMouse->flushEvents();
+}
+
+//-----------------------------------------------------------------------------
+/** System callback for the multiplayer load screen. The only thing on that screen the player can
+	* work is the quit button, which lets them leave a game that a peer is never going to finish
+	* loading instead of sitting out the whole load timeout. */
+//-----------------------------------------------------------------------------
+WindowMsgHandledType MultiplayerLoadScreenSystem( GameWindow *window, UnsignedInt msg,
+																								 WindowMsgData mData1, WindowMsgData mData2 )
+{
+	static NameKeyType buttonQuit = NAMEKEY_INVALID;
+
+	switch( msg )
+	{
+
+		//---------------------------------------------------------------------------------------------
+		case GWM_CREATE:
+		{
+			buttonQuit = TheNameKeyGenerator->nameToKey( AsciiString( "MultiplayerLoadScreen.wnd:ButtonQuit" ) );
+			break;
+		}
+
+		//---------------------------------------------------------------------------------------------
+		case GWM_DESTROY:
+		{
+			break;
+		}
+
+		//---------------------------------------------------------------------------------------------
+		case GBM_SELECTED:
+		{
+			GameWindow *control = (GameWindow *)mData1;
+			Int controlID = control->winGetWindowId();
+
+			if( controlID == buttonQuit )
+				LoadScreen::setQuitRequested( TRUE );
+
+			break;
+		}
+
+		//---------------------------------------------------------------------------------------------
+		default:
+			return MSG_IGNORED;
+
+	}
+
+	return MSG_HANDLED;
+}
 
 // SinglePlayerLoadScreen Class ///////////////////////////////////////////////
 //-----------------------------------------------------------------------------
@@ -1567,6 +1644,25 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the Multiplayer loadscreen"));
 	m_loadScreen->winHide(FALSE);
 	m_loadScreen->winBringToTop();
+
+	setQuitRequested( FALSE );
+
+	//
+	// The quit button is only good for a game that waits on other players to finish loading.
+	// Skirmish shares this screen and never waits, so there is nothing there to quit out of.
+	//
+	const Bool offerQuit = TheGameLogic->isInMultiplayerGame();
+	GameWindow *buttonQuit = TheWindowManager->winGetWindowFromId( m_loadScreen,
+		TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:ButtonQuit" ) );
+	if(buttonQuit)
+		buttonQuit->winHide( !offerQuit );
+	if(offerQuit)
+	{
+		// the player needs a cursor to hit the button with, and startNewGame() hides the cursor for
+		// every load screen just before it gets here
+		TheMouse->setVisibility( TRUE );
+	}
+
 	m_mapPreview = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:WinMapPreview"));
 	GameSlot *lSlot = game->getSlot(game->getLocalSlotNum());
 	const PlayerTemplate* pt;

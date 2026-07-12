@@ -60,6 +60,9 @@ extern WindowMsgHandledType PopupReplayInput( GameWindow *window, UnsignedInt ms
 // Extended MessageBox ----------------------------------------------------------------------------------
 extern WindowMsgHandledType ExtendedMessageBoxSystem( GameWindow *window, UnsignedInt msg, WindowMsgData mData1, WindowMsgData mData2 );
 
+// Multiplayer load screen ------------------------------------------------------------------------------
+extern WindowMsgHandledType MultiplayerLoadScreenSystem( GameWindow *window, UnsignedInt msg, WindowMsgData mData1, WindowMsgData mData2 );
+
 // game window draw table -----------------------------------------------------------------------
 static FunctionLexicon::TableEntry gameWinDrawTable[] =
 {
@@ -133,6 +136,7 @@ static FunctionLexicon::TableEntry gameWinSystemTable[] =
 	{ NAMEKEY_INVALID, "PopupJoinGameSystem",                (void*)PopupJoinGameSystem },
 	{ NAMEKEY_INVALID, "PopupLadderSelectSystem",            (void*)PopupLadderSelectSystem },
 	{ NAMEKEY_INVALID, "InGamePopupMessageSystem",           (void*)InGamePopupMessageSystem },
+	{ NAMEKEY_INVALID, "MultiplayerLoadScreenSystem",        (void*)MultiplayerLoadScreenSystem },
 	{ NAMEKEY_INVALID, "ControlBarSystem",                   (void*)ControlBarSystem },
 	{ NAMEKEY_INVALID, "ControlBarObserverSystem",           (void*)ControlBarObserverSystem },
 	{ NAMEKEY_INVALID, "IMECandidateWindowSystem",           (void*)IMECandidateWindowSystem },
