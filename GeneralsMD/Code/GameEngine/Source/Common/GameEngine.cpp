@@ -710,7 +710,14 @@ void GameEngine::init()
 		// lobby for a map it doesn't have; the hook fetches it from the
 		// cncstats server and refreshes MapCache so the preview shows
 		// without a game restart. See MapDownloadHook.h.
+		//
+		// The blocking hook is for callsites that have to have the map before
+		// they can continue (observer join, replay playback). The lobby uses
+		// the start/poll pair instead, so a slow CDN can't freeze the UI or
+		// stall the LAN heartbeat.
 		TheMapDownloadHook = &DownloadAndInstallMap;
+		TheMapDownloadStartHook = &MapDownloadStart;
+		TheMapDownloadPollHook = &MapDownloadPoll;
 
 
 	#ifdef DUMP_PERF_STATS///////////////////////////////////////////////////////////////////////////

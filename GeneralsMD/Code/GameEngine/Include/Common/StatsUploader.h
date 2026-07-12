@@ -18,6 +18,7 @@
 #pragma once
 
 #include "Common/AsciiString.h"
+#include "GameNetwork/MapDownloadHook.h"
 
 #include <vector>
 
@@ -226,6 +227,31 @@ bool DownloadMapAssetFromServer(const AsciiString& downloadUrl,
 Bool DownloadAndInstallMap(const AsciiString& localMapPath,
                            UnsignedInt mapCRC,
                            UnsignedInt contentsMask);
+
+/// Non-blocking form of DownloadAndInstallMap, for the lobby. Starts a worker
+/// thread that only does the HTTP (into malloc'd buffers) and returns at once;
+/// the caller polls MapDownloadPoll() from the main thread, which CRC-verifies
+/// the .map, writes everything to disk and refreshes MapCache. Nothing that
+/// touches TheFileSystem / TheMapCache runs on the worker.
+///
+/// This is the registered MapDownloadStartHook; it matches MapDownloadStartHookFn.
+///
+/// Returns false (nothing started) when a download is already in flight, when
+/// the download URL is unconfigured, or when mapCRC / localMapPath are invalid.
+/// @param localMapPath Where the .map will be written (sidecars derive from it)
+/// @param mapCRC CRC to fetch by and to verify the downloaded bytes against
+/// @param contentsMask Which sidecars to ask for (see UploadAllMapAssetsIfMissing)
+Bool MapDownloadStart(const AsciiString& localMapPath,
+                      UnsignedInt mapCRC,
+                      UnsignedInt contentsMask);
+
+/// Main-thread poll for the MapDownloadStart worker. Performs the disk install
+/// on the transition out of PENDING, so it must only be called from the main
+/// thread. Returns INSTALLED / FAILED exactly once per download (consuming the
+/// result); IDLE at every other time.
+///
+/// This is the registered MapDownloadPollHook; it matches MapDownloadPollHookFn.
+MapDownloadStatus MapDownloadPoll(void);
 
 /// Result of a balance_teams API call.
 struct BalanceTeamsResult

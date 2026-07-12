@@ -43,3 +43,33 @@ typedef Bool (*MapDownloadHookFn)(const AsciiString& localMapPath,
                                   UnsignedInt contentsMask);
 
 extern MapDownloadHookFn TheMapDownloadHook;
+
+// Asynchronous form of the same download, for callsites that run on the
+// main/network thread and must not block on WinINet (the lobby: a stalled
+// download there freezes the UI and stops the LAN heartbeat, which gets the
+// peer dropped from the game). The start hook hands the HTTP off to a worker
+// and returns immediately; the poll hook is called every frame from the main
+// thread and does the disk install + MapCache refresh once the bytes are in.
+//
+// Only one download may be in flight at a time: a second start while one is
+// pending returns false.
+enum MapDownloadStatus
+{
+	MAPDOWNLOAD_IDLE = 0,   ///< nothing in flight (and no result waiting)
+	MAPDOWNLOAD_PENDING,    ///< worker still fetching
+	MAPDOWNLOAD_INSTALLED,  ///< CRC-verified and written to disk; MapCache refreshed
+	MAPDOWNLOAD_FAILED      ///< fetch, CRC check or install failed
+};
+
+// Same arguments as MapDownloadHookFn. Returns true when a worker was started.
+typedef Bool (*MapDownloadStartHookFn)(const AsciiString& localMapPath,
+                                       UnsignedInt mapCRC,
+                                       UnsignedInt contentsMask);
+
+// Main-thread only. Returns MAPDOWNLOAD_PENDING while the worker runs, then
+// exactly once returns INSTALLED or FAILED (the result is consumed by that
+// call and the state drops back to IDLE).
+typedef MapDownloadStatus (*MapDownloadPollHookFn)(void);
+
+extern MapDownloadStartHookFn TheMapDownloadStartHook;
+extern MapDownloadPollHookFn  TheMapDownloadPollHook;
