@@ -2743,7 +2743,15 @@ void RecorderClass::updateResumeCatchup()
 		// End of the last record we actually consumed. readNextFrame() below reads the
 		// NEXT record's frame number, so the position after it is already inside a record
 		// we are not going to replay. This is where beginRecordingAfterResume truncates.
-		m_resumeRecordPos = m_file->position();
+		//
+		// Only advance it on a record we read in FULL. appendNextCommand leaves the file
+		// offset stranded mid-record on a short read (it can only roll back for a live
+		// observer, whose file is still growing), and truncating there would splice a
+		// half-written command into the replay we are about to keep recording into.
+		if (!m_replayShortRead)
+		{
+			m_resumeRecordPos = m_file->position();
+		}
 		readNextFrame();
 	}
 
