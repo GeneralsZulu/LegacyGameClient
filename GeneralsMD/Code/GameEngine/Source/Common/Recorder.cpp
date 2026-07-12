@@ -2453,6 +2453,14 @@ Bool RecorderClass::startResumeCatchup(AsciiString filename, UnsignedInt handoff
 	if (TheFramePacer)
 	{
 		m_resumeSavedFpsLimit = TheFramePacer->getFramesPerSecondLimit();
+		// Guard the value we will restore on handoff. getFramesPerSecondLimit() can
+		// hand back 0 (it is an unvalidated Int), and restoring a 0 later would put
+		// FrameRateLimit::wait into an infinite busy-wait. The live-observer path at
+		// playbackFileLiveObserver() already does this; the resume path did not.
+		if (m_resumeSavedFpsLimit <= 0)
+		{
+			m_resumeSavedFpsLimit = 30;
+		}
 		TheFramePacer->setFramesPerSecondLimit(1000);
 	}
 	if (TheNetwork)

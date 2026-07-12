@@ -35,6 +35,15 @@ Int MIN_RUNAHEAD = 4;
 Int FRAME_DATA_LENGTH = (MAX_FRAMES_AHEAD+1)*2;
 Int FRAMES_TO_KEEP = (MAX_FRAMES_AHEAD/2) + 1;
 
+// Rates pinned during resume-from-replay catchup, where throughput is
+// (frames in flight) / (packet send interval) rather than anything to do with
+// realtime. Run-ahead must stay <= MAX_FRAMES_AHEAD/2 (the negotiation clamp,
+// and what FRAMES_TO_KEEP is sized for). The frame rate is not a rate anything
+// actually runs at during catchup -- it only feeds the send-interval formula in
+// Network::processRunAheadCommand, where these two give (1000*32)/(1000*2) = 16ms.
+Int CATCHUP_RUNAHEAD = 32;
+Int CATCHUP_FRAME_RATE = 1000;
+
 #ifdef DEBUG_LOGGING
 
 void dumpBufferToLog(const void *vBuf, Int len, const char *fname, Int line)

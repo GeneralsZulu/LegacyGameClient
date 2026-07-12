@@ -29,6 +29,7 @@
 #include <numeric>
 
 #include "GameNetwork/FrameMetrics.h"
+#include "Common/Recorder.h"
 #include "GameClient/Display.h"
 #include "GameNetwork/networkutil.h"
 
@@ -83,16 +84,29 @@ void FrameMetrics::doPerFrameMetrics(UnsignedInt frame) {
 	// Do the measurement of the fps.
 	time_t curTime = timeGetTime();
 	if ((curTime - m_lastFpsTimeThing) >= 1000) {
+		// This history is the input to ConnectionManager::updateRunAhead, i.e. it is
+		// how this machine tells the rest of the game how fast it can run. During
+		// resume-from-replay catchup the renderer is deliberately decoupled from the
+		// logic rate (GameEngine::update draws on a wall-clock cadence while logic
+		// fast-forwards), so display FPS measures the throttle, not the machine, and
+		// sampling it here would be a lie that the network then acts on: run-ahead
+		// collapses to its floor and the derived packet send interval blows out,
+		// which is precisely how "skip frames to catch up faster" ends up slower than
+		// realtime. Hold the history steady through catchup -- it is seeded to 30 and
+		// resumes sampling for real on handoff, so live play re-converges normally.
+		const Bool inCatchup = (TheRecorder != nullptr) && TheRecorder->isResumeCatchupMode();
+		if (!inCatchup) {
 //		if ((m_fpsListIndex % 16) == 0) {
 //			DEBUG_LOG(("FrameMetrics::doPerFrameMetrics - adding %f to fps history. average before: %f ", m_fpsList[m_fpsListIndex], m_averageFps));
 //		}
-		m_averageFps -= ((m_fpsList[m_fpsListIndex])) / TheGlobalData->m_networkFPSHistoryLength; // subtract out the old value from the average.
-		m_fpsList[m_fpsListIndex] = TheDisplay->getAverageFPS();
+			m_averageFps -= ((m_fpsList[m_fpsListIndex])) / TheGlobalData->m_networkFPSHistoryLength; // subtract out the old value from the average.
+			m_fpsList[m_fpsListIndex] = TheDisplay->getAverageFPS();
 //		m_fpsList[m_fpsListIndex] = TheGameClient->getFrame() - m_fpsStartingFrame;
-		m_averageFps += ((Real)(m_fpsList[m_fpsListIndex])) / TheGlobalData->m_networkFPSHistoryLength; // add the new value to the average.
+			m_averageFps += ((Real)(m_fpsList[m_fpsListIndex])) / TheGlobalData->m_networkFPSHistoryLength; // add the new value to the average.
 //		DEBUG_LOG(("average after: %f", m_averageFps));
-		++m_fpsListIndex;
-		m_fpsListIndex %= TheGlobalData->m_networkFPSHistoryLength;
+			++m_fpsListIndex;
+			m_fpsListIndex %= TheGlobalData->m_networkFPSHistoryLength;
+		}
 		m_lastFpsTimeThing = curTime;
 	}
 

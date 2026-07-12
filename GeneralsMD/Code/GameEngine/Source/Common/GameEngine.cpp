@@ -916,14 +916,24 @@ void GameEngine::update()
 {
 	USE_PERF_TIMER(GameEngine_update)
 	{
-		// During resume-from-replay catchup, render is the dominant cost in
-		// the main loop iteration (logic ticks happen on every iteration
-		// regardless; the lockstep gate is fast enough on LAN that catchup
-		// is bound by per-iteration work, not by network ack latency). We
-		// throttle render to ~2fps during catchup so players can scroll
-		// the camera without giving back most of the speedup from skipping
-		// render. The lead-in (last 10 logic seconds before handoff)
-		// renders every frame for a realtime preview.
+		// During resume-from-replay catchup we render on a WALL-CLOCK cadence
+		// rather than once per logic frame: logic is fast-forwarding at many
+		// times realtime, so drawing every logic frame would burn the CPU on
+		// frames no one can perceive. Rendering at CATCHUP_RENDER_HZ keeps the
+		// fast-forward watchable (players can see the game being rebuilt) at a
+		// cost that is negligible next to the logic ticks between draws.
+		//
+		// This is deliberately NOT "render as little as possible". Render rate
+		// is not the thing that bounds catchup -- lockstep is (see
+		// ConnectionManager::updateRunAhead). Starving the renderer actually
+		// makes catchup SLOWER, because TheDisplay->getAverageFPS() is the input
+		// to the run-ahead negotiation, so a throttled renderer tells the network
+		// "this machine runs at 2fps" and the lockstep pipeline collapses to its
+		// floor. FrameMetrics now refuses to sample display FPS during catchup,
+		// which is what makes it safe to throttle render here at all.
+		//
+		// The lead-in (last 10 logic seconds before handoff) renders every frame
+		// for a realtime preview before control is handed back.
 		const Bool inCatchup = TheRecorder
 			&& TheRecorder->isResumeCatchupMode();
 		const Bool inLeadIn = inCatchup
@@ -931,9 +941,10 @@ void GameEngine::update()
 		Bool catchupSkipRender = inCatchup && !inLeadIn;
 		if (catchupSkipRender)
 		{
+			const UnsignedInt CATCHUP_RENDER_INTERVAL_MS = 33; // ~30fps, smooth to watch
 			static UnsignedInt s_lastCatchupRenderMs = 0;
 			const UnsignedInt nowMs = timeGetTime();
-			if (nowMs - s_lastCatchupRenderMs >= 500)
+			if (nowMs - s_lastCatchupRenderMs >= CATCHUP_RENDER_INTERVAL_MS)
 			{
 				s_lastCatchupRenderMs = nowMs;
 				catchupSkipRender = FALSE;

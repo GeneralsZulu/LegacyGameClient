@@ -35,6 +35,18 @@ Real FrameRateLimit::wait(UnsignedInt maxFps)
 	LARGE_INTEGER tick;
 	QueryPerformanceCounter(&tick);
 	double elapsedSeconds = static_cast<double>(tick.QuadPart - m_start) / m_freq;
+
+	// A zero cap would make targetSeconds infinite and the busy-wait below would
+	// never terminate -- a hard hang, not a slow frame. Callers reach this with 0
+	// by way of FramePacer::setFramesPerSecondLimit(), which takes a signed Int and
+	// does not validate, so a 0 (or a negative, which wraps to a huge unsigned and
+	// silently means "uncapped") is only ever a bug upstream. Treat it as uncapped.
+	if (maxFps == 0)
+	{
+		m_start = tick.QuadPart;
+		return (Real)elapsedSeconds;
+	}
+
 	const double targetSeconds = 1.0 / maxFps;
 	const double sleepSeconds = targetSeconds - elapsedSeconds - 0.002; // leave ~2ms for spin wait
 
