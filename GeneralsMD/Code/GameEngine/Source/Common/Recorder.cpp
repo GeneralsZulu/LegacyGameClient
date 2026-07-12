@@ -318,6 +318,7 @@ RecorderClass::RecorderClass()
 	m_liveObserverRetryPos        = 0;
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
+	m_replayShortRead             = FALSE;
 	m_liveObserverStarvedSinceMs  = 0;
 	init(); // just for the heck of it.
 }
@@ -461,6 +462,7 @@ void RecorderClass::init() {
 	m_liveObserverRetryPos        = 0;
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
+	m_replayShortRead             = FALSE;
 	m_liveObserverStarvedSinceMs  = 0;
 
 	OptionPreferences optionPref;
@@ -1955,13 +1957,63 @@ void RecorderClass::readNextFrame() {
 }
 
 /**
+ * Read exactly size bytes, flagging a short read rather than silently continuing.
+ */
+Bool RecorderClass::readReplayBytes(void *dst, Int size) {
+	const Int bytesRead = m_file->read(dst, size);
+	if (bytesRead != size) {
+		m_replayShortRead = TRUE;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/**
+ * A record could not be read in full. Put the file position back to where the record
+ * started so it can be re-read from the top once the rest of its bytes arrive.
+ */
+void RecorderClass::rollbackTornRecord(Int posBefore) {
+	if (isLiveObserverMode() && m_liveObserverStreamOpen) {
+		// The host simply has not flushed the rest of this record to us yet. The retry
+		// in updatePlayback closes and reopens the file so stdio does not keep insisting
+		// on EOF after new bytes have landed.
+		m_liveObserverRetryPos        = posBefore;
+		m_liveObserverWaitingForBytes = TRUE;
+		DEBUG_LOG(("RecorderClass::appendNextCommand - LIVE_OBSERVER torn record at pos %d, will retry", posBefore));
+		return;
+	}
+	// A file that is not being appended to does not grow, so a short read there means the
+	// replay is genuinely truncated. readNextFrame hits the same EOF next and ends
+	// playback, so just decline to append the partial command.
+	DEBUG_LOG(("RecorderClass::appendNextCommand - short read on frame %d", m_nextFrame));
+}
+
+/**
  * This reads the next command from the replay file and appends it to TheCommandList.
+ *
+ * A replay record is [frame][type][playerIndex][numTypes][argType,argCount]*[args]*
+ * with no length prefix, so a record can only be validated by reading it whole. For a
+ * live observer the file underneath us is being appended by LANObserverClient as TCP
+ * chunks arrive, and TCP is a byte stream, so the file routinely ends mid-record. Every
+ * read here therefore has to be checked: previously only the first one was, and the rest
+ * ignored their return values, so a torn record left the file offset stranded in the
+ * middle of it. From there argument bytes get reinterpreted as frame numbers, m_nextFrame
+ * goes to garbage and stops matching the logic frame, so commands quietly stop being
+ * applied (the game appears to freeze and stutter), and eventually a garbage type is fed
+ * to newInstance(GameMessage) and the observer crashes -- which the host sees as a send
+ * error and drops them.
+ *
+ * On any short read, roll the file position back to the start of the record and let the
+ * live-observer retry path re-read it once the rest of the bytes have landed. This mirrors
+ * what readNextFrame() already does.
  */
 void RecorderClass::appendNextCommand() {
+	const Int posBefore = m_file->position();
+	m_replayShortRead = FALSE;
+
 	GameMessage::Type type;
-	Int bytesRead = m_file->read(&type, sizeof(type));
-	if (bytesRead != sizeof(type)) {
-		DEBUG_LOG(("RecorderClass::appendNextCommand - read failed on frame %d", m_nextFrame/*TheGameLogic->getFrame()*/));
+	if (!readReplayBytes(&type, sizeof(type))) {
+		rollbackTornRecord(posBefore);
 		return;
 	}
 
@@ -1980,7 +2032,11 @@ void RecorderClass::appendNextCommand() {
 #endif // DEBUG_LOGGING
 
 	Int playerIndex = -1;
-	m_file->read(&playerIndex, sizeof(playerIndex));
+	if (!readReplayBytes(&playerIndex, sizeof(playerIndex))) {
+		deleteInstance(msg);
+		rollbackTornRecord(posBefore);
+		return;
+	}
 	msg->friend_setPlayerIndex(playerIndex);
 
 	// don't debug log this if we're debugging sync errors, as it will cause diff problems between a game and it's replay...
@@ -1999,15 +2055,25 @@ void RecorderClass::appendNextCommand() {
 
 	UnsignedByte numTypes = 0;
 	Int totalArgs = 0;
-	m_file->read(&numTypes, sizeof(numTypes));
+	if (!readReplayBytes(&numTypes, sizeof(numTypes))) {
+		deleteInstance(msg);
+		rollbackTornRecord(posBefore);
+		return;
+	}
 
 	GameMessageParser *parser = newInstance(GameMessageParser)();
-	for (UnsignedByte i = 0; i < numTypes; ++i) {
-		UnsignedByte type = (UnsignedByte)ARGUMENTDATATYPE_UNKNOWN;
-		m_file->read(&type, sizeof(type));
+	UnsignedByte i;
+	for (i = 0; i < numTypes; ++i) {
+		UnsignedByte argType = (UnsignedByte)ARGUMENTDATATYPE_UNKNOWN;
 		UnsignedByte numArgs = 0;
-		m_file->read(&numArgs, sizeof(numArgs));
-		parser->addArgType((GameMessageArgumentDataType)type, numArgs);
+		if (!readReplayBytes(&argType, sizeof(argType))
+			|| !readReplayBytes(&numArgs, sizeof(numArgs))) {
+			deleteInstance(parser);
+			deleteInstance(msg);
+			rollbackTornRecord(posBefore);
+			return;
+		}
+		parser->addArgType((GameMessageArgumentDataType)argType, numArgs);
 		totalArgs += numArgs;
 	}
 
@@ -2020,6 +2086,12 @@ void RecorderClass::appendNextCommand() {
 	}
 	for (Int j = 0; j < totalArgs; ++j) {
 		readArgument(lasttype, msg);
+		if (m_replayShortRead) {
+			deleteInstance(parser);
+			deleteInstance(msg);
+			rollbackTornRecord(posBefore);
+			return;
+		}
 
 		--argsLeftForType;
 		if (argsLeftForType == 0) {
@@ -2055,7 +2127,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 	switch (type) {
 		case ARGUMENTDATATYPE_INTEGER: {
 			Int theint;
-			m_file->read(&theint, sizeof(theint));
+			if (!readReplayBytes(&theint, sizeof(theint))) {
+				return;
+			}
 			msg->appendIntegerArgument(theint);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2067,7 +2141,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_REAL: {
 			Real thereal;
-			m_file->read(&thereal, sizeof(thereal));
+			if (!readReplayBytes(&thereal, sizeof(thereal))) {
+				return;
+			}
 			msg->appendRealArgument(thereal);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2079,7 +2155,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_BOOLEAN: {
 			Bool thebool;
-			m_file->read(&thebool, sizeof(thebool));
+			if (!readReplayBytes(&thebool, sizeof(thebool))) {
+				return;
+			}
 			msg->appendBooleanArgument(thebool);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2091,7 +2169,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_OBJECTID: {
 			ObjectID theid;
-			m_file->read(&theid, sizeof(theid));
+			if (!readReplayBytes(&theid, sizeof(theid))) {
+				return;
+			}
 			msg->appendObjectIDArgument(theid);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2103,7 +2183,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_DRAWABLEID: {
 			DrawableID theid;
-			m_file->read(&theid, sizeof(theid));
+			if (!readReplayBytes(&theid, sizeof(theid))) {
+				return;
+			}
 			msg->appendDrawableIDArgument(theid);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2115,7 +2197,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_TEAMID: {
 			UnsignedInt theid;
-			m_file->read(&theid, sizeof(theid));
+			if (!readReplayBytes(&theid, sizeof(theid))) {
+				return;
+			}
 			msg->appendTeamIDArgument(theid);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2127,7 +2211,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_LOCATION: {
 			Coord3D loc;
-			m_file->read(&loc, sizeof(loc));
+			if (!readReplayBytes(&loc, sizeof(loc))) {
+				return;
+			}
 			msg->appendLocationArgument(loc);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2140,7 +2226,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_PIXEL: {
 			ICoord2D pixel;
-			m_file->read(&pixel, sizeof(pixel));
+			if (!readReplayBytes(&pixel, sizeof(pixel))) {
+				return;
+			}
 			msg->appendPixelArgument(pixel);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2152,7 +2240,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_PIXELREGION: {
 			IRegion2D reg;
-			m_file->read(&reg, sizeof(reg));
+			if (!readReplayBytes(&reg, sizeof(reg))) {
+				return;
+			}
 			msg->appendPixelRegionArgument(reg);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2164,7 +2254,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_TIMESTAMP: {  // Not to be confused with Terrance Stamp... Kneel before Zod!!!
 			UnsignedInt stamp;
-			m_file->read(&stamp, sizeof(stamp));
+			if (!readReplayBytes(&stamp, sizeof(stamp))) {
+				return;
+			}
 			msg->appendTimestampArgument(stamp);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
@@ -2176,7 +2268,9 @@ void RecorderClass::readArgument(GameMessageArgumentDataType type, GameMessage *
 		}
 		case ARGUMENTDATATYPE_WIDECHAR: {
 			WideChar theid;
-			m_file->read(&theid, sizeof(theid));
+			if (!readReplayBytes(&theid, sizeof(theid))) {
+				return;
+			}
 			msg->appendWideCharArgument(theid);
 #ifdef DEBUG_LOGGING
 			if (m_doingAnalysis)
