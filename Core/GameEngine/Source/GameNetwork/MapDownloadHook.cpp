@@ -19,3 +19,6 @@
 // Default-null; GeneralsMD installs the real implementation at engine
 // init. See MapDownloadHook.h for the contract.
 MapDownloadHookFn TheMapDownloadHook = nullptr;
+
+MapDownloadStartHookFn TheMapDownloadStartHook = nullptr;
+MapDownloadPollHookFn  TheMapDownloadPollHook  = nullptr;

@@ -1840,6 +1840,41 @@ static bool writeAssetToDisk(const AsciiString& path, void *data, unsigned int l
 	return true;
 }
 
+// The sidecar kinds a map install can carry, in contentsMask bit order. Bit 1
+// (value 1) is the .map itself and so has no entry here.
+struct MapSidecarKind
+{
+	UnsignedInt mask;
+	const char *kind;
+};
+
+enum { MAP_SIDECAR_COUNT = 6 };
+
+static const MapSidecarKind s_mapSidecars[MAP_SIDECAR_COUNT] =
+{
+	{ 2,  "preview" },
+	{ 4,  "ini"     },
+	{ 8,  "str"     },
+	{ 16, "solo"    },
+	{ 32, "assets"  },
+	{ 64, "readme"  },
+};
+
+// Where sidecar `idx` installs to, given the .map's path.
+static AsciiString mapSidecarPath(Int idx, const AsciiString& localMapPath)
+{
+	switch (idx)
+	{
+		case 0: return GetPreviewFromMap(localMapPath);
+		case 1: return GetINIFromMap(localMapPath);
+		case 2: return GetStrFileFromMap(localMapPath);
+		case 3: return GetSoloINIFromMap(localMapPath);
+		case 4: return GetAssetUsageFromMap(localMapPath);
+		case 5: return GetReadmeFromMap(localMapPath);
+	}
+	return AsciiString::TheEmptyString;
+}
+
 Bool DownloadAndInstallMap(const AsciiString& localMapPath,
                            UnsignedInt mapCRC,
                            UnsignedInt contentsMask)
@@ -1887,33 +1922,22 @@ Bool DownloadAndInstallMap(const AsciiString& localMapPath,
 	// has that sidecar on its disk and therefore (presumably) uploaded
 	// it. If the GET 404s, the host's upload didn't make it or the
 	// server lost the file; either way we just skip and continue.
-	struct SidecarSpec
-	{
-		UnsignedInt mask;
-		const char *kind;
-		AsciiString path;
-	};
-	SidecarSpec sidecars[6];
-	sidecars[0].mask = 2;  sidecars[0].kind = "preview"; sidecars[0].path = GetPreviewFromMap(localMapPath);
-	sidecars[1].mask = 4;  sidecars[1].kind = "ini";     sidecars[1].path = GetINIFromMap(localMapPath);
-	sidecars[2].mask = 8;  sidecars[2].kind = "str";     sidecars[2].path = GetStrFileFromMap(localMapPath);
-	sidecars[3].mask = 16; sidecars[3].kind = "solo";    sidecars[3].path = GetSoloINIFromMap(localMapPath);
-	sidecars[4].mask = 32; sidecars[4].kind = "assets";  sidecars[4].path = GetAssetUsageFromMap(localMapPath);
-	sidecars[5].mask = 64; sidecars[5].kind = "readme";  sidecars[5].path = GetReadmeFromMap(localMapPath);
-
 	Int s;
-	for (s = 0; s < 6; ++s)
+	for (s = 0; s < MAP_SIDECAR_COUNT; ++s)
 	{
-		if ((contentsMask & sidecars[s].mask) == 0)
+		if ((contentsMask & s_mapSidecars[s].mask) == 0)
+			continue;
+		AsciiString sidecarPath = mapSidecarPath(s, localMapPath);
+		if (sidecarPath.isEmpty())
 			continue;
 		void *sd = nullptr;
 		unsigned int sl = 0;
-		if (!DownloadMapAssetFromServer(downloadUrl, mapCRC, sidecars[s].kind, 0, &sd, &sl))
+		if (!DownloadMapAssetFromServer(downloadUrl, mapCRC, s_mapSidecars[s].kind, 0, &sd, &sl))
 			continue;
-		if (writeAssetToDisk(sidecars[s].path, sd, sl))
+		if (writeAssetToDisk(sidecarPath, sd, sl))
 		{
 			printf("[map] Installed %s sidecar \"%s\" (%u bytes)\n",
-				sidecars[s].kind, sidecars[s].path.str(), sl);
+				s_mapSidecars[s].kind, sidecarPath.str(), sl);
 			fflush(stdout);
 		}
 	}
@@ -3246,4 +3270,244 @@ void StartMatchTelemetryUpload(const MatchTelemetryUpload& p)
 		return;
 	}
 	CloseHandle(hThread); // detached; the worker frees the job when it finishes
+}
+
+// ---------------------------------------------------------------------------
+// Background (non-blocking) map download.
+//
+// The same fetch DownloadAndInstallMap does, split across a thread boundary:
+// the worker only does the WinINet round-trips (into malloc'd buffers), and
+// the main thread's MapDownloadPoll() CRC-verifies, writes to disk and
+// refreshes MapCache. TheFileSystem and TheMapCache are therefore still only
+// ever touched on the main thread.
+//
+// The lobby needs this: DownloadAndInstallMap blocks for as long as the CDN
+// takes, and the lobby callsites run on the thread that also services the LAN
+// heartbeat, so a slow download freezes the UI and can get the peer dropped
+// from the game.
+//
+// Mirrors the telemetry worker: the job is a plain-C POD, so no AsciiString
+// buffer is ever shared across the thread boundary.
+// ---------------------------------------------------------------------------
+
+struct MapDownloadJob
+{
+	char        downloadUrl[512];
+	char        localMapPath[512];
+	UnsignedInt mapCRC;
+	UnsignedInt contentsMask;
+
+	// Written by the worker; owned by the main thread once it takes the job.
+	bool         fetched;    // the .map came down (CRC not checked yet)
+	void        *mapData;
+	unsigned int mapLen;
+	void        *sidecarData[MAP_SIDECAR_COUNT];
+	unsigned int sidecarLen[MAP_SIDECAR_COUNT];
+};
+
+static CRITICAL_SECTION s_mapDlCS;
+static bool s_mapDlCSInit = false;             // only touched from the main thread
+static bool s_mapDlPending = false;            // worker running (guarded)
+static MapDownloadJob *s_mapDlDone = nullptr;  // finished job awaiting a poll (guarded)
+
+static void ensureMapDlCS(void)
+{
+	// Only ever called from the main thread (MapDownloadStart / MapDownloadPoll,
+	// both of which run before any worker can touch the section), so this lazy
+	// init needs no lock of its own.
+	if (!s_mapDlCSInit)
+	{
+		InitializeCriticalSection(&s_mapDlCS);
+		s_mapDlCSInit = true;
+	}
+}
+
+static void freeMapDownloadJob(MapDownloadJob *job)
+{
+	if (job == nullptr)
+		return;
+	if (job->mapData != nullptr)
+		free(job->mapData);
+	Int i;
+	for (i = 0; i < MAP_SIDECAR_COUNT; ++i)
+	{
+		if (job->sidecarData[i] != nullptr)
+			free(job->sidecarData[i]);
+	}
+	free(job);
+}
+
+static unsigned __stdcall mapDownloadThreadProc(void *arg)
+{
+	MapDownloadJob *job = (MapDownloadJob *)arg;
+	AsciiString url(job->downloadUrl); // worker-local; never crosses back
+
+	void *data = nullptr;
+	unsigned int len = 0;
+	if (DownloadMapAssetFromServer(url, job->mapCRC, "map", 0, &data, &len))
+	{
+		job->mapData = data;
+		job->mapLen = len;
+		job->fetched = true;
+
+		// Sidecars are best-effort, exactly as in the blocking path: a 404
+		// just means the server never got that one.
+		Int i;
+		for (i = 0; i < MAP_SIDECAR_COUNT; ++i)
+		{
+			if ((job->contentsMask & s_mapSidecars[i].mask) == 0)
+				continue;
+			void *sd = nullptr;
+			unsigned int sl = 0;
+			if (DownloadMapAssetFromServer(url, job->mapCRC, s_mapSidecars[i].kind, 0, &sd, &sl))
+			{
+				job->sidecarData[i] = sd;
+				job->sidecarLen[i] = sl;
+			}
+		}
+	}
+
+	EnterCriticalSection(&s_mapDlCS);
+	s_mapDlDone = job; // the main thread owns the buffers from here on
+	s_mapDlPending = false;
+	LeaveCriticalSection(&s_mapDlCS);
+	return 0;
+}
+
+Bool MapDownloadStart(const AsciiString& localMapPath,
+                      UnsignedInt mapCRC,
+                      UnsignedInt contentsMask)
+{
+	if (mapCRC == 0 || localMapPath.isEmpty())
+		return FALSE;
+	if (TheGlobalData == nullptr || TheGlobalData->m_mapDownloadUrl.isEmpty())
+		return FALSE;
+
+	ensureMapDlCS();
+
+	// Claim the slot. A result nobody polled for (the user left the lobby
+	// mid-download) is dropped here rather than leaked.
+	EnterCriticalSection(&s_mapDlCS);
+	bool busy = s_mapDlPending;
+	MapDownloadJob *stale = nullptr;
+	if (!busy)
+	{
+		stale = s_mapDlDone;
+		s_mapDlDone = nullptr;
+		s_mapDlPending = true;
+	}
+	LeaveCriticalSection(&s_mapDlCS);
+
+	freeMapDownloadJob(stale);
+	if (busy)
+		return FALSE;
+
+	MapDownloadJob *job = (MapDownloadJob *)calloc(1, sizeof(MapDownloadJob));
+	if (job != nullptr)
+	{
+		copyCStr(job->downloadUrl, sizeof(job->downloadUrl), TheGlobalData->m_mapDownloadUrl.str());
+		copyCStr(job->localMapPath, sizeof(job->localMapPath), localMapPath.str());
+		job->mapCRC = mapCRC;
+		job->contentsMask = contentsMask;
+
+		// _beginthreadex returns the handle as an integer type; VC6 has no
+		// uintptr_t, so capture it straight into a HANDLE.
+		unsigned threadId = 0;
+		HANDLE hThread = (HANDLE)_beginthreadex(nullptr, 0, mapDownloadThreadProc, job, 0, &threadId);
+		if (hThread != NULL)
+		{
+			CloseHandle(hThread); // detached; it hands the job back through s_mapDlDone
+			printf("[map] Downloading map crc=%u -> \"%s\" (mask=%u)\n",
+				mapCRC, localMapPath.str(), contentsMask);
+			fflush(stdout);
+			return TRUE;
+		}
+		freeMapDownloadJob(job);
+	}
+
+	// Couldn't allocate or spawn: release the slot again.
+	EnterCriticalSection(&s_mapDlCS);
+	s_mapDlPending = false;
+	LeaveCriticalSection(&s_mapDlCS);
+	return FALSE;
+}
+
+MapDownloadStatus MapDownloadPoll(void)
+{
+	ensureMapDlCS();
+
+	EnterCriticalSection(&s_mapDlCS);
+	bool pending = s_mapDlPending;
+	MapDownloadJob *job = s_mapDlDone;
+	s_mapDlDone = nullptr;
+	LeaveCriticalSection(&s_mapDlCS);
+
+	if (job == nullptr)
+		return pending ? MAPDOWNLOAD_PENDING : MAPDOWNLOAD_IDLE;
+
+	MapDownloadStatus status = MAPDOWNLOAD_FAILED;
+	if (job->fetched && job->mapData != nullptr && job->mapLen > 0)
+	{
+		// Validate the bytes against the CRC the server advertised before we
+		// commit anything to disk. cncstats has no upload auth, so a malicious
+		// actor could overwrite a popular CRC with arbitrary content; this
+		// check is the only thing keeping us safe.
+		CRC theCRC;
+		theCRC.clear();
+		theCRC.computeCRC(job->mapData, (Int)job->mapLen);
+		UnsignedInt actualCRC = theCRC.get();
+		if (actualCRC != job->mapCRC)
+		{
+			printf("[map] Downloaded map crc mismatch: expected %u, got %u (rejecting)\n",
+				job->mapCRC, actualCRC);
+			fflush(stdout);
+		}
+		else
+		{
+			AsciiString localPath(job->localMapPath);
+			void *mapData = job->mapData;
+			unsigned int mapLen = job->mapLen;
+			job->mapData = nullptr; // writeAssetToDisk frees it, pass or fail
+			job->mapLen = 0;
+
+			if (writeAssetToDisk(localPath, mapData, mapLen))
+			{
+				printf("[map] Installed downloaded map \"%s\" (crc=%u, %u bytes)\n",
+					localPath.str(), job->mapCRC, mapLen);
+				fflush(stdout);
+
+				Int i;
+				for (i = 0; i < MAP_SIDECAR_COUNT; ++i)
+				{
+					if (job->sidecarData[i] == nullptr)
+						continue;
+					void *sd = job->sidecarData[i];
+					unsigned int sl = job->sidecarLen[i];
+					job->sidecarData[i] = nullptr; // ownership moves to writeAssetToDisk
+					AsciiString sidecarPath = mapSidecarPath(i, localPath);
+					if (sidecarPath.isEmpty())
+					{
+						free(sd);
+						continue;
+					}
+					if (writeAssetToDisk(sidecarPath, sd, sl))
+					{
+						printf("[map] Installed %s sidecar \"%s\" (%u bytes)\n",
+							s_mapSidecars[i].kind, sidecarPath.str(), sl);
+						fflush(stdout);
+					}
+				}
+
+				// Refresh MapCache so findMap() and getMapPreviewImage() see the
+				// new entry without a game restart.
+				if (TheMapCache != nullptr)
+					TheMapCache->refreshUserMaps();
+
+				status = MAPDOWNLOAD_INSTALLED;
+			}
+		}
+	}
+
+	freeMapDownloadJob(job);
+	return status;
 }

@@ -84,6 +84,12 @@ static const Int HANDOFF_FRAMES_BEFORE_END = 600; // 10 seconds at 30 logic fps
 static Bool s_resumeArmed = FALSE;
 static char s_resumeArmedFilename[64] = {0};
 static UnsignedInt s_resumeArmedHandoffFrame = 0;
+
+// Radarvan Pick: when the picked map has to be fetched from the CDN, the fetch
+// runs on a worker thread and the pick is finished from the menu's update
+// callback. Both live next to the pick handler further down.
+static void updateMapVoteDownload();
+static void clearMapVoteDownload();
 // window ids ------------------------------------------------------------------------------
 static NameKeyType parentLanGameOptionsID = NAMEKEY_INVALID;
 
@@ -1100,6 +1106,11 @@ void DeinitLanGameGadgets()
 	// connection, or any exit path that doesn't go through the Back button).
 	ClearResumeFromReplayArm();
 
+	// Same for a Radarvan Pick still waiting on its map download: nothing polls
+	// for it once this lobby is gone, so drop it rather than leave a stale
+	// "download in progress" blocking the next lobby's pick.
+	clearMapVoteDownload();
+
 	parentLanGameOptions = nullptr;
 	buttonEmote = nullptr;
 	buttonSelectMap = nullptr;
@@ -1410,6 +1421,11 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 {
 	if(LANisShuttingDown && TheShell->isAnimFinished() && TheTransitionHandler->isFinished())
 		shutdownComplete(layout);
+
+	// Finish a Radarvan Pick whose map is being fetched from the CDN. The
+	// fetch itself runs on a worker thread; this installs it and applies the
+	// pick once the bytes are in.
+	updateMapVoteDownload();
 	//TheLAN->update(); // this is handled in the lobby
 }
 
@@ -1623,6 +1639,158 @@ static const MapMetaData *findMapByDisplayName(const AsciiString &chosen, AsciiS
 	return nullptr;
 }
 
+// A server-supplied .map path is only usable as an install path if it stays
+// inside the game's directories. cncstats has no upload auth and radarvan is
+// just another HTTP peer, so treat the path as hostile: reject anything
+// absolute, anything with a drive letter, and any ".." component. Returns the
+// path when it is safe, the empty string otherwise.
+static AsciiString sanitizeServerMapPath(const AsciiString &path)
+{
+	if (path.isEmpty())
+		return AsciiString::TheEmptyString;
+
+	const char *s = path.str();
+	if (s[0] == '\\' || s[0] == '/')
+		return AsciiString::TheEmptyString;
+	if (strchr(s, ':') != nullptr)
+		return AsciiString::TheEmptyString;
+
+	// Any ".." component, in either separator flavor.
+	const char *p;
+	for (p = s; *p != '\0'; ++p)
+	{
+		if (p[0] != '.' || p[1] != '.')
+			continue;
+		Bool atStart = (p == s) || (p[-1] == '\\') || (p[-1] == '/');
+		char after = p[2];
+		Bool atEnd = (after == '\0') || (after == '\\') || (after == '/');
+		if (atStart && atEnd)
+			return AsciiString::TheEmptyString;
+	}
+
+	return path;
+}
+
+// The in-flight state of a "Radarvan Pick" whose map had to be downloaded.
+// The download runs on a worker thread (see MapDownloadStart), so the pick is
+// finished later, from LanGameOptionsMenuUpdate.
+static Bool        s_mapVoteDownloadPending = FALSE;
+static AsciiString s_mapVoteChosenName;
+static AsciiString s_mapVoteInstallPath;
+static UnsignedInt s_mapVoteCRC = 0;
+
+// Forget an in-flight pick. Called on lobby teardown: nothing polls the
+// download once the menu is gone, and a stale "pending" would block the next
+// lobby's pick. The worker's result is dropped by the next MapDownloadStart.
+static void clearMapVoteDownload()
+{
+	s_mapVoteDownloadPending = FALSE;
+	s_mapVoteChosenName.clear();
+	s_mapVoteInstallPath.clear();
+	s_mapVoteCRC = 0;
+}
+
+// Apply a map the server picked: find it locally (CRC first, then display
+// name, then the path we installed it to), point the lobby at it, push it to
+// the cncstats CDN for peers, and re-send the game options. Returns FALSE when
+// the map still isn't in the local cache, which is the caller's cue to either
+// download it or report the pick as unresolvable.
+static Bool applyChosenMap(const AsciiString &chosenName, UnsignedInt mapCRC,
+	const AsciiString &installedPath)
+{
+	if (!TheLAN || !TheLAN->AmIHost())
+		return FALSE;
+
+	LANGameInfo *game = TheLAN->GetMyGame();
+	if (!game)
+		return FALSE;
+
+	// CRC-first lookup: the server returns the picked map's CRC, which is an
+	// exact key into our local cache. Fall back to the fuzzy display-name
+	// matcher only when the CRC isn't known locally (or the server didn't send
+	// one), and finally to the path we just installed to.
+	AsciiString mapKey;
+	const MapMetaData *md = findMapByCRC(mapCRC, &mapKey);
+	if (md == nullptr)
+		md = findMapByDisplayName(chosenName, &mapKey);
+	if (md == nullptr && !installedPath.isEmpty() && TheMapCache)
+	{
+		AsciiString key = installedPath;
+		key.toLower();
+		md = TheMapCache->findMap(key);
+		if (md)
+			mapKey = key;
+	}
+
+	if (md == nullptr || mapKey.isEmpty())
+		return FALSE;
+
+	game->setMap(mapKey);
+	game->getSlot(0)->setMapAvailability(true);
+	game->setMapCRC(md->m_CRC);
+	game->setMapSize(md->m_filesize);
+	game->resetStartSpots();
+	game->adjustSlotsForMap();
+
+	// Mirror the SelectMap confirm path: push the .map + sidecars to
+	// the cncstats CDN so joining peers without the map can pull it
+	// over HTTP instead of waiting for the P2P transfer at launch.
+	// Helper no-ops when URLs are empty or the server already has
+	// the map for this CRC.
+	if (TheGlobalData != nullptr)
+	{
+		UploadAllMapAssetsIfMissing(TheGlobalData->m_mapCheckUrl,
+			TheGlobalData->m_mapUploadUrl,
+			md->m_CRC,
+			md->m_fileName,
+			game->getMapContentsMask(),
+			0 /* no per-game seed in the lobby */);
+	}
+
+	// Drives updateGameOptions() (refreshes the map-name static text),
+	// lanUpdateSlotList() (refreshes player slot widgets), resets
+	// start positions, and re-sends RequestGameOptions to clients.
+	// Calling RequestGameOptions on its own updates engine state but
+	// leaves the lobby UI showing the previous map until the next
+	// re-init.
+	PostToLanGameOptions(SEND_GAME_OPTS);
+
+	UnicodeString okU;
+	okU.format(TheGameText->fetch("GUI:MapVoteApplied"), chosenName.str());
+	TheLAN->RequestChat(okU, LANAPI::LANCHAT_SYSTEM);
+	return TRUE;
+}
+
+// Completion half of a Radarvan Pick that needed a CDN download. The poll hook
+// does the disk install and the MapCache refresh, so it has to run on the main
+// thread; LanGameOptionsMenuUpdate calls this every frame.
+static void updateMapVoteDownload()
+{
+	if (!s_mapVoteDownloadPending)
+		return;
+
+	MapDownloadStatus status = MapDownloadPoll();
+	if (status == MAPDOWNLOAD_PENDING)
+		return;
+
+	s_mapVoteDownloadPending = FALSE;
+
+	// Apply the pick if the map actually landed. A failed download, a lobby we
+	// no longer host, or a map that still isn't in the cache after installing
+	// all fall through to the error line below.
+	if (status == MAPDOWNLOAD_INSTALLED && TheLAN != nullptr && TheLAN->AmIHost()
+		&& applyChosenMap(s_mapVoteChosenName, s_mapVoteCRC, s_mapVoteInstallPath))
+		return;
+
+	if (TheLAN != nullptr)
+	{
+		UnicodeString errU;
+		errU.format(TheGameText->fetch("GUI:MapVoteNotFound"),
+			s_mapVoteChosenName.str());
+		TheLAN->OnChat(L"SYSTEM", TheLAN->GetLocalIP(), errU, LANAPI::LANCHAT_SYSTEM);
+	}
+}
+
 // Host-only handler for the "Radarvan Pick" button. POSTs the lobby
 // roster to the configured map_vote endpoint, applies the chosen map
 // locally, and propagates via RequestGameOptions. All error states
@@ -1633,12 +1801,12 @@ static const MapMetaData *findMapByDisplayName(const AsciiString &chosen, AsciiS
 // match.
 //
 // The server returns the picked map's CRC (chosen_map_crc, as hex); the
-// lookup below is CRC-first, falling back to display-name matching. When
-// the host doesn't have the map locally, the marked block auto-installs
-// it from the cncstats CDN by CRC via DownloadAndInstallMap (deriving the
-// install path from the chosen name, since radarvan sends no filename)
-// before the local-cache lookup retries. An unknown map that the CDN also
-// lacks results in a chat error showing the picked name.
+// lookup is CRC-first, falling back to display-name matching. When the host
+// doesn't have the map locally, the marked block starts a background install
+// from the cncstats CDN by CRC (deriving the install path from the chosen
+// name when the server sends no filename); updateMapVoteDownload() finishes
+// the pick when the bytes land. An unknown map that the CDN also lacks results
+// in a chat error showing the picked name.
 static void handleMapVoteClick()
 {
 	if (!TheLAN || !TheLAN->AmIHost())
@@ -1674,6 +1842,15 @@ static void handleMapVoteClick()
 		return;
 	}
 
+	if (s_mapVoteDownloadPending)
+	{
+		UnicodeString busyU;
+		busyU.format(TheGameText->fetch("GUI:MapVoteDownloading"),
+			s_mapVoteChosenName.str());
+		TheLAN->OnChat(L"SYSTEM", TheLAN->GetLocalIP(), busyU, LANAPI::LANCHAT_SYSTEM);
+		return;
+	}
+
 	ChooseMapResult res = ChooseMapFromServer(
 		TheGlobalData->m_mapVoteUrl, humanNames, occupied);
 	if (!res.success)
@@ -1685,25 +1862,19 @@ static void handleMapVoteClick()
 		return;
 	}
 
-	// CRC-first lookup: the server returns the picked map's CRC, which is
-	// an exact key into our local cache. Fall back to the fuzzy
-	// display-name matcher only when the CRC isn't known locally (or the
-	// server didn't send one).
-	AsciiString mapKey;
-	const MapMetaData *md = findMapByCRC(res.mapCRC, &mapKey);
-	if (md == nullptr)
-		md = findMapByDisplayName(res.chosenMap, &mapKey);
+	if (applyChosenMap(res.chosenMap, res.mapCRC, AsciiString::TheEmptyString))
+		return;
 
 	// Not in the local cache: pull it from the cncstats CDN by CRC. The CDN
 	// serves the .map keyed purely by CRC, so all we need is res.mapCRC; the
-	// install path is res.mapFileName when the server provides one, otherwise
-	// derived from the chosen map name. radarvan sends no contents mask, so
-	// ask for every sidecar kind (missing ones just 404). DownloadAndInstallMap
-	// CRC-verifies the bytes against res.mapCRC before committing to disk and
-	// refreshes the cache; we then re-find the installed map by CRC.
-	if (md == nullptr && res.mapCRC != 0)
+	// install path is res.mapFileName when the server provides a usable one,
+	// otherwise derived from the chosen map name. When the server doesn't say
+	// which sidecars it has, ask for every kind (missing ones just 404). The
+	// download CRC-verifies the bytes against res.mapCRC before committing
+	// them to disk.
+	if (res.mapCRC != 0)
 	{
-		AsciiString installPath = res.mapFileName;
+		AsciiString installPath = sanitizeServerMapPath(res.mapFileName);
 		if (installPath.isEmpty())
 			installPath = deriveUserMapInstallPath(res.chosenMap);
 
@@ -1712,64 +1883,23 @@ static void handleMapVoteClick()
 		UnsignedInt mask = (res.contentsMask != 0) ? res.contentsMask : 0x7E;
 
 		if (!installPath.isEmpty() &&
-			DownloadAndInstallMap(installPath, res.mapCRC, mask))
+			MapDownloadStart(installPath, res.mapCRC, mask))
 		{
-			md = findMapByCRC(res.mapCRC, &mapKey);
-			if (md == nullptr)
-				md = findMapByDisplayName(res.chosenMap, &mapKey);
-			if (md == nullptr && TheMapCache)
-			{
-				AsciiString key = installPath;
-				key.toLower();
-				md = TheMapCache->findMap(key);
-				if (md)
-					mapKey = key;
-			}
+			s_mapVoteDownloadPending = TRUE;
+			s_mapVoteChosenName = res.chosenMap;
+			s_mapVoteInstallPath = installPath;
+			s_mapVoteCRC = res.mapCRC;
+
+			UnicodeString dlU;
+			dlU.format(TheGameText->fetch("GUI:MapVoteDownloading"), res.chosenMap.str());
+			TheLAN->OnChat(L"SYSTEM", TheLAN->GetLocalIP(), dlU, LANAPI::LANCHAT_SYSTEM);
+			return;
 		}
 	}
 
-	if (md == nullptr || mapKey.isEmpty())
-	{
-		UnicodeString errU;
-		errU.format(TheGameText->fetch("GUI:MapVoteNotFound"),
-			res.chosenMap.str());
-		TheLAN->OnChat(L"SYSTEM", TheLAN->GetLocalIP(), errU, LANAPI::LANCHAT_SYSTEM);
-		return;
-	}
-
-	game->setMap(mapKey);
-	game->getSlot(0)->setMapAvailability(true);
-	game->setMapCRC(md->m_CRC);
-	game->setMapSize(md->m_filesize);
-	game->resetStartSpots();
-	game->adjustSlotsForMap();
-
-	// Mirror the SelectMap confirm path: push the .map + sidecars to
-	// the cncstats CDN so joining peers without the map can pull it
-	// over HTTP instead of waiting for the P2P transfer at launch.
-	// Helper no-ops when URLs are empty or the server already has
-	// the map for this CRC.
-	if (TheGlobalData != nullptr)
-	{
-		UploadAllMapAssetsIfMissing(TheGlobalData->m_mapCheckUrl,
-			TheGlobalData->m_mapUploadUrl,
-			md->m_CRC,
-			md->m_fileName,
-			game->getMapContentsMask(),
-			0 /* no per-game seed in the lobby */);
-	}
-
-	// Drives updateGameOptions() (refreshes the map-name static text),
-	// lanUpdateSlotList() (refreshes player slot widgets), resets
-	// start positions, and re-sends RequestGameOptions to clients.
-	// Calling RequestGameOptions on its own updates engine state but
-	// leaves the lobby UI showing the previous map until the next
-	// re-init.
-	PostToLanGameOptions(SEND_GAME_OPTS);
-
-	UnicodeString okU;
-	okU.format(TheGameText->fetch("GUI:MapVoteApplied"), res.chosenMap.str());
-	TheLAN->RequestChat(okU, LANAPI::LANCHAT_SYSTEM);
+	UnicodeString errU;
+	errU.format(TheGameText->fetch("GUI:MapVoteNotFound"), res.chosenMap.str());
+	TheLAN->OnChat(L"SYSTEM", TheLAN->GetLocalIP(), errU, LANAPI::LANCHAT_SYSTEM);
 }
 
 //-------------------------------------------------------------------------------------------------

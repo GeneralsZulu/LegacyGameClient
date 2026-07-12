@@ -451,24 +451,38 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 			// (instead of waiting for the launch-time P2P transfer and
 			// requiring a game restart for the preview to load).
 			//
-			// Hook is set by GeneralsMD; null in classic Generals builds.
-			// On failure we fall through silently to the legacy at-launch
-			// P2P transfer in FileTransfer::DoAnyMapTransfers.
+			// The fetch runs on a worker thread: we are inside the network
+			// callback here, on the same thread that services the LAN
+			// heartbeat, so a slow CDN would freeze the lobby and get us
+			// dropped from the game. updateMapDownload() installs the map
+			// and flips the availability bit once the bytes are in.
+			//
+			// Hooks are set by GeneralsMD; null in classic Generals builds.
+			// On failure we fall through to the legacy at-launch P2P
+			// transfer in FileTransfer::DoAnyMapTransfers.
 			Int localSlot = m_currentGame->getLocalSlotNum();
-			if (TheMapDownloadHook != nullptr
+			if (TheMapDownloadStartHook != nullptr
+				&& !m_mapDownloadPending
 				&& localSlot >= 0
 				&& !m_currentGame->getConstSlot(localSlot)->hasMap()
-				&& m_currentGame->getMapCRC() != 0)
+				&& m_currentGame->getMapCRC() != 0
+				&& m_currentGame->getMapCRC() != m_mapDownloadFailedCRC)
 			{
-				if (TheMapDownloadHook(m_currentGame->getMap(),
-					m_currentGame->getMapCRC(),
+				UnsignedInt crc = m_currentGame->getMapCRC();
+				if (TheMapDownloadStartHook(m_currentGame->getMap(), crc,
 					m_currentGame->getMapContentsMask()))
 				{
-					// Re-apply the host's CRC so GameInfo's local
-					// mapAvailability bit flips from false to true now
-					// that the file exists on disk and MapCache knows
-					// about it. setMapCRC re-runs the cache lookup.
-					m_currentGame->setMapCRC(m_currentGame->getMapCRC());
+					m_mapDownloadPending = TRUE;
+					m_mapDownloadCRC = crc;
+					UnicodeString msg;
+					msg.format(L"Downloading map from server...");
+					OnChat(L"SYSTEM", m_localIP, msg, LANCHAT_SYSTEM);
+				}
+				else
+				{
+					// Nothing started (no download URL, or one already in
+					// flight). Don't retry this CRC on every options packet.
+					m_mapDownloadFailedCRC = crc;
 				}
 			}
 
@@ -662,6 +676,47 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 			}
 		}
 	}
+}
+
+// Completion half of the peer-side background map download kicked off in
+// OnGameOptions. The poll hook does the disk install and the MapCache refresh,
+// so it has to run here on the main thread rather than on the worker.
+void LANAPI::updateMapDownload()
+{
+	if (!m_mapDownloadPending || TheMapDownloadPollHook == nullptr)
+		return;
+
+	MapDownloadStatus status = TheMapDownloadPollHook();
+	if (status == MAPDOWNLOAD_PENDING)
+		return;
+
+	m_mapDownloadPending = FALSE;
+
+	// We left the game while the download was running: the result is moot.
+	if (m_currentGame == nullptr)
+		return;
+
+	UnicodeString msg;
+	if (status == MAPDOWNLOAD_INSTALLED)
+	{
+		// Re-apply the host's CRC so GameInfo's local mapAvailability bit flips
+		// from false to true now that the file exists on disk and MapCache
+		// knows about it. setMapCRC re-runs the cache lookup.
+		m_currentGame->setMapCRC(m_currentGame->getMapCRC());
+		RequestHasMap();
+		lanUpdateSlotList();
+		updateGameOptions();
+		msg.format(L"Map downloaded.");
+	}
+	else
+	{
+		// Don't hammer the server for this CRC again on every options packet.
+		// The launch-time P2P transfer from the host is still available as a
+		// fallback, which is what the message is telling the user.
+		m_mapDownloadFailedCRC = m_mapDownloadCRC;
+		msg.format(L"Map download failed; the host will send it when the game starts.");
+	}
+	OnChat(L"SYSTEM", m_localIP, msg, LANCHAT_SYSTEM);
 }
 
 

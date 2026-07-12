@@ -93,6 +93,9 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_observerClientPlaybackKicked = FALSE;
 	m_observerProgressLastMs = 0;
 	m_observerProgressLastBytes = 0;
+	m_mapDownloadPending = FALSE;
+	m_mapDownloadCRC = 0;
+	m_mapDownloadFailedCRC = 0;
 }
 
 LANAPI::~LANAPI()
@@ -117,6 +120,12 @@ void LANAPI::init()
 	m_isInLANMenu = TRUE;
 	m_currentGame = nullptr;
 	m_directConnectRemoteIP = 0;
+
+	// A download from a previous session is no longer ours to finish, and a CRC
+	// that failed there deserves a fresh try in this one.
+	m_mapDownloadPending = FALSE;
+	m_mapDownloadCRC = 0;
+	m_mapDownloadFailedCRC = 0;
 
 	m_lastGameopt = "";
 
@@ -457,6 +466,8 @@ void LANAPI::update()
 
 	// Pump observer host accepts/streams and observer client recv/state.
 	updateObserver();
+	// Finish any in-flight background map download (see OnGameOptions).
+	updateMapDownload();
 	// Send out periodic I'm Here messages
 	if (now > s_resendDelta + m_lastResendTime)
 	{

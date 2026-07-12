@@ -403,6 +403,14 @@ protected:
 	UnsignedInt						m_observerProgressLastMs;       // last time we posted a download-progress chat line
 	UnsignedInt						m_observerProgressLastBytes;    // bytes reported at the last progress post
 
+	// Non-blocking map download (peer side). When the host advertises a map CRC
+	// we don't have, OnGameOptions kicks off a background CDN fetch and
+	// updateMapDownload() finishes the job once the bytes are in. Downloading
+	// inline would block the same thread that services the LAN heartbeat.
+	Bool									m_mapDownloadPending;    // a fetch is in flight
+	UnsignedInt						m_mapDownloadCRC;        // CRC being fetched
+	UnsignedInt						m_mapDownloadFailedCRC;  // CRC we already failed on; don't retry it every OnGameOptions
+
 public:
 	// Observer mode entry points (called from UI / callbacks).
 
@@ -420,6 +428,12 @@ public:
 	// LIVE_OBSERVER playback is running, since LANAPI::update() is only
 	// driven by the LAN lobby menu and stops once playback starts.
 	void updateObserver();
+
+	// Finish a peer-side background map download started in OnGameOptions:
+	// installs the map (on the main thread), flips our slot's map-availability
+	// bit and refreshes the lobby. Reports both outcomes as SYSTEM chat lines.
+	// No-op when nothing is in flight. Called from update().
+	void updateMapDownload();
 
 protected:
 	// Host-side hook: open the observer listen socket and arm streaming

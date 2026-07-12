@@ -38,6 +38,10 @@ GUI:MapVoteApplied
 "Radarvan picked '%hs'."
 END
 
+GUI:MapVoteDownloading
+"Radarvan picked '%hs'. Downloading it from the map server..."
+END
+
 GUI:ResumeArmed
 "Resume armed. The next game start will continue the replay."
 END
