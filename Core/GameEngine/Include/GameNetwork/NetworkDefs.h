@@ -36,6 +36,10 @@ extern Int MIN_LOGIC_FRAMES;
 extern Int MAX_FRAMES_AHEAD;
 extern Int MIN_RUNAHEAD;
 
+// Lockstep rates pinned during resume-from-replay catchup. See NetworkUtil.cpp.
+extern Int CATCHUP_RUNAHEAD;
+extern Int CATCHUP_FRAME_RATE;
+
 // FRAME_DATA_LENGTH needs to be MAX_FRAMES_AHEAD+1 because a player on a different
 // computer can send commands for a frame that is one beyond twice the max runahead.
 extern Int FRAME_DATA_LENGTH;

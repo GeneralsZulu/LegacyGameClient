@@ -1449,6 +1449,34 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 			// We also limit the upper range of the runahead to prevent it getting out of hand
 			newRunAhead = clamp<Int>(MIN_RUNAHEAD, newRunAhead, MAX_FRAMES_AHEAD / 2);
 
+			// During resume-from-replay catchup, Network::update() drops the realtime
+			// frame gate, so the only thing bounding how fast we replay is lockstep:
+			// a frame advances once every peer's commands for it have arrived.
+			// Throughput is therefore (frames in flight) / (packet send interval), and
+			// processRunAheadCommand derives that interval as
+			// (1000 * runAhead) / (frameRate * 2), clamped to [1, 500] ms.
+			//
+			// The values negotiated above are tuned for realtime play and are actively
+			// hostile here. On a low-latency LAN, run-ahead bottoms out at MIN_RUNAHEAD
+			// (4) because it only ever needs to cover latency; at 4 frames and 30fps
+			// that derives a 66ms send interval, i.e. ~60 logic fps -- barely 2x
+			// realtime for a catchup that is supposed to burn through many minutes of
+			// recorded game. Worse, they are derived from display FPS, so anything that
+			// slows the renderer drags the whole pipeline down with it.
+			//
+			// Pin a deep pipeline and a short send interval instead, so catchup is bound
+			// by how fast this CPU can tick logic rather than by the network. The lead-in
+			// (last 10 logic seconds before handoff) deliberately falls through to the
+			// normal negotiation, so run-ahead and frame rate re-converge on real
+			// measurements before control is handed back to live play.
+			const Bool pinCatchupRates = TheRecorder
+				&& TheRecorder->isResumeCatchupMode()
+				&& !TheRecorder->isResumeCatchupLeadIn();
+			if (pinCatchupRates) {
+				newRunAhead = CATCHUP_RUNAHEAD;
+				minFps      = CATCHUP_FRAME_RATE; // -> (1000*32)/(1000*2) = 16ms send interval
+			}
+
 			NetRunAheadCommandMsg *msg = newInstance(NetRunAheadCommandMsg);
 			msg->setPlayerID(m_localSlot);
 			if (DoesCommandRequireACommandID(msg->getNetCommandType())) {
@@ -1505,12 +1533,18 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 
 			// Let the player with the slowest FPS run a little faster than the other computers...
 			// just in case they are able to.  Then we might be able to run the game faster which would be good.
-			Int newMinFps = (minFps * 11) / 10;
-			if (newMinFps == minFps) {
-				newMinFps = minFps + 1;
-			}
-			if (newMinFps > 30) {
-				newMinFps = 30; // Cap FPS to 30.
+			// During catchup every peer must derive the SAME packet send interval, so the
+			// slowest-player nudge and its 30fps cap are skipped -- otherwise this peer
+			// would sit on a 66ms interval while everyone else ran at 16ms.
+			Int newMinFps = minFps;
+			if (!pinCatchupRates) {
+				newMinFps = (minFps * 11) / 10;
+				if (newMinFps == minFps) {
+					newMinFps = minFps + 1;
+				}
+				if (newMinFps > 30) {
+					newMinFps = 30; // Cap FPS to 30.
+				}
 			}
 			msg2->setRunAhead(newRunAhead);
 			msg2->setFrameRate(newMinFps);
