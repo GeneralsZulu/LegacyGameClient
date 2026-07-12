@@ -63,13 +63,30 @@ public:
 	virtual void update( Int percent ); ///< Update the state of the slider bars
 	virtual void processProgress(Int playerId, Int percentage) = 0;
 	virtual void setProgressRange( Int min, Int max ) = 0;
+
+	void serviceInput();			///< let the player click the gadgets on this load screen
+	void flushInput();				///< drop input that arrived while the game was busy loading
+
+	//
+	// A load screen is put up from inside GameLogic::startNewGame(), so the quit button cannot
+	// tear the game down where it stands. It only records the request here, and the load wait
+	// loop acts on it once the loading code is done touching the world.
+	//
+	static Bool isQuitRequested() { return s_quitRequested; }
+	static void setQuitRequested( Bool requested ) { s_quitRequested = requested; }
+
 protected:
 	void setLoadScreen( GameWindow *g ) { m_loadScreen = g; }
 	GameWindow *m_loadScreen;		///< The GameWindow that is our loadscreen
 
 private:
+	static Bool s_quitRequested;	///< the player hit quit on a load screen
 
 };
+
+// the system callback for the multiplayer load screen's quit button
+extern WindowMsgHandledType MultiplayerLoadScreenSystem( GameWindow *window, UnsignedInt msg,
+																												WindowMsgData mData1, WindowMsgData mData2 );
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // class SinglePlayerLoadScreen is to be used only when we're loading a single player mission

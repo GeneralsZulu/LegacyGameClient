@@ -281,6 +281,11 @@ public:
 																									 messages and put them on the
 																									 stream for the raw state. */
 
+	void sendEventsToWindowSystem();			/**< given state of device, send the pending
+																					 events straight to the window system,
+																					 bypassing the message stream. */
+	void flushEvents();										///< discard any input the device has buffered
+
 	virtual void draw() override;													///< draw the mouse
 	virtual void setPosition( Int x, Int y );						///< set the mouse position
 	virtual void setCursor( MouseCursor cursor ) = 0;		///< set mouse cursor

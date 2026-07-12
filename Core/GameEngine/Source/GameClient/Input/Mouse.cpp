@@ -41,6 +41,7 @@
 #include "GameClient/GameClient.h"
 #include "GameClient/GameText.h"
 #include "GameClient/GameWindow.h"
+#include "GameClient/GameWindowManager.h"
 #include "GameClient/InGameUI.h"
 #include "GameClient/Keyboard.h"
 #include "GameClient/Mouse.h"
@@ -657,6 +658,68 @@ void Mouse::update()
 
 	// update the mouse data
 	updateMouseData();
+
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Given the current state of this input device, hand the pending events directly to the
+	* window system instead of putting them on the message stream.
+	*
+	* This exists for the load screens, which run inside GameLogic::startNewGame() where neither
+	* TheGameClient nor the message stream translators are running, so a gadget on a load screen
+	* would otherwise never see a click. Only the window system is fed, so no game message is
+	* ever created and nothing can reach the half built game logic. */
+//-------------------------------------------------------------------------------------------------
+void Mouse::sendEventsToWindowSystem()
+{
+
+	// sanity
+	if( TheWindowManager == nullptr )
+		return;
+
+	Int i;
+	for( i = 0; i < m_eventsThisFrame; ++i )
+	{
+		processMouseEvent( i );
+
+		ICoord2D pos = m_currMouse.pos;
+
+		// position first, so gadgets pick up their mouse over state before any click lands
+		TheWindowManager->winProcessMouseEvent( GWM_MOUSE_POS, &pos, nullptr );
+
+		switch( m_currMouse.leftEvent )
+		{
+
+			case GWM_LEFT_DOWN:
+			case GWM_LEFT_UP:
+			case GWM_LEFT_DOUBLE_CLICK:
+				TheWindowManager->winProcessMouseEvent( (GameWindowMessage)m_currMouse.leftEvent,
+																								&pos, nullptr );
+				break;
+
+		}
+
+	}
+
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Throw away everything the device has buffered up. */
+//-------------------------------------------------------------------------------------------------
+void Mouse::flushEvents()
+{
+
+	// updateMouseData() drains at most NUM_MOUSE_EVENTS per call, so keep going until it comes
+	// up empty, otherwise a long stall can leave input behind for the next reader to replay
+	do
+	{
+		updateMouseData();
+	}
+	while( m_eventsThisFrame > 0 );
+
+	m_currMouse.leftEvent = MOUSE_EVENT_NONE;
+	m_currMouse.rightEvent = MOUSE_EVENT_NONE;
+	m_currMouse.middleEvent = MOUSE_EVENT_NONE;
 
 }
 
