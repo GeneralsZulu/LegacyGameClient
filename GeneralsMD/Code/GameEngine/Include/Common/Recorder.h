@@ -238,6 +238,14 @@ protected:
 	void writeArgument(GameMessageArgumentDataType type, const GameMessageArgumentType arg);
 	void readArgument(GameMessageArgumentDataType type, GameMessage *msg);
 
+	/// Read exactly size bytes from m_file. On a short read, set m_replayShortRead and
+	/// return FALSE. Every read that parses a replay record must go through this: a live
+	/// observer is parsing a file another thread is still appending to, so records can
+	/// and do end mid-write.
+	Bool readReplayBytes(void *dst, Int size);
+	void rollbackTornRecord(Int posBefore);						///< Rewind to the start of a record that was only partially available.
+	Bool m_replayShortRead;														///< Set when a record could not be read in full.
+
 	struct CullBadCommandsResult
 	{
 		CullBadCommandsResult() : hasClearGameDataMessage(false) {}
