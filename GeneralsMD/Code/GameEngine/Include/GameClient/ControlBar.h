@@ -733,6 +733,7 @@ public:
 	void initObserverControls();
 	void populateObserverInfoWindow ();
 	void populateObserverList();
+	void setObserverPlayerNamesHidden(Bool hide); ///< hide/restore the strip's name labels, leaving the flag buttons alone
 	Bool isObserverControlBarOn() { return m_isObserverCommandBar;}
 	Bool isUsingZuluObserverBar() const; ///< TRUE when ZuluObserverBar.wnd supplies the observer windows
 	void drawObserverContextBackdrop(); ///< draw fitted panels behind visible context windows (observer/replay)

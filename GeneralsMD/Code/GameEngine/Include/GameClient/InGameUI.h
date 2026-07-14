@@ -598,6 +598,7 @@ private:
 	void drawSystemTime(Int &x, Int &y);
 	void drawGameTime();
 	void drawPlayerInfoList();
+	void drawObserverPlayerTable();
 
 public:
 	void registerWindowLayout(WindowLayout *layout); // register a layout for updates
@@ -841,6 +842,37 @@ protected:
 		DisplayString *values[ValueType_Count][MAX_PLAYER_COUNT];
 		LastValues lastValues;
 	};
+
+	//
+	// The observer player table is the box the observer sees while nothing is
+	// selected: a header row plus one row per player, drawn bottom center in
+	// the space the observer control bar leaves open.
+	//
+	struct ObserverPlayerTable
+	{
+		ObserverPlayerTable();
+		void init(const AsciiString &fontName, Int pointSize, Bool bold);
+		void clear();
+
+		enum ColumnType
+		{
+			ColumnType_Player,				// "(T) Player" - team number and name
+			ColumnType_Army,
+			ColumnType_Cash,
+			ColumnType_Income,				// cash per minute
+			ColumnType_Xp,						// "(R) XP" - rank and skill points
+			ColumnType_Sp,						// unspent science purchase points
+			ColumnType_KillDeath,
+			ColumnType_Power,
+
+			ColumnType_Count
+		};
+
+		DisplayString *headers[ColumnType_Count];
+		DisplayString *cells[ColumnType_Count][MAX_PLAYER_COUNT];
+	};
+
+	ObserverPlayerTable						m_observerPlayerTable;
 
 	PlayerInfoList								m_playerInfoList;
 	AsciiString										m_playerInfoListFont;
