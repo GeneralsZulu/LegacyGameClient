@@ -208,3 +208,21 @@ END
 GUI:LoadScreenQuit
 "QUIT"
 END
+
+// Observer info panel rows. The stock strings ("Units Destroyed", "Units Lost") wrap onto a
+// second line inside the panel's one-line rows, so the panel uses these short labels instead.
+CONTROLBAR:ObsLabelUnits
+"Units"
+END
+
+CONTROLBAR:ObsLabelBuildings
+"Buildings"
+END
+
+CONTROLBAR:ObsLabelKills
+"Kills"
+END
+
+CONTROLBAR:ObsLabelLosses
+"Losses"
+END

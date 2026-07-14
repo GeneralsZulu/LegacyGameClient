@@ -41,6 +41,7 @@
 #include "Common/PerfTimer.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#include "Common/PlayerTemplate.h"
 #include "Common/Radar.h"
 #include "Common/Team.h"
 #include "Common/ThingFactory.h"
@@ -1041,6 +1042,69 @@ InGameUI::PlayerInfoList::LastValues::LastValues()
 	for (Int column = 0; column < ARRAY_SIZE(values); ++column)
 	{
 		std::fill(values[column], values[column] + ARRAY_SIZE(values[column]), ~0u);
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+InGameUI::ObserverPlayerTable::ObserverPlayerTable()
+{
+	std::fill(headers, headers + ARRAY_SIZE(headers), static_cast<DisplayString*>(nullptr));
+	for (Int column = 0; column < ARRAY_SIZE(cells); ++column)
+	{
+		std::fill(cells[column], cells[column] + ARRAY_SIZE(cells[column]), static_cast<DisplayString*>(nullptr));
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+void InGameUI::ObserverPlayerTable::init(const AsciiString &fontName, Int pointSize, Bool bold)
+{
+	Int i, j;
+	GameFont *tableFont = TheWindowManager->winFindFont(fontName, pointSize, bold);
+
+	for (i = 0; i < ColumnType_Count; ++i)
+	{
+		if (!headers[i])
+		{
+			headers[i] = TheDisplayStringManager->newDisplayString();
+		}
+		headers[i]->setFont(tableFont);
+
+		for (j = 0; j < MAX_PLAYER_COUNT; ++j)
+		{
+			if (!cells[i][j])
+			{
+				cells[i][j] = TheDisplayStringManager->newDisplayString();
+			}
+			cells[i][j]->setFont(tableFont);
+		}
+	}
+
+	// no CSF entries are required for these; the substitutes are the labels we ship with
+	headers[ColumnType_Player]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderPlayer", L"(T) Player"));
+	headers[ColumnType_Army]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderArmy", L"Army"));
+	headers[ColumnType_Cash]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderCash", L"Cash"));
+	headers[ColumnType_Income]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderIncome", L"Cash/m"));
+	headers[ColumnType_Xp]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderXp", L"(R) XP"));
+	headers[ColumnType_Sp]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderSp", L"SP"));
+	headers[ColumnType_KillDeath]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderKillDeath", L"K/D"));
+	headers[ColumnType_Power]->setText(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHeaderPower", L"Power"));
+}
+
+//-------------------------------------------------------------------------------------------------
+void InGameUI::ObserverPlayerTable::clear()
+{
+	Int i, j;
+
+	for (i = 0; i < ColumnType_Count; ++i)
+	{
+		TheDisplayStringManager->freeDisplayString(headers[i]);
+		headers[i] = nullptr;
+
+		for (j = 0; j < MAX_PLAYER_COUNT; ++j)
+		{
+			TheDisplayStringManager->freeDisplayString(cells[i][j]);
+			cells[i][j] = nullptr;
+		}
 	}
 }
 
@@ -2277,6 +2341,7 @@ void InGameUI::freeCustomUiResources()
 	m_gameTimeFrameString = nullptr;
 
 	m_playerInfoList.clear();
+	m_observerPlayerTable.clear();
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -3784,7 +3849,24 @@ void InGameUI::postWindowDraw()
 
 	if (m_playerInfoListPointSize > 0 && TheGameLogic->isInGame() && TheControlBar->isObserverControlBarOn())
 	{
-		drawPlayerInfoList();
+		//
+		// With nothing selected we replace the observer bar's player list with the full player
+		// table, drawn bottom center over the top of it. The list window is still there underneath:
+		// the table paints an opaque backing over it (see drawObserverPlayerTable), and we hide the
+		// strip's name labels for as long as the table is up, since the table already lists every
+		// player and a half-covered label just looks broken. The flag buttons stay - they are how
+		// the observer picks a player to watch. Once the viewer picks a player or an object, the bar
+		// switches to the info panel / command UI, the labels come back, and we fall back to the
+		// compact list at the edge of the screen.
+		//
+		const Bool showObserverPlayerTable = (getSelectCount() == 0 && TheControlBar->getObserverLookAtPlayer() == nullptr);
+
+		TheControlBar->setObserverPlayerNamesHidden(showObserverPlayerTable);
+
+		if (showObserverPlayerTable)
+			drawObserverPlayerTable();
+		else
+			drawPlayerInfoList();
 	}
 }
 
@@ -6095,6 +6177,7 @@ void InGameUI::refreshPlayerInfoListResources()
 	m_playerInfoListPointSize = TheGlobalData->m_playerInfoListFontSize;
 	Int adjustedPlayerInfoListPointSize = TheGlobalLanguageData->adjustFontSize(m_playerInfoListPointSize);
 	m_playerInfoList.init(m_playerInfoListFont, adjustedPlayerInfoListPointSize, m_playerInfoListBold);
+	m_observerPlayerTable.init(m_playerInfoListFont, adjustedPlayerInfoListPointSize, m_playerInfoListBold);
 }
 
 void InGameUI::disableTooltipsUntil(UnsignedInt frameNum)
@@ -6371,5 +6454,192 @@ void InGameUI::drawPlayerInfoList()
 		m_playerInfoList.values[PlayerInfoList::ValueType_Name][row]->draw(labelX, drawY, rowColors[row], m_playerInfoListDropColor);
 
 		drawY += lineH;
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Short army label for a column of the observer table. The player template display names are
+	* full titles ("USA Air Force General"), far too wide for a table cell. */
+//-------------------------------------------------------------------------------------------------
+static UnicodeString getObserverArmyLabel(const Player *player)
+{
+	static const struct
+	{
+		const char *side;
+		const WideChar *label;
+	}
+	sideLabels[] =
+	{
+		{ "America",										L"USA"		},
+		{ "AmericaAirForceGeneral",			L"AFG"		},
+		{ "AmericaLaserGeneral",				L"LSR"		},
+		{ "AmericaSuperWeaponGeneral",	L"SWG"		},
+		{ "China",											L"China"	},
+		{ "ChinaTankGeneral",						L"TNK"		},
+		{ "ChinaInfantryGeneral",				L"INF"		},
+		{ "ChinaNukeGeneral",						L"NUKE"		},
+		{ "GLA",												L"GLA"		},
+		{ "GLAToxinGeneral",						L"TOX"		},
+		{ "GLADemolitionGeneral",				L"DEM"		},
+		{ "GLAStealthGeneral",					L"STL"		},
+		{ "Boss",												L"BOSS"		},
+	};
+
+	UnicodeString label;
+	const PlayerTemplate *playerTemplate = player->getPlayerTemplate();
+	if (playerTemplate == nullptr)
+		return label;
+
+	const AsciiString side = playerTemplate->getSide();
+	for (Int i = 0; i < ARRAY_SIZE(sideLabels); ++i)
+	{
+		if (side.compareNoCase(sideLabels[i].side) == 0)
+		{
+			label.set(sideLabels[i].label);
+			return label;
+		}
+	}
+
+	// an unknown (modded) side still gets something readable
+	label.translate(side);
+	return label;
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Group a number with thousands separators, the way the reference observer overlays show cash. */
+//-------------------------------------------------------------------------------------------------
+static UnicodeString formatObserverCash(UnsignedInt amount)
+{
+	AsciiString plain;
+	plain.format("%u", amount);
+
+	const Int length = plain.getLength();
+	AsciiString grouped;
+	Int i;
+	for (i = 0; i < length; ++i)
+	{
+		if (i > 0 && ((length - i) % 3) == 0)
+			grouped.concat(',');
+		grouped.concat(plain.getCharAt(i));
+	}
+
+	UnicodeString result;
+	result.translate(grouped);
+	return result;
+}
+
+//-------------------------------------------------------------------------------------------------
+/** The box the observer sees while nothing is selected: a header row and one row per player,
+	* each row in that player's color, anchored bottom center in the gap the observer control bar
+	* leaves open. Drawn after the windows, so it sits on top of the bar. */
+//-------------------------------------------------------------------------------------------------
+void InGameUI::drawObserverPlayerTable()
+{
+	if (m_observerPlayerTable.headers[ObserverPlayerTable::ColumnType_Player] == nullptr)
+		return;
+
+	Int column, row, slotIndex;
+	Int rowCount = 0;
+	Color rowColors[MAX_PLAYER_COUNT] = {0};
+	AsciiString name;
+	UnicodeString text;
+
+	for (slotIndex = 0; slotIndex < MAX_SLOTS && rowCount < MAX_PLAYER_COUNT; ++slotIndex)
+	{
+		name.format("player%d", slotIndex);
+		const NameKeyType key = TheNameKeyGenerator->nameToKey(name);
+		Player *player = ThePlayerList->findPlayerWithNameKey(key);
+		if (!player || player->isPlayerObserver())
+			continue;
+
+		const GameSlot *slot = TheGameInfo ? TheGameInfo->getConstSlot(slotIndex) : nullptr;
+
+		row = rowCount++;
+		rowColors[row] = player->getPlayerColor();
+
+		const Int teamNumber = (slot && slot->getTeamNumber() >= 0) ? slot->getTeamNumber() + 1 : 0;
+		text.format(L"(%d) %s", teamNumber, player->getPlayerDisplayName().str());
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Player][row]->setText(text);
+
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Army][row]->setText(getObserverArmyLabel(player));
+
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Cash][row]->setText(formatObserverCash(player->getMoney()->countMoney()));
+
+		text.format(L"+%s", formatObserverCash(player->getMoney()->getCashPerMinute()).str());
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Income][row]->setText(text);
+
+		text.format(L"(%d) %d", player->getRankLevel(), player->getSkillPoints());
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Xp][row]->setText(text);
+
+		text.format(L"%d", player->getSciencePurchasePoints());
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Sp][row]->setText(text);
+
+		const Int unitsKilled = player->getScoreKeeper()->getTotalUnitsDestroyed();
+		const Int unitsLost = player->getScoreKeeper()->getTotalUnitsLost();
+		const Real killDeath = (unitsLost > 0) ? (Real)unitsKilled / (Real)unitsLost : (Real)unitsKilled;
+		text.format(L"%.1f", killDeath);
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_KillDeath][row]->setText(text);
+
+		const Energy *energy = player->getEnergy();
+		const Int powerSurplus = energy->getProduction() - energy->getConsumption();
+		if (energy->hasSufficientPower())
+			text.format(L"ON (%d)", powerSurplus);
+		else
+			text.format(L"OFF (%d)", powerSurplus);
+		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Power][row]->setText(text);
+	}
+
+	if (rowCount == 0)
+		return;
+
+	const Int lineH = m_observerPlayerTable.headers[ObserverPlayerTable::ColumnType_Player]->getFont()->height;
+	Int cellPad = lineH / 3;
+	if (cellPad < 4)
+		cellPad = 4;
+
+	Int columnWidths[ObserverPlayerTable::ColumnType_Count];
+	Int tableWidth = 0;
+	for (column = 0; column < ObserverPlayerTable::ColumnType_Count; ++column)
+	{
+		Int widest = m_observerPlayerTable.headers[column]->getWidth();
+		for (row = 0; row < rowCount; ++row)
+		{
+			const Int cellWidth = m_observerPlayerTable.cells[column][row]->getWidth();
+			if (cellWidth > widest)
+				widest = cellWidth;
+		}
+		columnWidths[column] = widest + 2 * cellPad;
+		tableWidth += columnWidths[column];
+	}
+
+	const Int tableHeight = (rowCount + 1) * lineH;
+	const Int baseX = (TheDisplay->getWidth() - tableWidth) / 2;
+	const Int baseY = TheDisplay->getHeight() - tableHeight - cellPad;
+	const Color gridColor = GameMakeColor(110, 110, 110, 200);
+
+	//
+	// Opaque, not the translucent backing the compact list uses. The table is drawn on top of the
+	// observer bar's player list window, and any transparency at all lets that window's player
+	// names ghost through the rows and makes the table unreadable.
+	//
+	TheDisplay->drawFillRect(baseX, baseY, tableWidth, tableHeight, GameMakeColor(0, 0, 0, 255));
+	TheDisplay->drawOpenRect(baseX, baseY, tableWidth, tableHeight, 1.0f, gridColor);
+	TheDisplay->drawLine(baseX, baseY + lineH, baseX + tableWidth, baseY + lineH, 1.0f, gridColor);
+
+	Int columnX = baseX;
+	for (column = 0; column < ObserverPlayerTable::ColumnType_Count; ++column)
+	{
+		if (column > 0)
+			TheDisplay->drawLine(columnX, baseY, columnX, baseY + tableHeight, 1.0f, gridColor);
+
+		m_observerPlayerTable.headers[column]->draw(columnX + cellPad, baseY, m_playerInfoListValueColor, m_playerInfoListDropColor);
+
+		for (row = 0; row < rowCount; ++row)
+		{
+			m_observerPlayerTable.cells[column][row]->draw(columnX + cellPad, baseY + (row + 1) * lineH,
+				rowColors[row], m_playerInfoListDropColor);
+		}
+
+		columnX += columnWidths[column];
 	}
 }
