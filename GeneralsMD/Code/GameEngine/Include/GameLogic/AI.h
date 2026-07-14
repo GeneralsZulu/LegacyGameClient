@@ -229,6 +229,35 @@ public:
 	Real	m_maxRetaliateDistance; // If attacker is > this distance, don't retaliate. [8/25/2003]
 	Real	m_retaliateFriendsRadius; // If we have friends within this radius, get them to help retaliate. [8/25/2003]
 
+	// TacticalAI per-object upgrade purchasing (AISkirmishPlayer::buyObjectUpgrades).
+	// Only consulted for TacticalAI players, and only for the faction each knob names;
+	// every other player (vanilla skirmish AI of any difficulty, humans, other
+	// factions) is unaffected regardless of what these are set to.
+	//
+	// Within one faction the weights form a mix: each carrier vehicle is assigned one
+	// upgrade at random, in proportion to the weights of the upgrades it is actually
+	// ABLE to buy (0 = never pick this one). Setting a faction's weights all to zero
+	// disables that faction's upgrade buying entirely.
+	//
+	// USA vehicle drones. Default 100/0/0 = always Battle Drone: it repairs its host
+	// and adds a gun, which is what a human USA player defaults to.
+	Int m_taiUsaBattleDroneWeight;		// Relative odds of putting a Battle Drone on a TAI USA vehicle.
+	Int m_taiUsaScoutDroneWeight;		// Relative odds of putting a Scout Drone on a TAI USA vehicle.
+	Int m_taiUsaHellfireDroneWeight;	// Relative odds of putting a Hellfire Drone on a TAI USA vehicle.
+	Int m_taiUsaDroneCashReserve;		// Cash that must remain AFTER buying a drone, so drone spending never starves unit/base production.
+
+	// China Overlord upgrades. Default 75/25 = roughly 3 Gattling Cannons per
+	// Propaganda Tower, so most Overlords gain the anti-air they otherwise
+	// completely lack. The Battle Bunker is deliberately absent from the table in
+	// AISkirmishPlayer.cpp and has no weight here: it conflicts with the other two
+	// and only pays off with infantry garrisoned inside, which the AI never does,
+	// so buying it would be a straight downgrade.
+	// The Emperor Overlord (Tank general) resolves to Gattling-only on its own: its
+	// propaganda tower is intrinsic, so it has neither a propaganda upgrade module
+	// nor a propaganda button, and both of those are checked before buying.
+	Int m_taiChinaOverlordGattlingWeight;	// Relative odds of putting a Gattling Cannon (1200) on a TAI China Overlord.
+	Int m_taiChinaOverlordPropagandaWeight;	// Relative odds of putting a Propaganda Tower (500) on a TAI China Overlord.
+	Int m_taiChinaOverlordCashReserve;		// Cash that must remain AFTER buying an Overlord upgrade, so it never starves unit/base production.
 
 	AISideInfo *m_sideInfo;
 

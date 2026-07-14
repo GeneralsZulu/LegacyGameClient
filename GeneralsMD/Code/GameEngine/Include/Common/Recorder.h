@@ -181,7 +181,9 @@ public:
 		ZULU_AI_FEATURE_NONE        = 0,
 		ZULU_AI_FEATURE_IDLE_COMMIT = 1, ///< AISkirmishPlayer::commitIdleArmy()
 		ZULU_AI_FEATURE_SPOT_SOLVER = 2, ///< global start-position solver in populateRandomStartPosition(), incl. teammate spot shuffle
-		ZULU_AI_FEATURE_CURRENT     = 2
+		ZULU_AI_FEATURE_USA_DRONES  = 3, ///< TacticalAI USA vehicle drones (AISkirmishPlayer::buyObjectUpgrades)
+		ZULU_AI_FEATURE_CHINA_OVERLORD = 4, ///< TacticalAI China Overlord gattling/propaganda (AISkirmishPlayer::buyObjectUpgrades)
+		ZULU_AI_FEATURE_CURRENT     = 4
 	};
 	// True if the AI feature at the given version should run this frame.
 	// Always true during live games / recording. During playback / resume-catchup
