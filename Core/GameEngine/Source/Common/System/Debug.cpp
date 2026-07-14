@@ -780,6 +780,39 @@ static void TriggerMiniDump()
 }
 
 
+// Zulu: fatal error with a specific, actionable message for the user.
+//
+// ReleaseCrash() and ReleaseCrashLocalized() are the two existing fatal-error
+// surfaces, but neither works for a broken install: ReleaseCrash() shows the
+// generic "You have encountered a serious error" text (which tells the user
+// nothing about what to fix), and ReleaseCrashLocalized() fetches its strings
+// through TheGameText, which is exactly what is unavailable when our data
+// package is missing. So this one takes plain, already-localized-to-English
+// text and shows it verbatim. Does not return.
+void ReleaseFatalError(const char *title, const char *message)
+{
+	DEBUG_LOG(("FATAL: %s: %s", title, message));
+
+	fprintf(stderr, "\nFATAL: %s\n%s\n", title, message);
+	fflush(stderr);
+
+	if (!DX8Wrapper_IsWindowed) {
+		if (ApplicationHWnd) {
+			ShowWindow(ApplicationHWnd, SW_HIDE);
+		}
+	}
+
+	// A modal box would wedge an unattended headless run forever - the text above is
+	// the report in that case.
+	const Bool headless = (TheGlobalData != nullptr && TheGlobalData->m_headless);
+	if (!headless) {
+		::MessageBox(nullptr, message, title, MB_OK|MB_SYSTEMMODAL|MB_ICONERROR);
+	}
+
+	_exit(1);
+}
+
+
 void ReleaseCrash(const char *reason)
 {
 	/// do additional reporting on the crash, if possible

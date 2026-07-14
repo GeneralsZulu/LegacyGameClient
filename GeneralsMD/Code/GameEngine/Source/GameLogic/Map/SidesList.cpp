@@ -519,17 +519,41 @@ void SidesList::prepareForMP_or_Skirmish()
 	if (!gotScripts) {
 		AsciiString path = "data\\Scripts\\SkirmishScripts.scb";
 		DEBUG_LOG(("Skirmish map using standard scripts"));
-		m_skirmishTeamrec.clear();
 		CachedFileInputStream theInputStream;
-		if (theInputStream.open(path)) {
+		if (!theInputStream.open(path)) {
+			// Zulu: this file ships inside our BIG and any loose copy is deliberately ignored
+			// (fileSystemPrefersArchive() in FileSystem.cpp), so a missing/corrupt/locked BIG
+			// leaves it with no source. The old code cleared m_skirmishTeamrec *before* the
+			// open and then fell through silently: every AI player lost its own team, got
+			// assigned to the neutral player, and the match ended in a fake victory in about
+			// ten seconds. Never continue from here. GameEngine::init() normally catches this
+			// at startup; if we get here anyway the file went away mid-session.
+			ReleaseFatalError("Zulu - Missing Game Data",
+				"Data\\Scripts\\SkirmishScripts.scb could not be read.\n\n"
+				"This file ships inside Zulu.big. Without it, every AI player in this match "
+				"would have no base and no units.\n\n"
+				"Check that Zulu.big is present in your Zero Hour folder and is not locked by "
+				"another program, then start the game again.");
+			// does not return
+		}
+
+		// The standard teams replace the map's own. Only throw the map's teams away now that
+		// we actually have the file open - see the comment above.
+		m_skirmishTeamrec.clear();
+		{
 				ChunkInputStream *pStrm = &theInputStream;
 				DataChunkInput file( pStrm );
 				file.registerParser( "PlayerScriptsList", AsciiString::TheEmptyString, ScriptList::ParseScriptsDataChunk );
 				file.registerParser( "ScriptsPlayers", AsciiString::TheEmptyString, ParsePlayersDataChunk );
 				file.registerParser( "ScriptTeams", AsciiString::TheEmptyString, ParseTeamsDataChunk );
 				if (!file.parse(this)) {
-					DEBUG_LOG(("ERROR - Unable to read in skirmish scripts."));
-					return;
+					// Same deal: a half-parsed skirmish script file is not something we can play.
+					ReleaseFatalError("Zulu - Corrupt Game Data",
+						"Data\\Scripts\\SkirmishScripts.scb could not be read.\n\n"
+						"The file is present but could not be parsed, so the AI players in this "
+						"match would have no base and no units.\n\n"
+						"Your Zulu.big may be corrupt or out of date. Reinstall Zulu and try again.");
+					// does not return
 				}
 				ScriptList *scripts[MAX_PLAYER_COUNT];
 				Int count = ScriptList::getReadScripts(scripts);
