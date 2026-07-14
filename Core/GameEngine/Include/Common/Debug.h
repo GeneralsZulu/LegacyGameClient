@@ -213,6 +213,11 @@ class AsciiString;
 
 DEBUG_EXTERN_C void ReleaseCrash(const char* reason);
 DEBUG_EXTERN_C void ReleaseCrashLocalized(const AsciiString& p, const AsciiString& m);
+// Zulu: fatal error that shows 'message' verbatim, for problems the user can actually
+// fix (a missing or unreadable data file). Unlike ReleaseCrashLocalized it does not go
+// through TheGameText, so it still works when the data package itself is missing.
+// Does not return.
+DEBUG_EXTERN_C void ReleaseFatalError(const char* title, const char* message);
 
 #define RELEASE_CRASH(m)				do { ReleaseCrash(m); } while (0)
 #define RELEASE_CRASHLOCALIZED(p, m)		do { ReleaseCrashLocalized(p, m); } while (0)

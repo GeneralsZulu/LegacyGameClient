@@ -470,6 +470,33 @@ void GameEngine::init()
 
 		TheArchiveFileSystem->loadMods();
 
+		// Zulu: our data package is not optional. SkirmishScripts.scb is force-preferred
+		// from the archive (see fileSystemPrefersArchive() in FileSystem.cpp), so if our
+		// BIG is missing, corrupt, or locked by another process, the file has no source at
+		// all - and an unopenable BIG is silently skipped by loadBigFilesFromDirectory().
+		// A game started in that state hands every skirmish AI's base to the neutral player
+		// and ends in a fake victory seconds later. Check it here, while we can still tell
+		// the user what to fix.
+		{
+			File *scbFile = TheFileSystem->openFile("Data\\Scripts\\SkirmishScripts.scb", File::READ | File::BINARY);
+			if (scbFile == nullptr)
+			{
+				ReleaseFatalError("Zulu - Missing Game Data",
+					"Data\\Scripts\\SkirmishScripts.scb could not be loaded.\n\n"
+					"This file ships inside Zulu.big. Without it, skirmish and multiplayer AI "
+					"players cannot be set up, and every match would end immediately.\n\n"
+					"Check that Zulu.big is present in your Zero Hour folder, is not corrupt, and "
+					"is not locked by another program (close any copy of the game that is still "
+					"running), then start the game again.");
+				// does not return
+			}
+			else
+			{
+				scbFile->close();
+				scbFile = nullptr;
+			}
+		}
+
 		// Re-apply Data\INI\GameData.ini after mods are mounted so a mod BIG
 		// can supply a partial GameData block that overlays specific fields
 		// (e.g. MaxCameraHeight) without having to redefine every field.
