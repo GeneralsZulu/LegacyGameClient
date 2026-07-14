@@ -20,7 +20,15 @@ if [ -n "${ZULU_BUILD_VARIANT:-}" ]; then
     ZULU_VERSION_FLAGS+=("-DZULU_BUILD_VARIANT=${ZULU_BUILD_VARIANT}")
 fi
 
-if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f  build/docker/build.ninja  ]; then
+# One build directory per preset, supplied by scripts/docker-build.sh. Each
+# preset gets its own cmake cache so a `vc6` configure cannot inherit the
+# RTS_DEBUG_* flags left behind by a `vc6-releaselog` configure, and neither
+# preset invalidates the other's ninja state. Defaults keep a bare
+# `docker run zerohour-build` working.
+PRESET="${PRESET:-vc6}"
+BUILD_SUBDIR="${BUILD_SUBDIR:-build/docker-$PRESET}"
+
+if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f "$BUILD_SUBDIR/build.ninja" ]; then
    wine /build/tools/cmake/bin/cmake.exe \
          --preset ${PRESET} \
         -DCMAKE_SYSTEM="Windows" \
@@ -40,10 +48,10 @@ if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f  build/docker/build.ninja  ]; then
         -DZULU_CLIENT_KEY="${ZULU_CLIENT_KEY:-}" \
         -DCNCSTATS_ZULU_CLIENT_KEY="${CNCSTATS_ZULU_CLIENT_KEY:-}" \
         "${ZULU_VERSION_FLAGS[@]}" \
-        -B /build/cnc/build/docker
+        -B "/build/cnc/$BUILD_SUBDIR"
 fi
 
-cd /build/cnc/build/docker 
+cd "/build/cnc/$BUILD_SUBDIR"
 wine cmd /c "set TMP=Z:\build\tmp& set TEMP=Z:\build\tmp& Z:\build\tools\ninja.exe $MAKE_TARGET"
 
 

@@ -15,7 +15,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="$PROJECT_DIR/build/docker"
+# Build dirs are per-preset (build/docker-<preset>); default to the shipping
+# preset. Override with PRESET=vc6-releaselog to install the logging build.
+BUILD_DIR="$PROJECT_DIR/build/docker-${PRESET:-vc6}"
 
 # Colors for output
 RED='\033[0;31m'

@@ -26,14 +26,27 @@ target_link_libraries(z_generals PRIVATE
 )
 
 # TODO Originally referred to build host and user, replace with git info perhaps?
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/GeneratedVersion.h
+#
+# Compare-and-write, same as BuildVersion.h below. An unconditional file(WRITE)
+# bumps this header's mtime on every configure, and because WinMain.cpp declares
+# an OBJECT_DEPENDS on it (see below), every `--cmake` pass forced a WinMain.cpp
+# recompile plus a full relink of the ~7.5 MB generalszh.exe even when nothing
+# had changed. Every Make-driven build passes `--cmake` (make installer,
+# installer-dev, zulu-exe, zulu-exe-log, zulu-launcher), so that was every build.
+set(_zulu_generated_version_content
 "#pragma once
 
 #define VERSION_LOCALBUILDNUM 0
 #define VERSION_BUILDUSER \"\"
 #define VERSION_BUILDLOC \"\"
-"
-)
+")
+set(_zulu_generated_version_existing "")
+if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/GeneratedVersion.h")
+    file(READ "${CMAKE_CURRENT_BINARY_DIR}/GeneratedVersion.h" _zulu_generated_version_existing)
+endif()
+if(NOT _zulu_generated_version_existing STREQUAL _zulu_generated_version_content)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/GeneratedVersion.h "${_zulu_generated_version_content}")
+endif()
 
 # Defaults match the original retail binary's reported values. `make installer`
 # overrides these via -DZULU_VERSION_* (parsed out of APPVERSION in

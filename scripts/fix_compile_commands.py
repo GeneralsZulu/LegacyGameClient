@@ -49,7 +49,13 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    build_dir = os.path.join(project_root, 'build', 'docker')
+    # Build dir is per-preset (build/docker-<preset>); docker-build.sh passes
+    # the one it just built. Default to the shipping preset's dir so running
+    # this script by hand still works.
+    if len(sys.argv) > 1:
+        build_dir = sys.argv[1]
+    else:
+        build_dir = os.path.join(project_root, 'build', 'docker-vc6')
     input_file = os.path.join(build_dir, 'compile_commands.json')
     output_file = os.path.join(project_root, 'compile_commands.json')
 
