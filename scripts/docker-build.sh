@@ -224,6 +224,39 @@ clean_build() {
     print_success "Build directory cleaned"
 }
 
+# Serialize every invocation that targets the same build directory.
+#
+# --clean does `rm -rf "$BUILD_DIR"`. Without a lock, starting a second build
+# of the same preset while a first one is still compiling deletes the running
+# build's tree out from under it: the fetched dependency sources under
+# _deps/ disappear (cl.exe then reports "fatal error C1083: Cannot open
+# include file" for stlport headers such as config/_prolog.h and hash_map) and
+# the CMakeFiles/*.dir output directories disappear (cl.exe reports "Cannot
+# open compiler generated file: '...cpp.obj'"). Sources under the read-only
+# part of the mount keep opening fine, so the failure looks like a broken
+# dependency fetch rather than what it is. That is exactly the failure mode
+# that was mistaken for a build-system regression.
+#
+# The lock is keyed on the build directory, so different presets (vc6 and
+# vc6-releaselog) still run concurrently; only same-preset runs wait.
+acquire_build_lock() {
+    if ! command -v flock &>/dev/null; then
+        print_warning "flock not found; skipping build-directory lock."
+        print_warning "Do not run two builds of preset '$PRESET' at the same time."
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$BUILD_DIR")"
+    local lock_file="$BUILD_DIR.lock"
+
+    exec 9>"$lock_file"
+    if ! flock -n 9; then
+        print_warning "Another build is already using $BUILD_SUBDIR. Waiting for it to finish..."
+        flock 9
+        print_info "Previous build finished; continuing."
+    fi
+}
+
 list_outputs() {
     echo ""
     print_info "Build outputs:"
@@ -313,6 +346,11 @@ fi
 # Main execution
 print_header
 check_dependencies
+
+# Take the lock before --clean, so the rm -rf below can never race a build that
+# is already running in this directory. Released automatically when the script
+# exits and fd 9 is closed.
+acquire_build_lock
 
 if [[ "$CLEAN" == "true" ]]; then
     clean_build
