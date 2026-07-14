@@ -1034,10 +1034,23 @@ void AISkirmishPlayer::update()
 // TacticalAI per-object upgrade purchasing.
 //
 // Some of the strongest upgrades in the game are Type = OBJECT upgrades bought on an
-// individual vehicle rather than researched once at a structure. The stock AI never buys
-// any of them (AIPlayer::buildUpgrade explicitly rejects OBJECT upgrades), so it fields
-// bare Humvees and, worse, bare Overlords with no anti-air whatsoever. This sweep buys
-// them the way a human does.
+// individual vehicle rather than researched once at a structure. The stock AI reaches them
+// badly, and it is worth being precise about why, because there are two paths and they do
+// not behave the same:
+//   - AI_PLAYER_BUILD_UPGRADE takes an Upgrade, and AIPlayer::buildUpgrade explicitly
+//     REJECTS object upgrades ("is an object, not a player upgrade. Ignoring request").
+//     EA scripted Upgrade_AmericaAdvancedControlRods through this path; it is silently
+//     dropped. So this path buys no object upgrade, ever.
+//   - TEAM_USE_COMMANDBUTTON_ABILITY takes a CommandButton, not an Upgrade, and reaches
+//     AIGroup::groupDoCommandButton -> Object::doCommandButton -> queueUpgrade(). It
+//     bypasses the type check entirely, and SkirmishScripts.scb does use it.
+// So the stock AI DOES buy some object upgrades. It just buys them badly: the Overlord
+// scripts start disabled and are enable-gated on enemy composition (Gattling wants 5+
+// enemy aircraft, Propaganda 15+ enemy tanks), fire once, and only target the
+// "China CT - Tank *" combat teams -- not the wave teams that actually field most
+// Overlords. Measured: stock upgrades ~68% of Tank General Emperors but only ~7% of
+// base-China Overlords (n=101), leaving a 2000-credit tank with no anti-air. USA vehicle
+// drones it never buys at all. This sweep buys them the way a human does.
 //
 // How an object upgrade actually attaches (all verified against the shipped INI):
 //   - The carrier vehicle has one ObjectCreationUpgrade module per option, each TriggeredBy

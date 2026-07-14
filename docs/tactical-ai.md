@@ -86,10 +86,27 @@ Behaviors:
 - Per-object upgrades: `AISkirmishPlayer::buyObjectUpgrades()` runs a 2s
   sweep over the player's vehicles and queues a `Type = OBJECT` upgrade on
   the carrier's own `ProductionUpdate`, exactly as a human clicking the
-  `OBJECT_UPGRADE` command button does. The stock AI buys none of these
-  (`AIPlayer::buildUpgrade` explicitly rejects OBJECT upgrades). Gated on
-  `isTacticalAI()`, on `Player::getBaseSide()`, and per-row on a
-  `ZULU_AI_FEATURE_*` replay version, so older replays stay bit-exact.
+  `OBJECT_UPGRADE` command button does. Gated on `isTacticalAI()`, on
+  `Player::getBaseSide()`, and per-row on a `ZULU_AI_FEATURE_*` replay
+  version, so older replays stay bit-exact.
+
+  Why the stock AI needs the help, precisely (there are two paths and they
+  differ, which is easy to get wrong):
+  - `AI_PLAYER_BUILD_UPGRADE` takes an *Upgrade*, and
+    `AIPlayer::buildUpgrade` explicitly **rejects** OBJECT upgrades. EA
+    scripted `Upgrade_AmericaAdvancedControlRods` through this path and the
+    engine silently drops it. This path never buys an object upgrade.
+  - `TEAM_USE_COMMANDBUTTON_ABILITY` takes a *CommandButton*, reaches
+    `Object::doCommandButton` -> `queueUpgrade()`, and bypasses that type
+    check. `SkirmishScripts.scb` does use it.
+
+  So the stock AI **does** buy some object upgrades — it just buys them
+  badly. The Overlord scripts start disabled, are enable-gated on enemy
+  composition (Gattling wants 5+ enemy aircraft, Propaganda 15+ enemy
+  tanks), fire once, and target only the `China CT - Tank *` combat teams,
+  not the wave teams that field most Overlords. Measured stock coverage:
+  ~68% of Tank General Emperors, but only ~7% of base-China Overlords
+  (n=101). USA vehicle drones it never buys at all.
 
   What it may buy is a table at the top of `AISkirmishPlayer.cpp`
   (`TheAIObjectUpgradeTable`); add a row plus a `TAiData` weight to teach
