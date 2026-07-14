@@ -119,6 +119,10 @@ protected:
 	// Local helper invoked from commitIdleArmy() after a force is dispatched
 	// against an enemy structure (skipped when the dispatch was a beacon directive).
 	void announceAttackCommit(const Coord3D *target, Player *enemyPlayer);
+	// TacticalAI only: periodically buy the per-object upgrades a human would click for
+	// each carrier vehicle that doesn't have one yet (USA drones, China Overlord
+	// gattling/propaganda). Driven by the faction table at the top of AISkirmishPlayer.cpp.
+	void buyObjectUpgrades();
 
 protected:
 	Int m_curFrontBaseDefense; // First is 0.
@@ -134,6 +138,9 @@ protected:
 	Player			*m_currentEnemy;
 
 	UnsignedInt m_nextIdleSweepFrame;
+
+	// TacticalAI per-object upgrade purchasing (buyObjectUpgrades).
+	UnsignedInt m_nextUpgradeSweepFrame;
 
 	// Beacon directive ("!attack" prefix in an ally beacon's caption).
 	ObjectID    m_directiveBeaconID;

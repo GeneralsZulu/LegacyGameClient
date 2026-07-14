@@ -6212,6 +6212,11 @@ Bool Object::canProduceUpgrade( const UpgradeTemplate *upgrade )
 	// We need to have the button to make the upgrade.  CommandSets are a weird Logic/Client hybrid.
 	const CommandSet *set = TheControlBar->findCommandSet(getCommandSetString());
 
+	// An object with no CommandSet (or one naming a set that isn't defined) simply has no
+	// buttons, so it can't produce anything. The original code dereferenced 'set' blindly.
+	if( !set )
+		return FALSE;
+
 	for( Int buttonIndex = 0; buttonIndex < MAX_COMMANDS_PER_SET; buttonIndex++ )
 	{
 		const CommandButton *button = set->getCommandButton(buttonIndex);

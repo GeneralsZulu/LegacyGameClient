@@ -39,6 +39,7 @@
 #include "Common/BuildAssistant.h"
 #include "Common/SpecialPower.h"
 #include "Common/ThingTemplate.h"
+#include "Common/Upgrade.h"
 #include "Common/WellKnownKeys.h"
 #include "Common/Xfer.h"
 #include "GameLogic/GameLogic.h"
@@ -82,6 +83,7 @@ m_curRightFlankRightDefenseAngle(0),
 m_frameToCheckEnemy(0),
 m_currentEnemy(nullptr),
 m_nextIdleSweepFrame(0),
+m_nextUpgradeSweepFrame(0),
 m_directiveBeaconID(INVALID_ID),
 m_nextDirectiveScanFrame(0),
 m_nextDirectiveAnnounceFrame(0),
@@ -1025,6 +1027,268 @@ void AISkirmishPlayer::update()
 	announceMilestones();
 	processDistressSignal();
 	commitIdleArmy();
+	buyObjectUpgrades();
+}
+
+//----------------------------------------------------------------------------------------------------------
+// TacticalAI per-object upgrade purchasing.
+//
+// Some of the strongest upgrades in the game are Type = OBJECT upgrades bought on an
+// individual vehicle rather than researched once at a structure. The stock AI never buys
+// any of them (AIPlayer::buildUpgrade explicitly rejects OBJECT upgrades), so it fields
+// bare Humvees and, worse, bare Overlords with no anti-air whatsoever. This sweep buys
+// them the way a human does.
+//
+// How an object upgrade actually attaches (all verified against the shipped INI):
+//   - The carrier vehicle has one ObjectCreationUpgrade module per option, each TriggeredBy
+//     its upgrade and ConflictsWith the others, so the options are mutually exclusive.
+//   - The carrier has its OWN ProductionUpdate, which is what "researches" the upgrade.
+//     A human clicking the OBJECT_UPGRADE command button lands in ProductionUpdate::
+//     queueUpgrade() on the vehicle itself; that is exactly the call we make.
+//   - Cost is withdrawn immediately by queueUpgrade(), so affordability MUST be checked
+//     first -- see the money note in the sweep below.
+//
+// Because the modules mutually conflict, affectedByUpgrade() returns FALSE once the vehicle
+// carries any one of them, and a drone's death removes its upgrade from the host, so a
+// vehicle that loses its drone becomes eligible for a replacement here, exactly like a
+// human would re-buy it.
+//
+// THE RULE THIS TABLE ENCODES: the AI only ever buys what a human could actually click,
+// i.e. what is present in the object's CommandSet -- not merely what the upgrade modules
+// technically allow. Object::canProduceUpgrade() is precisely that CommandSet test, and it
+// is what makes the Emperor Overlord resolve to Gattling-only with no special case here.
+//----------------------------------------------------------------------------------------------------------
+
+// One object-upgrade the TacticalAI is allowed to buy, for one faction.
+// To teach the AI a new object upgrade: add a row here plus its INI weight on TAiData.
+// Rows are matched against Player::getBaseSide(), so a faction's row covers that faction
+// and all of its sub-generals (BaseSide is "China" for base China, Tank, Infantry, Nuke
+// and Boss; "USA" for base USA, Air Force, Laser and SuperWeapon).
+struct AIObjectUpgradeRow
+{
+	const char *baseSide;			// Player base side this row applies to.
+	const char *upgradeName;		// The Type = OBJECT upgrade to buy.
+	size_t      weightOffset;		// offsetof(TAiData, ...) of this row's relative weight.
+	size_t      cashReserveOffset;	// offsetof(TAiData, ...) of the cash floor for this row.
+	UnsignedInt replayFeature;		// RecorderClass::ZULU_AI_FEATURE_* gate, so older replays stay bit-exact.
+};
+
+static const AIObjectUpgradeRow TheAIObjectUpgradeTable[] =
+{
+	// USA: vehicle drones (Humvee, Ambulance, Tomahawk, Crusader, Paladin, Avenger, Microwave).
+	{ "USA",   "Upgrade_AmericaBattleDrone",           offsetof(TAiData, m_taiUsaBattleDroneWeight),         offsetof(TAiData, m_taiUsaDroneCashReserve),        RecorderClass::ZULU_AI_FEATURE_USA_DRONES },
+	{ "USA",   "Upgrade_AmericaScoutDrone",            offsetof(TAiData, m_taiUsaScoutDroneWeight),          offsetof(TAiData, m_taiUsaDroneCashReserve),        RecorderClass::ZULU_AI_FEATURE_USA_DRONES },
+	{ "USA",   "Upgrade_AmericaHellfireDrone",         offsetof(TAiData, m_taiUsaHellfireDroneWeight),       offsetof(TAiData, m_taiUsaDroneCashReserve),        RecorderClass::ZULU_AI_FEATURE_USA_DRONES },
+
+	// China: Overlord turret upgrades. The Overlord is a 2000cr tank the AI otherwise fields
+	// completely bare, with no anti-air at all, so the Gattling Cannon (1200) dominates the
+	// mix over the Propaganda Tower (500).
+	//
+	// Upgrade_ChinaOverlordBattleBunker (400) is DELIBERATELY ABSENT and must stay absent.
+	// It conflicts with the other two and only pays off with infantry garrisoned inside,
+	// which the AI has no logic to do, so buying it is a straight downgrade. Note that the
+	// CommandSet test alone would NOT exclude it -- a standard Overlord does have a Battle
+	// Bunker button -- so leaving it out of this table is the thing that excludes it.
+	{ "China", "Upgrade_ChinaOverlordGattlingCannon",  offsetof(TAiData, m_taiChinaOverlordGattlingWeight),   offsetof(TAiData, m_taiChinaOverlordCashReserve),   RecorderClass::ZULU_AI_FEATURE_CHINA_OVERLORD },
+	{ "China", "Upgrade_ChinaOverlordPropagandaTower", offsetof(TAiData, m_taiChinaOverlordPropagandaWeight), offsetof(TAiData, m_taiChinaOverlordCashReserve),   RecorderClass::ZULU_AI_FEATURE_CHINA_OVERLORD },
+};
+
+// enum (not static const Int): VC6 will not accept every const object as an array bound.
+enum
+{
+	TheAIObjectUpgradeTableSize =
+		sizeof(TheAIObjectUpgradeTable) / sizeof(TheAIObjectUpgradeTable[0])
+};
+
+// Read an Int field of TAiData given its offsetof(). Same idiom the engine's own INI
+// FieldParse tables use on this very struct.
+static Int readTAiDataInt( const TAiData *aiData, size_t offset )
+{
+	return *(const Int *)((const char *)aiData + offset);
+}
+
+// A row that survived the faction / replay-feature / weight filters, resolved to a template.
+struct AIObjectUpgradeCandidate
+{
+	const UpgradeTemplate *upgrade;
+	Int                    weight;
+	Int                    cashReserve;
+};
+
+void AISkirmishPlayer::buyObjectUpgrades()
+{
+	// Gated behind the SLOT_TACTICAL_AI lobby option; vanilla Easy/Medium/Hard/Brutal
+	// AIs keep their classic behavior unchanged and buy nothing here.
+	if (!isTacticalAI()) return;
+
+	const TAiData *aiData = TheAI ? TheAI->getAiData() : nullptr;
+	if (!aiData) return;
+
+	// Collect the rows that apply to this player, BEFORE touching the sweep clock.
+	// A player with no applicable rows (wrong faction, feature disabled for this replay,
+	// or all weights zeroed in INI) must fall out here having changed no state at all,
+	// so that its m_nextUpgradeSweepFrame stays put and old replays stay bit-exact.
+	AIObjectUpgradeCandidate candidates[TheAIObjectUpgradeTableSize];
+	Int numCandidates = 0;
+
+	const AsciiString &baseSide = m_player->getBaseSide();
+
+	Int i;
+	for (i = 0; i < TheAIObjectUpgradeTableSize; ++i)
+	{
+		const AIObjectUpgradeRow *row = &TheAIObjectUpgradeTable[i];
+
+		if (baseSide.compareNoCase( row->baseSide ) != 0) continue;
+
+		// During replay / resume-catchup of a recording made before this feature existed,
+		// the original AI did not buy this upgrade -- spending its money here would diverge
+		// from the recorded simulation.
+		if (TheRecorder && !TheRecorder->isAIFeatureEnabled( row->replayFeature )) continue;
+
+		Int weight = readTAiDataInt( aiData, row->weightOffset );
+		if (weight <= 0) continue; // 0 = never pick this one; all-zero disables the faction.
+
+		const UpgradeTemplate *upgrade = TheUpgradeCenter->findUpgrade( AsciiString( row->upgradeName ) );
+		if (!upgrade) continue; // not in this INI set; ignore rather than assert.
+
+		Int reserve = readTAiDataInt( aiData, row->cashReserveOffset );
+		if (reserve < 0) reserve = 0;
+
+		candidates[numCandidates].upgrade     = upgrade;
+		candidates[numCandidates].weight      = weight;
+		candidates[numCandidates].cashReserve = reserve;
+		++numCandidates;
+	}
+
+	if (numCandidates == 0) return;
+
+	const Int UPGRADE_SWEEP_INTERVAL_SECONDS = 2;
+	const Int MAX_PURCHASES_PER_SWEEP = 2;
+
+	UnsignedInt curFrame = TheGameLogic->getFrame();
+	if (curFrame < m_nextUpgradeSweepFrame) return;
+	m_nextUpgradeSweepFrame = curFrame + UPGRADE_SWEEP_INTERVAL_SECONDS * LOGICFRAMES_PER_SECOND;
+
+	Money *money = m_player->getMoney();
+	if (!money) return;
+
+	Int purchases = 0;
+
+	// Walk every team this player owns. Iteration order is deterministic across
+	// clients (linked lists, stable insertion order), same as commitIdleArmy().
+	Player::PlayerTeamList::const_iterator pti;
+	for (pti = m_player->getPlayerTeams()->begin(); pti != m_player->getPlayerTeams()->end(); ++pti)
+	{
+		DLINK_ITERATOR<Team> ti = (*pti)->iterate_TeamInstanceList();
+		for (; !ti.done(); ti.advance())
+		{
+			Team *team = ti.cur();
+			if (!team) continue;
+
+			DLINK_ITERATOR<Object> oi = team->iterate_TeamMemberList();
+			for (; !oi.done(); oi.advance())
+			{
+				if (purchases >= MAX_PURCHASES_PER_SWEEP) return;
+
+				Object *obj = oi.cur();
+				if (!obj) continue;
+				if (!obj->isKindOf(KINDOF_VEHICLE)) continue;
+				if (obj->isKindOf(KINDOF_DRONE)) continue;
+				if (obj->isEffectivelyDead()) continue;
+				if (obj->getStatusBits().test(OBJECT_STATUS_UNDER_CONSTRUCTION)) continue;
+				if (obj->getStatusBits().test(OBJECT_STATUS_SOLD)) continue;
+
+				ProductionUpdateInterface *pu = obj->getProductionUpdateInterface();
+				if (!pu) continue; // no ProductionUpdate => not an upgrade carrier at all.
+
+				// Narrow the faction's rows to the ones THIS vehicle can actually buy right
+				// now. Doing this BEFORE the weighted pick (rather than picking first and
+				// discarding) is what makes the mix behave: an Emperor Overlord, which can
+				// only ever take the Gattling, always gets a Gattling instead of rolling
+				// "Propaganda" and being skipped forever.
+				Int eligible[TheAIObjectUpgradeTableSize];
+				Int numEligible = 0;
+				Int totalWeight = 0;
+
+				Int c;
+				for (c = 0; c < numCandidates; ++c)
+				{
+					const UpgradeTemplate *upgrade = candidates[c].upgrade;
+
+					// Already has it. (Because the modules ConflictsWith each other, this and
+					// affectedByUpgrade() below together give us mutual exclusivity for free:
+					// once an Overlord has a Gattling, nothing else here is eligible.)
+					if (obj->hasUpgrade( upgrade )) continue;
+
+					// Does this object have an upgrade module that responds to it at all?
+					// This is what excludes the Emperor from Propaganda: its propaganda tower
+					// is intrinsic, so it has no propaganda ObjectCreationUpgrade module.
+					if (!obj->affectedByUpgrade( upgrade )) continue;
+
+					// Could a human actually click this? Object::canProduceUpgrade() walks the
+					// object's CommandSet looking for the OBJECT_UPGRADE button bound to this
+					// upgrade. This is the "only buy what a human could buy" rule, and it is a
+					// second, independent reason the Emperor never buys Propaganda (its
+					// CommandSet has the propaganda button commented out in the stock INI).
+					if (!obj->canProduceUpgrade( upgrade )) continue;
+
+					if (pu->isUpgradeInQueue( upgrade )) continue;
+					// The carrier's ProductionUpdate has a small MaxQueueEntries (1 on a standard
+					// Overlord); queueing into a full queue asserts in ProductionUpdate::queueUpgrade.
+					if (pu->canQueueUpgrade( upgrade ) == CANMAKE_QUEUE_FULL) continue;
+
+					eligible[numEligible++] = c;
+					totalWeight += candidates[c].weight;
+				}
+
+				if (numEligible == 0 || totalWeight <= 0) continue;
+
+				// Weighted pick among the eligible options. The roll is a hash of the object's
+				// ID rather than a draw from the logic RNG: it is identical on every client and
+				// stable for the life of the unit, and it does NOT perturb the shared random
+				// stream (which would desync every other consumer of it).
+				UnsignedInt h = (UnsignedInt)obj->getID();
+				h ^= h >> 15;
+				h *= 2246822519U;
+				h ^= h >> 13;
+				h *= 3266489917U;
+				h ^= h >> 16;
+
+				Int roll = (Int)(h % (UnsignedInt)totalWeight);
+
+				const AIObjectUpgradeCandidate *pick = nullptr;
+				Int e;
+				for (e = 0; e < numEligible; ++e)
+				{
+					const AIObjectUpgradeCandidate *cand = &candidates[ eligible[e] ];
+					if (roll < cand->weight)
+					{
+						pick = cand;
+						break;
+					}
+					roll -= cand->weight;
+				}
+				if (!pick) continue;
+
+				// Money: queueUpgrade() withdraws the cost immediately, and Money::withdraw()
+				// silently clamps at zero, so NOTHING below us stops the AI from getting the
+				// upgrade free and/or draining its army budget if we don't check here. Keep
+				// cashReserve untouched so upgrades are bought out of genuine surplus only.
+				// The reserve is per-row, and the cost is the real cost, so a 1200 Gattling
+				// naturally demands far more cash on hand than a 300 Battle Drone.
+				// Skip this vehicle, don't abandon the sweep: the pick is a stable hash of the
+				// object's ID, so one vehicle that rolled an upgrade it can never afford would
+				// otherwise starve every vehicle behind it on every sweep, forever. A cheaper
+				// upgrade on another vehicle may still be affordable right now.
+				Int cost = pick->upgrade->calcCostToBuild( m_player );
+				if ((Int)money->countMoney() < cost + pick->cashReserve)
+					continue;
+
+				if (pu->queueUpgrade( pick->upgrade ))
+					++purchases;
+			}
+		}
+	}
 }
 
 //----------------------------------------------------------------------------------------------------------
@@ -1915,13 +2179,14 @@ void AISkirmishPlayer::crc( Xfer *xfer )
 /** Xfer method
 	* Version Info;
 	* 1: Initial version
-	* 2: Added m_nextIdleSweepFrame */
+	* 2: Added m_nextIdleSweepFrame
+	* 3: Added m_nextUpgradeSweepFrame */
 // ------------------------------------------------------------------------------------------------
 void AISkirmishPlayer::xfer( Xfer *xfer )
 {
 
 	// version
-	XferVersion currentVersion = 2;
+	XferVersion currentVersion = 3;
 	XferVersion version = currentVersion;
 	xfer->xferVersion( &version, currentVersion );
 
@@ -1955,6 +2220,11 @@ void AISkirmishPlayer::xfer( Xfer *xfer )
 	if (version >= 2)
 	{
 		xfer->xferUnsignedInt( &m_nextIdleSweepFrame );
+	}
+
+	if (version >= 3)
+	{
+		xfer->xferUnsignedInt( &m_nextUpgradeSweepFrame );
 	}
 
 }

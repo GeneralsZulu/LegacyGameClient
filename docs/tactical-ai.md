@@ -83,6 +83,50 @@ Behaviors:
   condition id 109, resolves a SIDE parameter and returns
   `Player::isTacticalAIPlayer()`. Used by `SkirmishScripts.scb` as
   an `Init TAI Flag` setup script.
+- Per-object upgrades: `AISkirmishPlayer::buyObjectUpgrades()` runs a 2s
+  sweep over the player's vehicles and queues a `Type = OBJECT` upgrade on
+  the carrier's own `ProductionUpdate`, exactly as a human clicking the
+  `OBJECT_UPGRADE` command button does. The stock AI buys none of these
+  (`AIPlayer::buildUpgrade` explicitly rejects OBJECT upgrades). Gated on
+  `isTacticalAI()`, on `Player::getBaseSide()`, and per-row on a
+  `ZULU_AI_FEATURE_*` replay version, so older replays stay bit-exact.
+
+  What it may buy is a table at the top of `AISkirmishPlayer.cpp`
+  (`TheAIObjectUpgradeTable`); add a row plus a `TAiData` weight to teach
+  the AI a new one:
+  - USA vehicle drones (`Upgrade_AmericaBattleDrone` / `ScoutDrone` /
+    `HellfireDrone`) — `ZULU_AI_FEATURE_USA_DRONES`. Knobs:
+    `TacticalAIUsaBattleDroneWeight` (default 100),
+    `TacticalAIUsaScoutDroneWeight` (0),
+    `TacticalAIUsaHellfireDroneWeight` (0),
+    `TacticalAIUsaDroneCashReserve` (1500).
+  - China Overlord (`Upgrade_ChinaOverlordGattlingCannon` 1200 /
+    `Upgrade_ChinaOverlordPropagandaTower` 500) —
+    `ZULU_AI_FEATURE_CHINA_OVERLORD`. Knobs:
+    `TacticalAIChinaOverlordGattlingWeight` (default 75),
+    `TacticalAIChinaOverlordPropagandaWeight` (25),
+    `TacticalAIChinaOverlordCashReserve` (1500). Roughly 3 Gattlings per
+    Propaganda, so most Overlords gain the anti-air they otherwise lack.
+    `Upgrade_ChinaOverlordBattleBunker` is deliberately absent and must
+    stay absent: it conflicts with the other two and only pays off with
+    infantry garrisoned inside, which the AI never does.
+
+  Core rule: **the AI only buys what a human could actually click.** Each
+  option is filtered by `hasUpgrade()` (don't re-buy), `affectedByUpgrade()`
+  (the object has a module for it) and `canProduceUpgrade()` (the
+  `OBJECT_UPGRADE` button is in the object's `CommandSet`). Filtering
+  happens *before* the weighted pick, so a carrier with only one legal
+  option always gets that option. This is why the Emperor Overlord ends up
+  Gattling-only with no special case: its propaganda tower is intrinsic, so
+  it has neither a propaganda upgrade module nor a propaganda button.
+
+  The choice is a hash of the object ID against the weights, so it is
+  deterministic across clients and never touches the logic RNG. Zeroing a
+  faction's weights disables it. The cash reserve is **load-bearing**:
+  `ProductionUpdate::queueUpgrade` withdraws immediately and
+  `Money::withdraw` clamps at zero, so without the caller-side
+  affordability check the AI would get upgrades free and drain its army
+  budget.
 - USA Hard wave swap (PR #15 — `30a8f0b9d`, PR #16 — `798e482f5`):
   ships a modified `SkirmishScripts.scb` that runs a clone of the
   existing USA Hard combat teams behind a flag-gate. Includes a
