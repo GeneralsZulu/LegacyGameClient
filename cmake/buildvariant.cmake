@@ -12,13 +12,33 @@
 # "release". The git short hash is appended automatically using the
 # GIT_EXECUTABLE that the docker entrypoint already configures.
 
+#
+# Value resolution mirrors cmake/discordwebhook.cmake: an explicitly supplied
+# value FORCE-updates the cache, and a configure pass that doesn't supply one
+# reuses the cached value. Without the cache step the variant was recomputed
+# from the environment on every configure and fell back to "dev", so any
+# reconfigure that didn't happen to carry ZULU_BUILD_VARIANT in its
+# environment (ninja's own RERUN_CMAKE regen, an IDE reconfigure, a sibling
+# `docker-build.sh --cmake` in the same build dir) silently re-stamped a
+# release tree as "dev-<hash>" and recompiled the TUs that read the header.
+# Only a build dir that has never been told a variant defaults to "dev".
 if(NOT DEFINED ZULU_BUILD_VARIANT OR ZULU_BUILD_VARIANT STREQUAL "")
     if(DEFINED ENV{ZULU_BUILD_VARIANT} AND NOT "$ENV{ZULU_BUILD_VARIANT}" STREQUAL "")
         set(ZULU_BUILD_VARIANT "$ENV{ZULU_BUILD_VARIANT}")
-    else()
-        set(ZULU_BUILD_VARIANT "dev")
     endif()
 endif()
+
+if(DEFINED ZULU_BUILD_VARIANT AND NOT ZULU_BUILD_VARIANT STREQUAL "")
+    set(ZULU_BUILD_VARIANT_CACHED "${ZULU_BUILD_VARIANT}" CACHE STRING
+        "Build variant kind (dev/release) baked into the binaries." FORCE)
+endif()
+
+if(NOT DEFINED ZULU_BUILD_VARIANT_CACHED OR ZULU_BUILD_VARIANT_CACHED STREQUAL "")
+    set(ZULU_BUILD_VARIANT_CACHED "dev" CACHE STRING
+        "Build variant kind (dev/release) baked into the binaries." FORCE)
+endif()
+
+set(ZULU_BUILD_VARIANT "${ZULU_BUILD_VARIANT_CACHED}")
 
 string(STRIP "${ZULU_BUILD_VARIANT}" ZULU_BUILD_VARIANT)
 string(TOLOWER "${ZULU_BUILD_VARIANT}" ZULU_BUILD_VARIANT)

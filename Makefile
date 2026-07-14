@@ -19,14 +19,28 @@ GCLOUD       ?= gcloud
 GCS_BUCKET   ?= zulu-installer
 
 ASSETS_DIR := assets
-BUILD_DIR  := build/docker
 TMP_DIR    := build/installer-tmp
+
+# scripts/docker-build.sh keys its build directory off the cmake preset:
+# build/docker-<preset>. The shipping exe and the launcher use the default
+# `vc6` preset; the logging exe uses `vc6-releaselog`, which switches
+# RTS_DEBUG_LOGGING/RTS_DEBUG_CRASHING on. They deliberately no longer share a
+# cmake cache: a `vc6` configure on top of a `vc6-releaselog` cache kept the
+# DEBUG_* flags (cmake caches are sticky for variables a preset does not name),
+# so `make installer` silently produced a logging-enabled "release" binary.
+# Separate dirs also keep both configurations' ninja state warm, so alternating
+# `make installer` and `make installer-dev` rebuilds nothing.
+PRESET_DEFAULT := vc6
+PRESET_LOG     := vc6-releaselog
+BUILD_DIR      := build/docker-$(PRESET_DEFAULT)
+BUILD_DIR_LOG  := build/docker-$(PRESET_LOG)
 
 BIG_NAME      := Zulu.big
 EXE_NAME      := generalszh_zulu.exe
 EXE_LOG_NAME  := generalszh_zulu_log.exe
 LAUNCHER_NAME := ZuluLauncher.exe
 SOURCE_EXE      := $(BUILD_DIR)/GeneralsMD/generalszh.exe
+SOURCE_EXE_LOG  := $(BUILD_DIR_LOG)/GeneralsMD/generalszh.exe
 SOURCE_LAUNCHER := $(BUILD_DIR)/launcher/ZuluLauncher.exe
 
 NSI               := installer/Zulu.nsi
@@ -157,9 +171,9 @@ $(TMP_EXE): docker-build-z_generals | $(TMP_DIR)
 # Logging variant: same Release build (no debug CRT, same DLL deps as the
 # shipping exe), but with DEBUG_LOGGING + DEBUG_CRASHING compiled in. Writes
 # DebugLogFile.txt next to the running .exe at runtime. Built via the
-# vc6-releaselog cmake preset; --cmake forces reconfigure since this shares
-# build/docker with the regular Release build and the cached preset would
-# otherwise stick.
+# vc6-releaselog cmake preset, which gets its own build dir ($(BUILD_DIR_LOG))
+# so it neither leaks its DEBUG_* flags into the shipping build nor invalidates
+# that build's ninja state.
 #
 # Mirrors docker-build-z_generals's discord-secret fetch so installer-dev
 # (which depends on this recipe to get the log-enabled exe) can bake in
@@ -177,7 +191,7 @@ docker-build-z_generals-log:
 		export ZULU_DISCORD_WEBHOOK_URL; \
 		echo "[discord] webhook url loaded ($${#ZULU_DISCORD_WEBHOOK_URL} bytes)"; \
 	fi; \
-	PRESET=vc6-releaselog \
+	PRESET=$(PRESET_LOG) \
 	ZULU_VERSION_MAJOR=$(ZULU_VERSION_MAJOR) \
 	ZULU_VERSION_MINOR=$(ZULU_VERSION_MINOR) \
 	ZULU_VERSION_BUILDNUM=$(ZULU_VERSION_BUILDNUM) \
@@ -185,7 +199,7 @@ docker-build-z_generals-log:
 	$(DOCKER_BUILD) --cmake --target z_generals
 
 $(TMP_EXE_LOG): docker-build-z_generals-log | $(TMP_DIR)
-	cp "$(SOURCE_EXE)" "$@"
+	cp "$(SOURCE_EXE_LOG)" "$@"
 	@echo
 	@echo "Logging exe ready: $@"
 	@echo "Ship this to the rejoiner VM; DebugLogFile.txt will land next to the .exe."

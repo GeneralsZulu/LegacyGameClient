@@ -18,7 +18,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="$PROJECT_DIR/build/docker"
+
+# One build directory per cmake preset. The presets do not all describe the
+# same compile flags (vc6-releaselog turns RTS_DEBUG_LOGGING and
+# RTS_DEBUG_CRASHING on, vc6 does not), and a cmake cache only remembers the
+# variables a preset actually names: configuring `vc6` on top of a cache left
+# by `vc6-releaselog` silently keeps DEBUG_LOGGING/DEBUG_CRASHING switched on,
+# so `make installer` would ship a logging-enabled "release" binary. Sharing a
+# single dir also means any future preset that does flip a define would thrash
+# every game-engine object back and forth on alternating builds.
+#
+# Keying the directory off the preset name gives each configuration its own
+# warm ninja state: `make installer-dev` (vc6-releaselog) and `make installer`
+# (vc6) can now be run back to back without either one rebuilding.
+PRESET="${PRESET:-vc6}"
+BUILD_SUBDIR="build/docker-$PRESET"
+BUILD_DIR="$PROJECT_DIR/$BUILD_SUBDIR"
 
 # Colors for output
 RED='\033[0;31m'
@@ -134,7 +149,7 @@ fix_compile_commands() {
         # Only run if compile_commands.json exists in the build dir
         if [[ -f "$BUILD_DIR/compile_commands.json" ]]; then
             print_info "Fixing compile_commands.json for host environment..."
-            python3 "$fix_script" || print_warning "Failed to fix compile_commands.json"
+            python3 "$fix_script" "$BUILD_DIR" || print_warning "Failed to fix compile_commands.json"
         fi
     fi
 }
@@ -150,6 +165,7 @@ run_build() {
     fi
 
     print_info "Starting build..."
+    print_info "Preset: $PRESET (build dir: $BUILD_SUBDIR)"
     if [[ -n "$target" ]]; then
         print_info "Target: $target"
     fi
@@ -186,7 +202,8 @@ run_build() {
         -e ZULU_VERSION_BUILDNUM="${ZULU_VERSION_BUILDNUM:-}" \
         -e ZULU_BUILD_VARIANT="${ZULU_BUILD_VARIANT:-}" \
         -e ZULU_DISCORD_WEBHOOK_URL="${ZULU_DISCORD_WEBHOOK_URL:-}" \
-        ${PRESET:+-e PRESET="$PRESET"} \
+        -e PRESET="$PRESET" \
+        -e BUILD_SUBDIR="$BUILD_SUBDIR" \
         -v "$PROJECT_DIR:/build/cnc" \
         --rm \
         $docker_flags \
