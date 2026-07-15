@@ -206,6 +206,10 @@ static const FieldParse TheAIFieldParseTable[] =
  	{ "TacticalAIChinaOverlordPropagandaWeight",	INI::parseInt,nullptr,	offsetof( TAiData, m_taiChinaOverlordPropagandaWeight ) },
  	{ "TacticalAIChinaOverlordCashReserve",			INI::parseInt,nullptr,	offsetof( TAiData, m_taiChinaOverlordCashReserve ) },
 
+	// TacticalAI USA Missile Defender laser lock.
+ 	{ "TacticalAIUsaLaserLockIntervalFrames",	INI::parseInt,nullptr,	offsetof( TAiData, m_taiUsaLaserLockIntervalFrames ) },
+ 	{ "TacticalAIUsaLaserLockMaxPerSweep",		INI::parseInt,nullptr,	offsetof( TAiData, m_taiUsaLaserLockMaxPerSweep ) },
+
 	{ nullptr,					nullptr,						nullptr,						0 }
 
 };
@@ -972,7 +976,12 @@ m_taiChinaOverlordGattlingWeight(75),
 m_taiChinaOverlordPropagandaWeight(25),
 // Same idea as the drone reserve: Overlord upgrades come out of surplus only.
 // This is the knob to tune if the AI upgrades too eagerly or too rarely.
-m_taiChinaOverlordCashReserve(1500)
+m_taiChinaOverlordCashReserve(1500),
+// Missile Defender laser lock: look once a second (it is reactive -- it can only fire at a
+// vehicle the Missile Defender is ALREADY shooting), and start at most a handful of locks per
+// look so a big engagement spreads its locks over a couple of seconds rather than all at once.
+m_taiUsaLaserLockIntervalFrames(15),
+m_taiUsaLaserLockMaxPerSweep(4)
 {
 }
 

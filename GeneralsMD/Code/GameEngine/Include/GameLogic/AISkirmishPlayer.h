@@ -123,6 +123,9 @@ protected:
 	// each carrier vehicle that doesn't have one yet (USA drones, China Overlord
 	// gattling/propaganda). Driven by the faction table at the top of AISkirmishPlayer.cpp.
 	void buyObjectUpgrades();
+	// TacticalAI USA only: fire the Missile Defender's free Laser Lock ability on the vehicle a
+	// Missile Defender is already attacking, exactly as a human would click it.
+	void laserLockMissileDefenders();
 
 protected:
 	Int m_curFrontBaseDefense; // First is 0.
@@ -141,6 +144,9 @@ protected:
 
 	// TacticalAI per-object upgrade purchasing (buyObjectUpgrades).
 	UnsignedInt m_nextUpgradeSweepFrame;
+
+	// TacticalAI USA Missile Defender laser lock (laserLockMissileDefenders).
+	UnsignedInt m_nextLaserLockSweepFrame;
 
 	// Beacon directive ("!attack" prefix in an ally beacon's caption).
 	ObjectID    m_directiveBeaconID;
