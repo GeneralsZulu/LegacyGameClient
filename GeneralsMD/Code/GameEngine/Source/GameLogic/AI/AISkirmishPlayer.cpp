@@ -29,6 +29,7 @@
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
 
+#include "Common/ActionManager.h"
 #include "Common/GameMemory.h"
 #include "Common/GlobalData.h"
 #include "Common/Player.h"
@@ -55,9 +56,12 @@
 #include "GameLogic/Module/DozerAIUpdate.h"
 #include "GameLogic/Module/RebuildHoleBehavior.h"
 #include "GameLogic/Module/UpdateModule.h"
+#include "GameLogic/Locomotor.h"
 #include "GameLogic/PartitionManager.h"
 #include "GameLogic/ScriptEngine.h"
 #include "GameLogic/Module/ProductionUpdate.h"
+#include "GameLogic/Module/SpecialAbilityUpdate.h"
+#include "GameClient/ControlBar.h"
 #include "GameClient/TerrainVisual.h"
 #include "GameClient/Drawable.h"
 #include "GameClient/InGameUI.h"
@@ -84,6 +88,7 @@ m_frameToCheckEnemy(0),
 m_currentEnemy(nullptr),
 m_nextIdleSweepFrame(0),
 m_nextUpgradeSweepFrame(0),
+m_nextLaserLockSweepFrame(0),
 m_directiveBeaconID(INVALID_ID),
 m_nextDirectiveScanFrame(0),
 m_nextDirectiveAnnounceFrame(0),
@@ -1028,7 +1033,9 @@ void AISkirmishPlayer::update()
 	processDistressSignal();
 	commitIdleArmy();
 	buyObjectUpgrades();
+	laserLockMissileDefenders();
 }
+
 
 //----------------------------------------------------------------------------------------------------------
 // TacticalAI per-object upgrade purchasing.
@@ -1299,6 +1306,238 @@ void AISkirmishPlayer::buyObjectUpgrades()
 
 				if (pu->queueUpgrade( pick->upgrade ))
 					++purchases;
+			}
+		}
+	}
+}
+
+//----------------------------------------------------------------------------------------------------------
+// TacticalAI USA Missile Defender laser lock.
+//
+// SPECIAL_MISSILE_DEFENDER_LASER_GUIDED_MISSILES ("Laser Lock") is a free SpecialAbility: no
+// upgrade, no science, no cost, no cooldown, available from frame 0. It locks the Missile
+// Defender to its SECONDARY weapon, which does the same 40 damage but fires every 500ms instead
+// of every 1000ms and deals ARMOR_PIERCING instead of INFANTRY_MISSILE damage. That is 2x DPS
+// against tanks and 4x against light/wheeled vehicles (which resist INFANTRY_MISSILE at 50%),
+// for a one-time ~1000ms preparation. A human USA player clicks it constantly; the stock AI
+// never clicks it at all, because nothing in the AI or in SkirmishScripts.scb issues it.
+//
+// This sweep issues exactly the command a human would click, and nothing more:
+//   - it never picks a target of its own. The target is whatever vehicle the Missile Defender
+//     is ALREADY shooting (AIUpdateInterface::getCurrentVictim), so no unit is pulled off its
+//     team's orders to go hunt something, and there is no randomness to draw from the logic RNG.
+//   - it goes through the object's own CommandSet to find the button (see below), so it can
+//     only ever fire an ability the object genuinely has on its command bar.
+//
+// KNOWN AND ACCEPTED: a Missile Defender riding inside a Humvee cannot laser lock. TransportContain
+// ::onContaining sets DISABLED_HELD on its riders, and Object::doSpecialPowerAtObject early-returns
+// on isDisabled(), so the command is silently dropped -- for a human exactly as for the AI. Since
+// the TacticalAI's Hard USA waves are Humvee + Missile Defenders, many Missile Defenders are
+// passengers much of the time and will simply never lock. That is expected: no dismount logic here.
+// The isDisabled() skip below is what keeps us from spamming commands the engine would drop.
+//----------------------------------------------------------------------------------------------------------
+
+// Find the CommandButton on this object's own CommandSet that fires the given special power.
+//
+// THE RULE: the AI only does what a human could actually click, i.e. what is present in the
+// object's CommandSet. Matching on the special power TYPE rather than on a button NAME is
+// deliberate and load-bearing: CommandButton.ini defines
+// AirF_Command_AmericaMissileDefenderLaserGuidedMissiles, but that button is in NO CommandSet --
+// the Air Force and SuperWeapon Missile Defenders both reference the base
+// Command_AmericaMissileDefenderLaserGuidedMissiles. Name-matching would happen to work today and
+// would silently rot the first time a sub-general got its own button. Type-matching is
+// sub-general-proof, and it also guarantees the button is a GUI_COMMAND_SPECIAL_POWER, which is
+// the branch of Object::doCommandButtonAtObject we intend to hit.
+static const CommandButton *findSpecialPowerCommandButton( const Object *obj, SpecialPowerType type )
+{
+	if (!TheControlBar) return nullptr;
+
+	const CommandSet *commandSet = TheControlBar->findCommandSet( obj->getCommandSetString() );
+	if (!commandSet) return nullptr;
+
+	Int i;
+	for (i = 0; i < MAX_COMMANDS_PER_SET; ++i)
+	{
+		const CommandButton *button = commandSet->getCommandButton( i );
+		if (!button) continue;
+		if (button->getCommandType() != GUI_COMMAND_SPECIAL_POWER) continue;
+
+		const SpecialPowerTemplate *spTemplate = button->getSpecialPowerTemplate();
+		if (!spTemplate) continue;
+		if (spTemplate->getSpecialPowerType() != type) continue;
+
+		return button;
+	}
+
+	return nullptr;
+}
+
+// Should the sweep DECLINE to laser lock a Missile Defender that is shooting this victim because
+// the victim is a fast fixed-wing jet (Raptor, MiG, Aurora, Stealth)?
+//
+// We lock ground vehicles AND hovering/slow aircraft (Comanche, Chinook, Helix), but NOT jets.
+// In-game measurement showed locking jets is a NET LOSS -- ~3.6% WORSE anti-air -- for two
+// independent reasons, both of which a hovering aircraft escapes:
+//   1) ABORT. The lock has a ~1000ms preparation, and a jet routinely flies out of the ability's
+//      AbilityAbortRange (250) before it completes -- roughly 60% of jet locks never finish. This
+//      is not incidental: EVERY jet locomotor in Locomotor.ini carries MinSpeed=60, i.e. a jet is
+//      physically unable to loiter, while HOVER locomotors (Comanche/Chinook/Helix) have no
+//      MinSpeed and sit still. The very property we key on is the property that causes the abort.
+//   2) LOST AIR BONUS. Both aircraft armors give the primary INFANTRY_MISSILE weapon a +20% air
+//      bonus that the locked ARMOR_PIERCING secondary does not get (40 vs 48 per shot). So even a
+//      jet lock that DOES complete throws that bonus away. Against a Comanche the trade is still a
+//      win -- it loiters, the lock completes, and 48 DPS becomes 80 DPS, a real 1.67x -- so those
+//      stay eligible.
+//
+// DISCRIMINANT: the locomotor APPEARANCE, an INI-derived, deterministic property of the unit's
+// TYPE (Locomotor.ini). Jets/fixed-wing are WINGS, thrust flyers are THRUST, and both must keep
+// moving forward; Comanche/Chinook/Helix are HOVER; ground vehicles are TREADS/WHEELS/HOVER. This
+// is intentionally NOT the unit's momentary speed (getCurLocomotorSpeed), which is jittery and
+// would misfire on a briefly-slow jet, and NOT KINDOF_PRODUCED_AT_HELIPAD (Comanche-only, too
+// narrow). Default is FALSE (lock): if a victim's locomotor cannot be read we err toward locking,
+// which never wrongly skips a ground vehicle. Do NOT "simplify" this back to locking all aircraft.
+static Bool isFastJetVictim( const Object *victim )
+{
+	const AIUpdateInterface *ai = victim->getAIUpdateInterface();
+	if (!ai) return FALSE;
+
+	const Locomotor *loco = ai->getCurLocomotor();
+	if (!loco) return FALSE;
+
+	LocomotorAppearance app = loco->getAppearance();
+	return (app == LOCO_WINGS || app == LOCO_THRUST);
+}
+
+void AISkirmishPlayer::laserLockMissileDefenders()
+{
+	// Gated behind the SLOT_TACTICAL_AI lobby option; vanilla Easy/Medium/Hard/Brutal AIs keep
+	// their classic behavior and never laser lock.
+	if (!isTacticalAI()) return;
+
+	// Everything that could disqualify this player is checked BEFORE the sweep clock is touched.
+	// m_nextLaserLockSweepFrame is xfer'd and CRC'd, so a player that can never laser lock (wrong
+	// faction, feature disabled for this replay, INI kill switch) must fall out of here having
+	// changed no state at all -- otherwise replays recorded before this feature existed would
+	// diverge. Same reason buyObjectUpgrades() does its filtering first.
+
+	// During replay / resume-catchup of a recording made before this feature existed, the original
+	// AI did not laser lock -- issuing the command here would diverge from the recorded simulation.
+	if (TheRecorder && !TheRecorder->isAIFeatureEnabled( RecorderClass::ZULU_AI_FEATURE_MD_LASER_LOCK ))
+		return;
+
+	// BaseSide is "USA" for base USA, Air Force, Laser and SuperWeapon, so this one test covers
+	// every sub-general that fields a Missile Defender, and excludes China/GLA for free.
+	if (m_player->getBaseSide().compareNoCase( "USA" ) != 0) return;
+
+	const TAiData *aiData = TheAI ? TheAI->getAiData() : nullptr;
+	if (!aiData) return;
+
+	Int maxLocks = aiData->m_taiUsaLaserLockMaxPerSweep;
+	if (maxLocks <= 0) return; // INI kill switch: 0 disables the feature.
+
+	// Interval is in logic frames (30 = 1s), so a sub-second reactive rate is expressible;
+	// default is 15 (0.5s). At least 1 frame, since 0 would sweep every frame with no spacing.
+	Int intervalFrames = aiData->m_taiUsaLaserLockIntervalFrames;
+	if (intervalFrames < 1) intervalFrames = 1;
+
+	if (!TheActionManager) return;
+
+	UnsignedInt curFrame = TheGameLogic->getFrame();
+	// Phase the first sweep by player index so the AI players don't all sweep on the same
+	// logic frame (a synchronized spike). getPlayerIndex() is identical on every client, so
+	// this stays deterministic. Only matters until the first sweep; after that the interval
+	// carries the phase forward.
+	if (m_nextLaserLockSweepFrame == 0 && curFrame == 0)
+		m_nextLaserLockSweepFrame = (UnsignedInt)(m_player->getPlayerIndex() % intervalFrames);
+	if (curFrame < m_nextLaserLockSweepFrame) return;
+	m_nextLaserLockSweepFrame = curFrame + intervalFrames;
+
+	Int locks = 0;
+
+	// Walk every team this player owns. Iteration order is deterministic across clients
+	// (linked lists, stable insertion order), same as commitIdleArmy() and buyObjectUpgrades().
+	Player::PlayerTeamList::const_iterator pti;
+	for (pti = m_player->getPlayerTeams()->begin(); pti != m_player->getPlayerTeams()->end(); ++pti)
+	{
+		DLINK_ITERATOR<Team> ti = (*pti)->iterate_TeamInstanceList();
+		for (; !ti.done(); ti.advance())
+		{
+			Team *team = ti.cur();
+			if (!team) continue;
+
+			DLINK_ITERATOR<Object> oi = team->iterate_TeamMemberList();
+			for (; !oi.done(); oi.advance())
+			{
+				if (locks >= maxLocks) return;
+
+				Object *obj = oi.cur();
+				if (!obj) continue;
+				if (obj->isEffectivelyDead()) continue;
+
+				// LOAD-BEARING, not defensive boilerplate: riders in a transport carry DISABLED_HELD,
+				// and doSpecialPowerAtObject() early-returns on isDisabled(). See the note above.
+				if (obj->isDisabled()) continue;
+
+				// Does this object own the ability at all? Asking the object rather than matching a
+				// template name keeps this working for every sub-general's Missile Defender.
+				if (!obj->hasSpecialPower( SPECIAL_MISSILE_DEFENDER_LASER_GUIDED_MISSILES )) continue;
+
+				SpecialAbilityUpdate *ability =
+					obj->findSpecialAbilityUpdate( SPECIAL_MISSILE_DEFENDER_LASER_GUIDED_MISSILES );
+				if (!ability) continue;
+
+				// Already preparing or already locked. This is the anti-thrash check: the ability stays
+				// active from the moment it is initiated, through its ~1000ms preparation, and for as
+				// long as the weapon stays locked, so a Missile Defender pays that preparation once per
+				// target rather than once per sweep.
+				if (ability->isActive()) continue;
+
+				AIUpdateInterface *ai = obj->getAIUpdateInterface();
+				if (!ai) continue;
+
+				// The target is the vehicle this Missile Defender is already shooting -- we never choose
+				// one, so there is nothing to randomize and no unit gets redirected.
+				Object *victim = ai->getCurrentVictim();
+				if (!victim) continue;
+				if (victim->isEffectivelyDead()) continue;
+				if (!victim->isKindOf( KINDOF_VEHICLE )) continue;
+
+				// Lock ground vehicles AND hovering/slow aircraft (Comanche, Chinook, Helix), but skip
+				// fast fixed-wing jets: measured net-negative anti-air because the lock aborts mid-windup
+				// as the jet leaves AbilityAbortRange, and even a completed jet lock loses the primary
+				// weapon's +20% air-armor bonus. See isFastJetVictim() for the full reasoning.
+				if (isFastJetVictim( victim )) continue;
+
+				// Only lock a target that is already inside the ability's own StartAbilityRange. Outside
+				// it, SpecialAbilityUpdate::update() calls approachTarget() -> aiMoveToObject(), which
+				// would walk the Missile Defender out of its team's formation to close the distance.
+				// Mirrors SpecialAbilityUpdate::isWithinStartAbilityRange().
+				Real startRange = ability->getStartAbilityRange();
+				if (startRange < SPECIAL_ABILITY_HUGE_DISTANCE)
+				{
+					const Real UNDERSIZE = PATHFIND_CELL_SIZE_F * 0.25f;
+					Real range = startRange - UNDERSIZE;
+					if (range < 0.0f) range = 0.0f;
+
+					Real distSq = ThePartitionManager->getDistanceSquared( obj, victim, FROM_BOUNDINGSPHERE_2D );
+					if (distSq > range * range) continue;
+				}
+
+				// Could a human actually click this, on this unit, right now?
+				const CommandButton *button =
+					findSpecialPowerCommandButton( obj, SPECIAL_MISSILE_DEFENDER_LASER_GUIDED_MISSILES );
+				if (!button) continue;
+
+				const SpecialPowerTemplate *spTemplate = button->getSpecialPowerTemplate();
+
+				// The same validation the UI runs before it lets the cursor commit: it re-checks that the
+				// power is ready, that the target is not shrouded, and (for this power specifically) that
+				// the target is a KINDOF_VEHICLE the player is at ENEMIES with.
+				if (!TheActionManager->canDoSpecialPowerAtObject( obj, victim, CMD_FROM_AI, spTemplate, button->getOptions() ))
+					continue;
+
+				obj->doCommandButtonAtObject( button, victim, CMD_FROM_AI );
+				++locks;
 			}
 		}
 	}
@@ -2193,13 +2432,14 @@ void AISkirmishPlayer::crc( Xfer *xfer )
 	* Version Info;
 	* 1: Initial version
 	* 2: Added m_nextIdleSweepFrame
-	* 3: Added m_nextUpgradeSweepFrame */
+	* 3: Added m_nextUpgradeSweepFrame
+	* 4: Added m_nextLaserLockSweepFrame */
 // ------------------------------------------------------------------------------------------------
 void AISkirmishPlayer::xfer( Xfer *xfer )
 {
 
 	// version
-	XferVersion currentVersion = 3;
+	XferVersion currentVersion = 4;
 	XferVersion version = currentVersion;
 	xfer->xferVersion( &version, currentVersion );
 
@@ -2238,6 +2478,11 @@ void AISkirmishPlayer::xfer( Xfer *xfer )
 	if (version >= 3)
 	{
 		xfer->xferUnsignedInt( &m_nextUpgradeSweepFrame );
+	}
+
+	if (version >= 4)
+	{
+		xfer->xferUnsignedInt( &m_nextLaserLockSweepFrame );
 	}
 
 }

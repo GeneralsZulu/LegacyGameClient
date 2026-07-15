@@ -200,6 +200,12 @@ public:
 	Object* findSpecialObjectWithProducerID( const Object *target );
 	SpecialPowerType getSpecialPowerType() const;
 
+	// The INI StartAbilityRange for this ability. Beyond it, initiating the ability makes the
+	// object approachTarget() (i.e. walk to the target) before it can start. AI code that wants
+	// to trigger an ability WITHOUT the object leaving its position must check against this.
+	// SPECIAL_ABILITY_HUGE_DISTANCE (the default) means "no range requirement".
+	Real getStartAbilityRange() const { return getSpecialAbilityUpdateModuleData()->m_startAbilityRange; }
+
 protected:
 	void onExit( Bool cleanup );
 

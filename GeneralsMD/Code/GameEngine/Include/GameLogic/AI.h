@@ -259,6 +259,13 @@ public:
 	Int m_taiChinaOverlordPropagandaWeight;	// Relative odds of putting a Propaganda Tower (500) on a TAI China Overlord.
 	Int m_taiChinaOverlordCashReserve;		// Cash that must remain AFTER buying an Overlord upgrade, so it never starves unit/base production.
 
+	// TacticalAI USA Missile Defender laser lock (AISkirmishPlayer::laserLockMissileDefenders).
+	// The ability is free and has no cooldown, so the only knobs are how often the AI looks and
+	// how many Missile Defenders it may lock per look. Setting MaxPerSweep to 0 disables the
+	// feature outright; vanilla (non-TacticalAI) players never run this sweep regardless.
+	Int m_taiUsaLaserLockIntervalFrames;	// Logic frames between laser-lock sweeps (30 = 1s). Reactive, so tighter than the 2s upgrade sweep; default 15 (0.5s). In frames, not seconds, so sub-second rates are expressible.
+	Int m_taiUsaLaserLockMaxPerSweep;		// Max Missile Defenders that may start a laser lock in one sweep (0 = feature off).
+
 	AISideInfo *m_sideInfo;
 
 	AISideBuildList *m_sideBuildLists;
