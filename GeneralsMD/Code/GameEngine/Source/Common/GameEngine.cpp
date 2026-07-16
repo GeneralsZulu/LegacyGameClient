@@ -29,7 +29,9 @@
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
 #include "Common/ActionManager.h"
+#include "Common/AIBridge/AIBridge.h"
 #include "Common/AudioAffect.h"
+#include "Common/HeadlessSkirmish.h"
 #include "Common/BuildAssistant.h"
 #include "Common/CRCDebug.h"
 #include "Common/FramePacer.h"
@@ -307,6 +309,12 @@ Bool GameEngine::isTimeFrozen()
 {
 	// TheSuperHackers @fix The time can no longer be frozen in Network games. It would disconnect the player.
 	if (TheNetwork != nullptr)
+		return false;
+
+	// Headless has no camera or view to wait on. The start-of-game camera pan
+	// (TheTacticalView time-freeze) would otherwise never complete without a
+	// render loop, freezing logic forever. So never freeze time when headless.
+	if (TheGlobalData != nullptr && TheGlobalData->m_headless)
 		return false;
 
 	if (TheTacticalView != nullptr)
@@ -657,6 +665,7 @@ void GameEngine::init()
 		initSubsystem(TheCrateSystem,"TheCrateSystem", MSGNEW("GameEngineSubsystem") CrateSystem(), &xferCRC, "Data\\INI\\Default\\Crate", "Data\\INI\\Crate");
 		initSubsystem(ThePlayerList,"ThePlayerList", MSGNEW("GameEngineSubsystem") PlayerList(), nullptr);
 		initSubsystem(TheRecorder,"TheRecorder", createRecorder(), nullptr);
+		initSubsystem(TheAIBridge,"TheAIBridge", createAIBridge(), nullptr);
 		initSubsystem(TheRadar,"TheRadar", createRadar(TheGlobalData->m_headless), nullptr);
 		initSubsystem(TheVictoryConditions,"TheVictoryConditions", createVictoryConditions(), nullptr);
 
@@ -781,6 +790,12 @@ void GameEngine::init()
 				InitRandom(0);
 			}
 		}
+
+		// Headless AI-vs-AI skirmish runner: if -skirmish was passed, build
+		// TheSkirmishGameInfo from the -slot specs and fire MSG_NEW_GAME here,
+		// bypassing the shell (mirrors the -file command-line-map path above).
+		// This clears m_shellMapOn so the shell map block below is skipped.
+		HeadlessSkirmish_startIfRequested();
 
 		//
 		if (TheMapCache && TheGlobalData->m_shellMapOn)
@@ -999,6 +1014,17 @@ void GameEngine::update()
 			else
 				TheGameClient->UPDATE();
 			TheMessageStream->propagateMessages();
+
+			// AIBridge tick: drains any pending external-bot actions onto
+			// TheCommandList (so they're picked up for network broadcast below
+			// in MP and for replay recording inside GameLogic update), then
+			// sends an observation snapshot to any connected bot. Placed after
+			// propagateMessages and before TheNetwork->UPDATE so bot-minted
+			// commands ride the same path as human input.
+			if (TheAIBridge != nullptr)
+			{
+				TheAIBridge->tick();
+			}
 
 			if (TheNetwork != nullptr)
 			{

@@ -1263,7 +1263,11 @@ void GameLogic::startNewGame( Bool loadingSaveGame )
 	//****************************//
 
 	// Get the m_loadScreen for this kind of game
-	if(!m_loadScreen && !(TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_SIMULATION_PLAYBACK))
+	// The load screen is pure UI; updateLoadProgress()/deleteLoadScreen() both
+	// null-check it, so skipping it in headless mode is safe and avoids
+	// exercising the (never-headless-tested) MultiPlayerLoadScreen path when the
+	// headless skirmish runner starts a live game.
+	if(!m_loadScreen && !TheGlobalData->m_headless && !(TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_SIMULATION_PLAYBACK))
 	{
 		m_loadScreen = getLoadScreen( loadingSaveGame );
 		if(m_loadScreen)

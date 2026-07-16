@@ -61,6 +61,7 @@
 #include "GameClient/TerrainVisual.h"
 #include "GameClient/Drawable.h"
 #include "GameClient/InGameUI.h"
+#include "Common/AIBridge/AIBridge.h"
 
 
 #define USE_DOZER 1
@@ -1019,6 +1020,20 @@ void AISkirmishPlayer::doTeamBuilding()
 void AISkirmishPlayer::update()
 {
 	AIPlayer::update();
+
+	// When this player is driven by the external AIBridge, suppress the scripted
+	// army micro so bridge-issued orders (typically ~1s cadence) are not
+	// countermanded every frame. Economy is preserved: AIPlayer::update() above
+	// still runs base building, production, and team creation, and object-upgrade
+	// buying still runs below. Only the TacticalAI combat directives are skipped.
+	// (No-op for ordinary AI slots: AIBridge_isControllingPlayer is FALSE unless
+	// this exact player index was set via -aibridgeslot.)
+	if (m_player && AIBridge_isControllingPlayer(m_player->getPlayerIndex()))
+	{
+		buyObjectUpgrades();
+		return;
+	}
+
 	processBeaconDirective();
 	// Surrender directive introduced in 1.3.0; skip for older replays so they
 	// stay deterministic (see getReplayEpoch()).

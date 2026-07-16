@@ -34,6 +34,7 @@
 #include "Common/GameEngine.h"
 #include "Common/GameUtility.h"
 #include "Common/GlobalData.h"
+#include "Common/HeadlessSkirmish.h"
 #include "Common/KindOf.h"
 #include "Common/NameKeyGenerator.h"
 #include "Common/PlayerList.h"
@@ -230,6 +231,14 @@ void VictoryConditions::update()
 					fprintf(stdout, "[HEADLESS RESULT] outcome=draw end_frame=%d\n", m_endFrame);
 				}
 				fflush(stdout);
+
+				// Headless AI-vs-AI skirmish runner: the match is decided, so
+				// quit the process. setQuitting only sets a flag; the current
+				// logic frame finishes and GameEngine::execute()'s loop exits.
+				// Gated on isActive() so headless replay (which runs its own
+				// loop) is unaffected.
+				if (HeadlessSkirmish_isActive() && TheGameEngine != nullptr)
+					TheGameEngine->setQuitting(TRUE);
 			}
 		}
 	}

@@ -166,7 +166,10 @@ void PlayerList::newGame()
 
 	if (!setLocal)
 	{
-		DEBUG_ASSERTCRASH(TheNetwork, ("*** Map has no human player... picking first nonneutral player for control"));
+		// A headless AI-vs-AI skirmish legitimately has no human slot; the
+		// first non-neutral player is promoted to the local (synthetic) human
+		// just below. Don't assert in that case.
+		DEBUG_ASSERTCRASH(TheNetwork || (TheGlobalData && TheGlobalData->m_headless), ("*** Map has no human player... picking first nonneutral player for control"));
 		for( i = 0; i < TheSidesList->getNumSides(); i++)
 		{
 			Player* p = getNthPlayer(i);

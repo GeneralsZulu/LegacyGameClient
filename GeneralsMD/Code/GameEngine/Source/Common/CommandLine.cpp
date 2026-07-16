@@ -27,7 +27,9 @@
 
 #include "Common/ArchiveFileSystem.h"
 #include "Common/CommandLine.h"
+#include "Common/AIBridge/AIBridge.h"
 #include "Common/CRCDebug.h"
+#include "Common/HeadlessSkirmish.h"
 #include "Common/LocalFileSystem.h"
 #include "Common/Recorder.h"
 #include "Common/ReplaySimulation.h"
@@ -401,7 +403,11 @@ Int parseNoShadows(char *args[], int)
 
 Int parseMapName(char *args[], int num)
 {
-	if (num == 2)
+	// TheSuperHackers @fix Accept -map anywhere on the command line, not only as
+	// the final argument (was `num == 2`), so the headless skirmish runner can
+	// order its flags freely. Returns 1; the map-name token that follows matches
+	// no flag and is skipped by the parse loop.
+	if (num >= 2)
 	{
 		TheWritableGlobalData->m_mapName.set( args[ 1 ] );
 		ConvertShortMapPathToLongMapPath(TheWritableGlobalData->m_mapName);
@@ -866,6 +872,84 @@ Int parseFile(char *args[], int num)
 	return 2;
 }
 
+#endif // defined(RTS_DEBUG)
+// TheSuperHackers @feature The LLM-plays parsers below (headless skirmish + AI
+// bridge) live OUTSIDE the RTS_DEBUG block above so they compile into
+// release/releaselog builds. The debug block is reopened after them.
+
+// TheSuperHackers @feature Headless AI-vs-AI skirmish runner. Enables starting
+// a fresh skirmish match from the command line with no GUI and no human slot,
+// for headless batch/CI runs and self-play data generation. See
+// Common/HeadlessSkirmish.h for the full flag set. -map and -seed are reused.
+Int parseSkirmish(char *args[], int num)
+{
+	HeadlessSkirmish_enable();
+	return 1;
+}
+
+// One AI slot; repeat once per player. args[1] is a comma-separated spec of
+// key=value pairs (faction/difficulty/team/color). See HeadlessSkirmish.h.
+Int parseSkirmishSlot(char *args[], int num)
+{
+	if (num > 1)
+	{
+		HeadlessSkirmish_addSlotSpec(args[1]);
+		return 2;
+	}
+	return 1;
+}
+
+// Logic-frame pacing target for the headless sim; higher = faster.
+Int parseSimFPS(char *args[], int num)
+{
+	if (num > 1)
+	{
+		HeadlessSkirmish_setSimFPS(atoi(args[1]));
+		return 2;
+	}
+	return 1;
+}
+
+// TheSuperHackers @feature External AI bridge: opens a localhost TCP listener
+// that streams per-frame game state to a bot process and accepts player-style
+// commands back. Bot commands flow through TheCommandList like human input, so
+// they network and replay-record with no special handling. See
+// Common/AIBridge/AIBridge.h.
+Int parseAIBridgePort(char *args[], int num)
+{
+	if (num > 1)
+	{
+		Int port = atoi(args[1]);
+		if (port <= 0 || port > 65535)
+		{
+			DEBUG_LOG(("AIBridge: invalid port '%s'", args[1]));
+			return 2;
+		}
+		AIBridge_setListenPort(port);
+		return 2;
+	}
+	return 1;
+}
+
+// Slot index whose playerIndex stamps bot-issued commands. Without this, the
+// bridge runs in observation-only mode (state out, no actions in).
+Int parseAIBridgeSlot(char *args[], int num)
+{
+	if (num > 1)
+	{
+		Int slot = atoi(args[1]);
+		if (slot < 0 || slot > 7)
+		{
+			DEBUG_LOG(("AIBridge: invalid slot '%s' (must be 0..7)", args[1]));
+			return 2;
+		}
+		AIBridge_setBotSlot(slot);
+		return 2;
+	}
+	return 1;
+}
+
+#if defined(RTS_DEBUG)
 
 Int parsePreloadEverything( char *args[], int num )
 {
@@ -1428,9 +1512,21 @@ static CommandLineParam paramsForEngineInit[] =
 	// TheSuperHackers @feature xezon 03/08/2025 Force full viewport for 'Control Bar Pro' Addons like GenTool did it.
 	{ "-forcefullviewport", parseFullViewport },
 
+	// TheSuperHackers @feature LLM-plays: headless AI-vs-AI skirmish runner and
+	// external AI bridge. These MUST be available in release / releaselog builds
+	// (the runner is validated there), so they live OUTSIDE the RTS_DEBUG block
+	// below. -map is relocated out of the debug block as well, since the headless
+	// runner needs to select a map in a non-debug build.
+	{ "-map", parseMapName },
+	{ "-seed", parseSeed },
+	{ "-skirmish", parseSkirmish },
+	{ "-slot", parseSkirmishSlot },
+	{ "-simfps", parseSimFPS },
+	{ "-aibridgeport", parseAIBridgePort },
+	{ "-aibridgeslot", parseAIBridgeSlot },
+
 #if defined(RTS_DEBUG)
 	{ "-noaudio", parseNoAudio },
-	{ "-map", parseMapName },
 	{ "-nomusic", parseNoMusic },
 	{ "-novideo", parseNoVideo },
 	{ "-noLogOrCrash", parseNoLogOrCrash },
@@ -1541,7 +1637,6 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-shellmap", parseShellMap },
 	{ "-winCursors", parseWinCursors },
 	{ "-constantDebug", parseConstantDebug },
-	{ "-seed", parseSeed },
 	{ "-noagpfix", parseIncrAGPBuf },
 	{ "-noFPSLimit", parseNoFPSLimit },
 	{ "-dumpAssetUsage", parseDumpAssetUsage },
