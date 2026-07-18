@@ -28,11 +28,16 @@
 #include "Common/ThingTemplate.h"
 #include "Common/Money.h"
 #include "Common/Energy.h"
+#include "Common/SpecialPower.h"
+#include "Common/Upgrade.h"
+#include "Common/Science.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Object.h"
 #include "GameLogic/ObjectIter.h"
 #include "GameLogic/PartitionManager.h"
 #include "GameLogic/Module/BodyModule.h"
+#include "GameLogic/Module/BehaviorModule.h"
+#include "GameLogic/Module/SpecialPowerModule.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 
 // =====================================================================
@@ -83,6 +88,17 @@
 //     f32 pos_x, pos_y, pos_z
 //     f32 angle
 //     f32 hp, max_hp
+//   // ---- schema v2+ trailing section: bot's own special-power readiness ----
+//   u16 num_special_powers
+//   for each ready-capable special power module the bot owns:
+//     u32 source_object_id   // pass this back as sourceID when firing
+//     str power_template_name
+//     u8  is_ready           // 1/0
+//     u8  percent_ready      // 0..100
+//   // ---- schema v3+ trailing section: bot's completed upgrades ----
+//   u16 num_completed_upgrades
+//   for each completed upgrade the bot owns:
+//     str upgrade_name
 //
 // ACTION_BATCH payload:
 //   u32 frame_observed
@@ -100,12 +116,21 @@
 //                                   (selection must contain a dozer)
 //       6 QUEUE_UNIT_CREATE:        str template_name
 //                                   (selection must contain a factory)
+//       7 SPECIAL_POWER_AT_LOCATION: str power_name; u32 source_object_id;
+//                                    f32 x, y, z (no unit selection)
+//       8 SPECIAL_POWER_AT_OBJECT:  str power_name; u32 source_object_id;
+//                                    u32 target_object_id (no unit selection)
+//       9 QUEUE_UPGRADE:            str upgrade_name; u32 source_object_id
+//                                    (selection = the producing building)
+//      10 PURCHASE_SCIENCE:         str science_name (player-level; no selection)
 // =====================================================================
 
 namespace
 {
 	const UnsignedInt   AIBRIDGE_MAGIC          = 0x414E4547u; // 'GENA' LE
-	const UnsignedShort AIBRIDGE_SCHEMA_VERSION = 1;
+	// v2 appends a trailing special-power readiness section to OBSERVATION;
+	// v3 appends a second trailing section listing the bot's completed upgrades.
+	const UnsignedShort AIBRIDGE_SCHEMA_VERSION = 3;
 
 	enum
 	{
@@ -123,7 +148,11 @@ namespace
 		ACT_SELECT_AND_ATTACK_TARGET = 3,
 		ACT_SELECT_AND_STOP          = 4,
 		ACT_DOZER_CONSTRUCT          = 5,
-		ACT_QUEUE_UNIT_CREATE        = 6
+		ACT_QUEUE_UNIT_CREATE        = 6,
+		ACT_SPECIAL_POWER_AT_LOCATION = 7,
+		ACT_SPECIAL_POWER_AT_OBJECT   = 8,
+		ACT_QUEUE_UPGRADE             = 9,
+		ACT_PURCHASE_SCIENCE          = 10
 	};
 
 	const UnsignedInt OBJ_FLAG_BUILDING = 0x01;
@@ -789,6 +818,82 @@ namespace
 		p_u8[1] = (UnsignedByte)((coll.count >> 8) & 0xFF);
 		p_u8[2] = (UnsignedByte)((coll.count >> 16) & 0xFF);
 		p_u8[3] = (UnsignedByte)((coll.count >> 24) & 0xFF);
+
+		// ---- schema v2 trailing section: bot's own special-power readiness ----
+		// Walk the bot player's own objects and enumerate every special power
+		// module they carry, reporting owner id + power name + readiness so the
+		// bot knows WHEN (not just how) to fire. Strictly at the end of the
+		// payload so pre-v2 decoders that stop after the object list are safe.
+		Int spCountPos = w.size();
+		w.writeU16(0);
+		UnsignedShort spCount = 0;
+		if (bot != nullptr && ThePartitionManager != nullptr)
+		{
+			SimpleObjectIterator* spIter = ThePartitionManager->iterateAllObjects(nullptr);
+			if (spIter != nullptr)
+			{
+				Object* o;
+				for (o = spIter->first(); o != nullptr; o = spIter->next())
+				{
+					if (o == nullptr || o->isEffectivelyDead()) continue;
+					if (o->getControllingPlayer() != bot) continue;
+
+					BehaviorModule** b;
+					for (b = o->getBehaviorModules(); b && *b; ++b)
+					{
+						SpecialPowerModuleInterface* sp = (*b)->getSpecialPower();
+						if (sp == nullptr) continue;
+						const SpecialPowerTemplate* spt = sp->getSpecialPowerTemplate();
+						if (spt == nullptr) continue;
+
+						Real pct = sp->getPercentReady();       // 1.0 = ready
+						Int pct100 = (Int)(pct * 100.0f + 0.5f);
+						if (pct100 < 0) pct100 = 0;
+						if (pct100 > 100) pct100 = 100;
+
+						w.writeU32((UnsignedInt)o->getID());
+						w.writeStr(spt->getName().str());
+						w.writeU8((UnsignedByte)(sp->isReady() ? 1 : 0));
+						w.writeU8((UnsignedByte)pct100);
+						++spCount;
+					}
+				}
+				deleteInstance(spIter);
+			}
+		}
+
+		// Patch the special-power count.
+		UnsignedByte* sp_u8 = const_cast<UnsignedByte*>(w.data()) + spCountPos;
+		sp_u8[0] = (UnsignedByte)(spCount & 0xFF);
+		sp_u8[1] = (UnsignedByte)((spCount >> 8) & 0xFF);
+
+		// ---- schema v3 trailing section: bot's completed upgrades ----
+		// Lets the bot know which upgrades it already owns so it doesn't waste
+		// money re-researching them. Walk the global upgrade template list and
+		// report the names the bot player has fully completed. Strictly after the
+		// readiness section so older decoders that stop earlier stay valid.
+		Int upCountPos = w.size();
+		w.writeU16(0);
+		UnsignedShort upCount = 0;
+		if (bot != nullptr && TheUpgradeCenter != nullptr)
+		{
+			const UpgradeTemplate* upg;
+			for (upg = TheUpgradeCenter->firstUpgradeTemplate();
+				 upg != nullptr;
+				 upg = upg->friend_getNext())
+			{
+				if (bot->hasUpgradeComplete(upg))
+				{
+					w.writeStr(upg->getUpgradeName().str());
+					++upCount;
+				}
+			}
+		}
+
+		// Patch the completed-upgrade count.
+		UnsignedByte* up_u8 = const_cast<UnsignedByte*>(w.data()) + upCountPos;
+		up_u8[0] = (UnsignedByte)(upCount & 0xFF);
+		up_u8[1] = (UnsignedByte)((upCount >> 8) & 0xFF);
 	}
 }
 
@@ -908,6 +1013,106 @@ namespace
 		TheCommandList->appendMessage(m);
 	}
 
+	// Fire a special power aimed at a ground location. No unit selection is
+	// needed: the source object is explicit (arg5), and GameLogicDispatch builds
+	// a one-object AIGroup from it. Args must match GameLogicDispatch.cpp:757.
+	void emitSpecialPowerAtLocation(Int botSlot, ByteReader& r, UnsignedShort /*numUnits*/)
+	{
+		AsciiString name = r.readStr();
+		UnsignedInt sourceID = r.readU32();
+		Coord3D loc;
+		loc.x = r.readF32();
+		loc.y = r.readF32();
+		loc.z = r.readF32();
+
+		const SpecialPowerTemplate* spt = (TheSpecialPowerStore != nullptr)
+			? TheSpecialPowerStore->findSpecialPowerTemplate(name) : nullptr;
+		if (spt == nullptr)
+		{
+			DEBUG_LOG(("AIBridge: SPECIAL_POWER_AT_LOCATION unknown power '%s'", name.str()));
+			return;
+		}
+
+		GameMessage* m = newBotMessage(GameMessage::MSG_DO_SPECIAL_POWER_AT_LOCATION, botSlot);
+		m->appendIntegerArgument((Int)spt->getID());   // arg0 specialPowerID
+		m->appendLocationArgument(loc);                 // arg1 targetCoord
+		m->appendRealArgument(0.0f);                    // arg2 angle
+		m->appendObjectIDArgument(INVALID_ID);          // arg3 objectInWay
+		m->appendIntegerArgument(0);                    // arg4 options
+		m->appendObjectIDArgument((ObjectID)sourceID);  // arg5 sourceID
+		TheCommandList->appendMessage(m);
+	}
+
+	// Fire a special power aimed at a target object. Args must match
+	// GameLogicDispatch.cpp:814.
+	void emitSpecialPowerAtObject(Int botSlot, ByteReader& r, UnsignedShort /*numUnits*/)
+	{
+		AsciiString name = r.readStr();
+		UnsignedInt sourceID = r.readU32();
+		UnsignedInt targetID = r.readU32();
+
+		const SpecialPowerTemplate* spt = (TheSpecialPowerStore != nullptr)
+			? TheSpecialPowerStore->findSpecialPowerTemplate(name) : nullptr;
+		if (spt == nullptr)
+		{
+			DEBUG_LOG(("AIBridge: SPECIAL_POWER_AT_OBJECT unknown power '%s'", name.str()));
+			return;
+		}
+
+		GameMessage* m = newBotMessage(GameMessage::MSG_DO_SPECIAL_POWER_AT_OBJECT, botSlot);
+		m->appendIntegerArgument((Int)spt->getID());    // arg0 specialPowerID
+		m->appendObjectIDArgument((ObjectID)targetID);  // arg1 targetID
+		m->appendIntegerArgument(0);                    // arg2 options
+		m->appendObjectIDArgument((ObjectID)sourceID);  // arg3 sourceID
+		TheCommandList->appendMessage(m);
+	}
+
+	// Queue an upgrade on the selected producing building. The dispatcher reads
+	// the upgrade STABLE id from arg1 (arg0 is the source, for logging only) and
+	// applies it to the currently-selected group, so we select first. Args must
+	// match GameLogicDispatch.cpp:1405.
+	void emitQueueUpgrade(Int botSlot, ByteReader& r, UnsignedShort numUnits)
+	{
+		emitSelectionMessage(botSlot, r, numUnits);
+
+		AsciiString name = r.readStr();
+		UnsignedInt sourceID = r.readU32();
+
+		const UpgradeTemplate* upg = (TheUpgradeCenter != nullptr)
+			? TheUpgradeCenter->findUpgrade(name) : nullptr;
+		if (upg == nullptr)
+		{
+			DEBUG_LOG(("AIBridge: QUEUE_UPGRADE unknown upgrade '%s'", name.str()));
+			return;
+		}
+		Int stableId = TheUpgradeCenter->getStableUpgradeId(upg);
+
+		GameMessage* m = newBotMessage(GameMessage::MSG_QUEUE_UPGRADE, botSlot);
+		m->appendObjectIDArgument((ObjectID)sourceID);  // arg0 source (logging)
+		m->appendIntegerArgument(stableId);             // arg1 stable upgrade id
+		TheCommandList->appendMessage(m);
+	}
+
+	// Purchase a player-level science (general's promotion power). No unit
+	// selection: the dispatcher acts on the message-issuing player. Args must
+	// match GameLogicDispatch.cpp:2173.
+	void emitPurchaseScience(Int botSlot, ByteReader& r, UnsignedShort /*numUnits*/)
+	{
+		AsciiString name = r.readStr();
+
+		ScienceType science = (TheScienceStore != nullptr)
+			? TheScienceStore->getScienceFromInternalName(name) : SCIENCE_INVALID;
+		if (science == SCIENCE_INVALID)
+		{
+			DEBUG_LOG(("AIBridge: PURCHASE_SCIENCE unknown science '%s'", name.str()));
+			return;
+		}
+
+		GameMessage* m = newBotMessage(GameMessage::MSG_PURCHASE_SCIENCE, botSlot);
+		m->appendIntegerArgument((Int)science);         // arg0 ScienceType
+		TheCommandList->appendMessage(m);
+	}
+
 	void parseActionBatch(Int botSlot, const UnsignedByte* payload, Int size)
 	{
 		ByteReader r(payload, size);
@@ -949,6 +1154,18 @@ namespace
 				case ACT_QUEUE_UNIT_CREATE:
 					emitQueueUnitCreate(botSlot, r, numUnits);
 					break;
+				case ACT_SPECIAL_POWER_AT_LOCATION:
+					emitSpecialPowerAtLocation(botSlot, r, numUnits);
+					break;
+				case ACT_SPECIAL_POWER_AT_OBJECT:
+					emitSpecialPowerAtObject(botSlot, r, numUnits);
+					break;
+				case ACT_QUEUE_UPGRADE:
+					emitQueueUpgrade(botSlot, r, numUnits);
+					break;
+				case ACT_PURCHASE_SCIENCE:
+					emitPurchaseScience(botSlot, r, numUnits);
+					break;
 				default:
 					DEBUG_LOG(("AIBridge: unknown action kind %u; aborting batch", kind));
 					return;
@@ -977,6 +1194,58 @@ void AIBridge_setBotSlot(Int slot)    { s_configuredSlot = slot; }
 Int  AIBridge_getListenPort()         { return s_configuredPort; }
 Int  AIBridge_getBotSlot()            { return s_configuredSlot; }
 
+namespace
+{
+	// Observation log: when -aiobslog is set, per-frame observations are written
+	// to this file as the SAME length-prefixed wire frames the socket bridge
+	// sends, so the existing Python decoder reads them unchanged. This is the
+	// robust path for offline replay -> dataset extraction: the flat-out headless
+	// replay loop bypasses GameEngine::update() and starves wine's async socket
+	// layer, so streaming over TCP during -replay is unreliable; a direct file
+	// write is deterministic and needs no collector process.
+	FILE*       s_obsLogFile     = nullptr;
+	AsciiString s_obsLogPath;
+	Int         s_obsLogDecimate = 30;   // write 1 of every N logic frames
+
+	void writeObsLogFrame(Int msgType, const UnsignedByte* payload, Int payloadSize)
+	{
+		if (s_obsLogFile == nullptr || payloadSize < 0)
+			return;
+		const UnsignedInt   magic = AIBRIDGE_MAGIC;
+		const UnsignedInt   plen  = (UnsignedInt)payloadSize;
+		const UnsignedShort mt    = (UnsignedShort)msgType;
+		const UnsignedShort sv    = AIBRIDGE_SCHEMA_VERSION;
+		UnsignedByte hdr[12];
+		hdr[0]=(UnsignedByte)(magic);      hdr[1]=(UnsignedByte)(magic>>8);  hdr[2]=(UnsignedByte)(magic>>16); hdr[3]=(UnsignedByte)(magic>>24);
+		hdr[4]=(UnsignedByte)(plen);       hdr[5]=(UnsignedByte)(plen>>8);   hdr[6]=(UnsignedByte)(plen>>16);  hdr[7]=(UnsignedByte)(plen>>24);
+		hdr[8]=(UnsignedByte)(mt);         hdr[9]=(UnsignedByte)(mt>>8);
+		hdr[10]=(UnsignedByte)(sv);        hdr[11]=(UnsignedByte)(sv>>8);
+		fwrite(hdr, 1, 12, s_obsLogFile);
+		if (payloadSize > 0)
+			fwrite(payload, 1, (size_t)payloadSize, s_obsLogFile);
+	}
+}
+
+// Configured by CommandLine (-aiobslog / -aiobsdecimate) before subsystem init.
+void AIBridge_setObsLogPath(const char* path) { if (path != nullptr) s_obsLogPath = path; }
+void AIBridge_setObsLogDecimate(Int n)        { if (n >= 1) s_obsLogDecimate = n; }
+
+// The headless replay loop (Core/ReplaySimulation.cpp) runs its own tight loop
+// that bypasses GameEngine::update(), so the AIBridge is never pumped during
+// -replay. Core exposes a null-defaulted per-frame hook pointer that the higher
+// GeneralsMD layer registers here (Core must not include AIBridge.h). Once set,
+// the bridge streams observations frame-by-frame during headless replay exactly
+// as it does during a live skirmish.
+extern void (*TheHeadlessReplayFrameHook)(void);
+namespace
+{
+	void aibridgeReplayFrameTick(void)
+	{
+		if (TheAIBridge != nullptr)
+			TheAIBridge->tick();
+	}
+}
+
 AIBridge* createAIBridge()
 {
 	return new AIBridge;
@@ -996,6 +1265,11 @@ AIBridge::~AIBridge()
 		delete m_server;
 		m_server = nullptr;
 	}
+	if (s_obsLogFile != nullptr)
+	{
+		fclose(s_obsLogFile);
+		s_obsLogFile = nullptr;
+	}
 }
 
 Bool AIBridge::isEnabled() const
@@ -1005,19 +1279,32 @@ Bool AIBridge::isEnabled() const
 
 void AIBridge::init()
 {
-	// Lazily start the listener only if -aibridgeport was passed.
-	if (!isEnabled() || m_started) return;
+	// Open the observation log if requested. Independent of the socket bridge, so
+	// -aiobslog works during -replay with or without -aibridgeport.
+	if (!s_obsLogPath.isEmpty() && s_obsLogFile == nullptr)
+	{
+		s_obsLogFile = fopen(s_obsLogPath.str(), "wb");
+		if (s_obsLogFile == nullptr)
+			DEBUG_LOG(("AIBridge: could not open obs log '%s'", s_obsLogPath.str()));
+	}
 
-	m_server = new AIBridgeServer;
-	if (m_server->startListening(s_configuredPort))
+	// Lazily start the listener only if -aibridgeport was passed.
+	if (isEnabled() && !m_started)
 	{
-		m_started = TRUE;
+		m_server = new AIBridgeServer;
+		if (m_server->startListening(s_configuredPort))
+			m_started = TRUE;
+		else
+		{
+			delete m_server;
+			m_server = nullptr;
+		}
 	}
-	else
-	{
-		delete m_server;
-		m_server = nullptr;
-	}
+
+	// Register the per-frame pump so observations are also produced during the
+	// headless -replay loop, which does not run GameEngine::update().
+	if (m_server != nullptr || s_obsLogFile != nullptr)
+		TheHeadlessReplayFrameHook = aibridgeReplayFrameTick;
 }
 
 void AIBridge::reset()
@@ -1095,29 +1382,26 @@ Bool AIBridge_isControllingPlayer(Int playerIndex)
 
 void AIBridge::tick()
 {
-	if (!m_started || m_server == nullptr) return;
+	const Bool haveServer = (m_started && m_server != nullptr);
+	const Bool haveLog    = (s_obsLogFile != nullptr);
+	// Nothing to do unless a socket bridge is live or an observation log is open.
+	if (!haveServer && !haveLog)
+		return;
 
 	// Resolve the configured lobby slot to the engine player index once per tick.
 	const Int botPlayerIndex = resolveBotPlayerIndex(s_configuredSlot);
 
-	// Drive socket I/O.
-	m_server->poll();
-
-	// On a fresh connection, send Hello first. We use a sentinel-style flag
-	// stashed in the server: detect by checking for "client just connected"
-	// via inbound buffer being empty AND no outbound queued AND no hello-sent
-	// sticky bit. Simplest implementation: track sticky bit here.
-	static Bool s_helloSent = FALSE;
-	static SOCKET s_lastSeenClient = INVALID_SOCKET;
-	// The server hides its client SOCKET; we can't compare directly without
-	// adding an accessor. Use connection-state transition via flag combined
-	// with the public isClientConnected().
+	if (haveServer)
 	{
-		// Cheap connection-edge detection: if not connected, reset hello bit.
+		// Drive socket I/O.
+		m_server->poll();
+
+		// On a fresh connection, send Hello first. Detect the connection edge via
+		// a sticky bit combined with the public isClientConnected().
+		static Bool s_helloSent = FALSE;
 		if (!m_server->isClientConnected())
 		{
 			s_helloSent = FALSE;
-			s_lastSeenClient = INVALID_SOCKET;
 		}
 		else if (!s_helloSent)
 		{
@@ -1126,48 +1410,53 @@ void AIBridge::tick()
 			m_server->sendFrame(MSG_HELLO, w.data(), w.size());
 			s_helloSent = TRUE;
 		}
-	}
 
-	// Drain inbound action batches.
-	if (isCommandSourceLive())
-	{
-		Int msgType;
-		const UnsignedByte* payload = nullptr;
-		Int payloadSize = 0;
-		while (m_server->popInboundFrame(msgType, payload, payloadSize))
+		// Drain inbound action batches.
+		if (isCommandSourceLive())
 		{
-			if (msgType == MSG_ACTION_BATCH)
+			Int msgType;
+			const UnsignedByte* payload = nullptr;
+			Int payloadSize = 0;
+			while (m_server->popInboundFrame(msgType, payload, payloadSize))
 			{
-				parseActionBatch(botPlayerIndex, payload, payloadSize);
-			}
-			else if (msgType == MSG_HELLO_ACK)
-			{
-				// optional; ignored
-			}
-			else
-			{
-				DEBUG_LOG(("AIBridge: unknown inbound msg type %d", msgType));
+				if (msgType == MSG_ACTION_BATCH)
+					parseActionBatch(botPlayerIndex, payload, payloadSize);
+				else if (msgType == MSG_HELLO_ACK)
+					; // optional; ignored
+				else
+					DEBUG_LOG(("AIBridge: unknown inbound msg type %d", msgType));
 			}
 		}
-	}
-	else
-	{
-		// Even in observation-only mode, drain & discard inbound frames so
-		// the buffer doesn't grow unbounded.
-		Int msgType;
-		const UnsignedByte* payload = nullptr;
-		Int payloadSize = 0;
-		while (m_server->popInboundFrame(msgType, payload, payloadSize))
+		else
 		{
-			(void)msgType;
+			// Even in observation-only mode, drain & discard inbound frames so
+			// the buffer doesn't grow unbounded.
+			Int msgType;
+			const UnsignedByte* payload = nullptr;
+			Int payloadSize = 0;
+			while (m_server->popInboundFrame(msgType, payload, payloadSize))
+				(void)msgType;
 		}
 	}
 
-	// Send observation for this frame, but only if a bot is connected.
-	if (m_server->isClientConnected())
+	// Emit an observation for this frame. The live socket bridge only sends when a
+	// bot is connected; the observation log (used for offline replay -> dataset
+	// extraction, where the flat-out headless replay loop starves wine's socket
+	// layer) is written every Nth frame regardless. Build the payload at most once.
+	const Bool clientConnected = haveServer && m_server->isClientConnected();
+	Bool writeLog = FALSE;
+	if (haveLog)
+	{
+		const UnsignedInt frame = (TheGameLogic != nullptr) ? TheGameLogic->getFrame() : 0;
+		writeLog = (s_obsLogDecimate <= 1) || ((frame % (UnsignedInt)s_obsLogDecimate) == 0);
+	}
+	if (clientConnected || writeLog)
 	{
 		ByteWriter w;
 		buildObservationPayload(w, botPlayerIndex);
-		m_server->sendFrame(MSG_OBSERVATION, w.data(), w.size());
+		if (clientConnected)
+			m_server->sendFrame(MSG_OBSERVATION, w.data(), w.size());
+		if (writeLog)
+			writeObsLogFrame(MSG_OBSERVATION, w.data(), w.size());
 	}
 }

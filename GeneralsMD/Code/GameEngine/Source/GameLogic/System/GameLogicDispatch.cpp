@@ -36,6 +36,7 @@
 #include "Common/GameEngine.h"
 #include "Common/GlobalData.h"
 #include "Common/NameKeyGenerator.h"
+#include "Common/ReleaseLog.h"
 #include "Common/ThingFactory.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
@@ -1403,7 +1404,36 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 		//---------------------------------------------------------------------------------------------
 		case GameMessage::MSG_QUEUE_UPGRADE:
 		{
-			const UpgradeTemplate *upgradeT = TheUpgradeCenter->findUpgradeByKey( (NameKeyType)(msg->getArgument( 1 )->integer) );
+			//
+			// Live clients (and V153+ recordings) carry the upgrade's stable id (mask
+			// bit). Older replays recorded the raw NameKeyType, whose numbering belongs
+			// to the recording build and must be translated, not looked up against our
+			// own namekeys -- resolving it directly is what silently queued the wrong
+			// upgrade for every recorded purchase after an early namekey registration
+			// shifted the numbering (the v1.5.2 replay regression).
+			//
+			const Int upgradeId = msg->getArgument( 1 )->integer;
+			const UpgradeTemplate *upgradeT;
+			const Bool legacyUpgradeId =
+				(TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V153 ));
+			if (legacyUpgradeId)
+				upgradeT = TheUpgradeCenter->findUpgradeByLegacyReplayKey( upgradeId, TheRecorder->getReplayLegacyUpgradeKeyDelta() );
+			else
+				upgradeT = TheUpgradeCenter->findUpgradeByStableId( upgradeId );
+			// @diag ZULU_QUP_LOG: log every queue-upgrade decode (raw id, decode path,
+			// this build's name for the raw value as a namekey, resolved upgrade), so a
+			// replay-fidelity issue can be pinned to the exact command without a rebuild.
+			{
+				static const char *s_qup = getenv("ZULU_QUP_LOG");
+				if (s_qup && s_qup[0])
+					ReleaseLog("QUP f%d obj=%d raw=%d legacy=%d delta=%d keyName=%s -> %s",
+						(Int)TheGameLogic->getFrame(),
+						(Int)msg->getArgument( 0 )->objectID,
+						upgradeId, (Int)legacyUpgradeId,
+						TheRecorder ? TheRecorder->getReplayLegacyUpgradeKeyDelta() : -1,
+						TheNameKeyGenerator->keyToName( (NameKeyType)upgradeId ).str(),
+						upgradeT ? upgradeT->getUpgradeName().str() : "NULL");
+			}
 			if (!upgradeT)	// sanity
 				break;
 
@@ -1422,7 +1452,13 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 #else
 			Object *producer = getSingleObjectFromSelection(currentlySelectedGroup.Peek());
 #endif
-			const UpgradeTemplate *upgradeT = TheUpgradeCenter->findUpgradeByKey( (NameKeyType)(msg->getArgument( 0 )->integer) );
+			// stable id live / V153+; translated legacy namekey for older replays (see MSG_QUEUE_UPGRADE)
+			const Int cancelUpgradeId = msg->getArgument( 0 )->integer;
+			const UpgradeTemplate *upgradeT;
+			if (TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V153 ))
+				upgradeT = TheUpgradeCenter->findUpgradeByLegacyReplayKey( cancelUpgradeId, TheRecorder->getReplayLegacyUpgradeKeyDelta() );
+			else
+				upgradeT = TheUpgradeCenter->findUpgradeByStableId( cancelUpgradeId );
 
 			// sanity
 			if( producer == nullptr || upgradeT == nullptr )
@@ -1680,7 +1716,15 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 					// that existed for it. Counted as a fidelity signal for
 					// the replay verdict (see ReplaySimulation.cpp).
 					if (TheRecorder && TheRecorder->isPlaybackMode())
+					{
 						TheRecorder->notePlaybackStaleObjectRef();
+						// @diag ZULU_STALE_LOG: log each stale recorded object ref so the first
+						// occurrence bounds the divergence frame from above.
+						static const char *s_staleLog = getenv("ZULU_STALE_LOG");
+						if (s_staleLog && s_staleLog[0])
+							ReleaseLog("STALE f%d id=%d t=%d", (Int)TheGameLogic->getFrame(),
+								(Int)msg->getArgument(i)->objectID, (Int)msg->getType());
+					}
 					continue;
 				}
 
@@ -1700,7 +1744,15 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 				Object *objToRemove = findObjectByID(objID);
 				if (!objToRemove) {
 					if (TheRecorder && TheRecorder->isPlaybackMode())
+					{
 						TheRecorder->notePlaybackStaleObjectRef();
+						// @diag ZULU_STALE_LOG: log each stale recorded object ref so the first
+						// occurrence bounds the divergence frame from above.
+						static const char *s_staleLog = getenv("ZULU_STALE_LOG");
+						if (s_staleLog && s_staleLog[0])
+							ReleaseLog("STALE f%d id=%d t=%d", (Int)TheGameLogic->getFrame(),
+								(Int)msg->getArgument(i)->objectID, (Int)msg->getType());
+					}
 					continue;
 				}
 

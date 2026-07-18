@@ -312,6 +312,7 @@ RecorderClass::RecorderClass()
 	m_wasDesync = FALSE;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
 	m_replayEpoch = REPLAY_EPOCH_CURRENT;
+	m_replayLegacyUpgradeKeyDelta = 0;
 	m_playbackStaleObjectRefs = 0;
 	m_liveObserverStreamOpen      = FALSE;
 	m_liveObserverWaitingForBytes = FALSE;
@@ -398,7 +399,35 @@ static RecorderClass::ReplayEpoch epochFromSemanticVersion(Int major, Int minor,
 		if (patch <= 7) return RecorderClass::REPLAY_EPOCH_V121;    // 1.2.1 - 1.2.7
 		return RecorderClass::REPLAY_EPOCH_V128;                    // 1.2.8, 1.2.9
 	}
-	return RecorderClass::REPLAY_EPOCH_V130;          // 1.3.0+
+	if (minor < 5 || (minor == 5 && patch <= 2))
+		return RecorderClass::REPLAY_EPOCH_V130;      // 1.3.0 - 1.5.2
+	return RecorderClass::REPLAY_EPOCH_V153;          // 1.5.3+
+}
+
+// Pre-V153 replays carry upgrade purchases as raw NameKeyType values. The
+// numbering belongs to the RECORDING environment (binary registrations + all
+// names registered by data parsed before Upgrade.ini). Playback loads the
+// recording's data package, so the data half cancels out; what remains is the
+// binary difference: 92674b28d (first shipped in 1.5.2) added one early
+// FunctionLexicon registration, shifting every later namekey by one -- the
+// cause of the v1.5.2 replay-fidelity regression. This returns OUR binary's
+// early-registration count minus the recording binary's: add it to a recorded
+// upgrade key to get the same upgrade under our numbering. If a future change
+// ever adds/removes another pre-Upgrade.ini registration, gate it here the
+// same way (older recordings get a bigger delta).
+static Int legacyUpgradeKeyDeltaFromHeader(const RecorderClass::ReplayHeader& header)
+{
+	AsciiString vs;
+	vs.translate(header.versionString);
+	const char *s = vs.str();
+	Int a = 0, b = 0, c = 0;
+	if (s[0] >= '0' && s[0] <= '9' && sscanf(s, "%d.%d.%d", &a, &b, &c) == 3)
+	{
+		// Zulu 1.5.2 and later dev builds share our early-registration set.
+		if (a > 1 || (a == 1 && (b > 5 || (b == 5 && c >= 2))))
+			return 0;
+	}
+	return 1;   // retail and Zulu <= 1.5.1: one fewer early registration than us
 }
 
 static RecorderClass::ReplayEpoch deriveReplayEpochFromHeader(const RecorderClass::ReplayHeader& header)
@@ -427,6 +456,17 @@ RecorderClass::ReplayEpoch RecorderClass::getReplayEpoch() const
 	return REPLAY_EPOCH_CURRENT;
 }
 
+Int RecorderClass::getReplayLegacyUpgradeKeyDelta() const
+{
+	if (m_mode == RECORDERMODETYPE_PLAYBACK
+		|| m_mode == RECORDERMODETYPE_SIMULATION_PLAYBACK
+		|| m_mode == RECORDERMODETYPE_RESUME_CATCHUP)
+	{
+		return m_replayLegacyUpgradeKeyDelta;
+	}
+	return 0;
+}
+
 /**
  * Initialization
  * The recorder will record by default since every game will be recorded.
@@ -452,6 +492,7 @@ void RecorderClass::init() {
 	m_playbackFrameCount = 0;
 	m_replayAIFeatureVersion = ZULU_AI_FEATURE_CURRENT;
 	m_replayEpoch = REPLAY_EPOCH_CURRENT;
+	m_replayLegacyUpgradeKeyDelta = 0;
 	m_playbackStaleObjectRefs = 0;
 
 	// Live-observer state must not survive a teardown. Quitting while starved
@@ -1734,6 +1775,7 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	m_replayEpoch = (s_replayEpochOverride >= 0)
 		? (ReplayEpoch)s_replayEpochOverride
 		: deriveReplayEpochFromHeader(header);
+	m_replayLegacyUpgradeKeyDelta = legacyUpgradeKeyDeltaFromHeader(header);
 	DEBUG_LOG(("RecorderClass::playbackFile - replay determinism epoch = %d (override=%d)",
 		(Int)m_replayEpoch, s_replayEpochOverride));
 

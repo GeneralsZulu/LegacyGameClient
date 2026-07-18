@@ -949,6 +949,43 @@ Int parseAIBridgeSlot(char *args[], int num)
 	return 1;
 }
 
+// TheSuperHackers @feature -aiobslog <file>: write per-frame observations to a
+// file as the same wire frames the socket bridge sends, so an offline decoder
+// (tools/aibridge/bridge_client.py) reads them. This is the robust path for
+// replay -> (state,action) dataset extraction: the flat-out headless -replay
+// loop starves wine's async socket layer, so a direct file write beats TCP.
+// Declared locally to avoid touching AIBridge.h (a widely-included header).
+extern void AIBridge_setObsLogPath(const char* path);
+extern void AIBridge_setObsLogDecimate(Int n);
+
+Int parseAIBridgeObsLog(char *args[], int num)
+{
+	if (num > 1)
+	{
+		AIBridge_setObsLogPath(args[1]);
+		return 2;
+	}
+	return 1;
+}
+
+// -aiobsdecimate <N>: keep 1 of every N logic frames in the observation log
+// (default 30, i.e. ~1 Hz). Smaller N = denser log.
+Int parseAIBridgeObsDecimate(char *args[], int num)
+{
+	if (num > 1)
+	{
+		Int n = atoi(args[1]);
+		if (n < 1)
+		{
+			DEBUG_LOG(("AIBridge: invalid -aiobsdecimate '%s' (must be >= 1)", args[1]));
+			return 2;
+		}
+		AIBridge_setObsLogDecimate(n);
+		return 2;
+	}
+	return 1;
+}
+
 #if defined(RTS_DEBUG)
 
 Int parsePreloadEverything( char *args[], int num )
@@ -1524,6 +1561,8 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-simfps", parseSimFPS },
 	{ "-aibridgeport", parseAIBridgePort },
 	{ "-aibridgeslot", parseAIBridgeSlot },
+	{ "-aiobslog", parseAIBridgeObsLog },
+	{ "-aiobsdecimate", parseAIBridgeObsDecimate },
 
 #if defined(RTS_DEBUG)
 	{ "-noaudio", parseNoAudio },

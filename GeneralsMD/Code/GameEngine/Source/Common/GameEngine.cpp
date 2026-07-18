@@ -313,8 +313,13 @@ Bool GameEngine::isTimeFrozen()
 
 	// Headless has no camera or view to wait on. The start-of-game camera pan
 	// (TheTacticalView time-freeze) would otherwise never complete without a
-	// render loop, freezing logic forever. So never freeze time when headless.
-	if (TheGlobalData != nullptr && TheGlobalData->m_headless)
+	// render loop, freezing logic forever. So never freeze time when headless --
+	// EXCEPT during replay playback, where the freeze behavior must match the
+	// recording (which was made with the normal freeze) or the sim diverges from
+	// the recorded commands in the first ~100 frames. Determinism-affecting
+	// headless behavior stays off the replay path for backward compatibility.
+	if (TheGlobalData != nullptr && TheGlobalData->m_headless
+			&& !(TheRecorder != nullptr && TheRecorder->isPlaybackMode()))
 		return false;
 
 	if (TheTacticalView != nullptr)

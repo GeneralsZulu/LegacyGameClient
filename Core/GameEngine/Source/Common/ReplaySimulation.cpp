@@ -34,6 +34,15 @@ Bool ReplaySimulation::s_isRunning = false;
 UnsignedInt ReplaySimulation::s_replayIndex = 0;
 UnsignedInt ReplaySimulation::s_replayCount = 0;
 
+// TheSuperHackers @feature Per-frame hook for the headless replay loop below.
+// The headless replay driver runs its own tight loop that bypasses
+// GameEngine::update() (where the AIBridge is normally pumped), so nothing
+// streams observations during -replay. This null-defaulted pointer lets a
+// higher layer (GeneralsMD's AIBridge, which Core must not include directly)
+// register a per-frame callback. It stays NULL for any build that never
+// registers one, so behavior is unchanged unless the AIBridge is enabled.
+void (*TheHeadlessReplayFrameHook)(void) = NULL;
+
 namespace
 {
 int countProcessesRunning(const std::vector<WorkerProcess>& processes)
@@ -162,6 +171,14 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 			while (TheRecorder->isPlaybackInProgress())
 			{
 				TheGameClient->updateHeadless();
+
+				// TheSuperHackers @feature Pump any registered per-frame hook
+				// (e.g. the AIBridge) so external observers receive a snapshot
+				// during headless replay. Mirrors the live loop's ordering:
+				// after the client update, before TheGameLogic->UPDATE(), so the
+				// observation reflects the pre-update state of this frame.
+				if (TheHeadlessReplayFrameHook != NULL)
+					TheHeadlessReplayFrameHook();
 
 				const int progressFrameInterval = 10*60*LOGICFRAMES_PER_SECOND;
 				if (TheGameLogic->getFrame() != 0 && TheGameLogic->getFrame() % progressFrameInterval == 0)
