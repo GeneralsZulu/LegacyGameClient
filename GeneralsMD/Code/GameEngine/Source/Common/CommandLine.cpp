@@ -949,6 +949,40 @@ Int parseAIBridgeSlot(char *args[], int num)
 	return 1;
 }
 
+// Channel 1: a SECOND independent bridge listener so two external controllers can
+// each drive one player in the same headless game (bot-vs-bot self-play).
+Int parseAIBridgePort2(char *args[], int num)
+{
+	if (num > 1)
+	{
+		Int port = atoi(args[1]);
+		if (port <= 0 || port > 65535)
+		{
+			DEBUG_LOG(("AIBridge: invalid port2 '%s'", args[1]));
+			return 2;
+		}
+		AIBridge_setListenPort2(port);
+		return 2;
+	}
+	return 1;
+}
+
+Int parseAIBridgeSlot2(char *args[], int num)
+{
+	if (num > 1)
+	{
+		Int slot = atoi(args[1]);
+		if (slot < 0 || slot > 7)
+		{
+			DEBUG_LOG(("AIBridge: invalid slot2 '%s' (must be 0..7)", args[1]));
+			return 2;
+		}
+		AIBridge_setBotSlot2(slot);
+		return 2;
+	}
+	return 1;
+}
+
 // TheSuperHackers @feature -aiobslog <file>: write per-frame observations to a
 // file as the same wire frames the socket bridge sends, so an offline decoder
 // (tools/aibridge/bridge_client.py) reads them. This is the robust path for
@@ -1561,6 +1595,8 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-simfps", parseSimFPS },
 	{ "-aibridgeport", parseAIBridgePort },
 	{ "-aibridgeslot", parseAIBridgeSlot },
+	{ "-aibridgeport2", parseAIBridgePort2 },
+	{ "-aibridgeslot2", parseAIBridgeSlot2 },
 	{ "-aiobslog", parseAIBridgeObsLog },
 	{ "-aiobsdecimate", parseAIBridgeObsDecimate },
 

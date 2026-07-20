@@ -1184,15 +1184,18 @@ namespace
 {
 	// Module-level configuration written by CommandLine parsers, read by
 	// AIBridge::init(). Held outside the class because parsing happens
-	// before TheAIBridge is allocated.
-	Int s_configuredPort = 0;
-	Int s_configuredSlot = -1;
+	// before TheAIBridge is allocated. Indexed by channel (0 = primary,
+	// backward-compatible with the original single-slot flags; 1 = second bot).
+	Int s_configuredPort[AIBridge::MAX_BRIDGE_CH] = { 0 };
+	Int s_configuredSlot[AIBridge::MAX_BRIDGE_CH] = { -1, -1 };
 }
 
-void AIBridge_setListenPort(Int port) { s_configuredPort = port; }
-void AIBridge_setBotSlot(Int slot)    { s_configuredSlot = slot; }
-Int  AIBridge_getListenPort()         { return s_configuredPort; }
-Int  AIBridge_getBotSlot()            { return s_configuredSlot; }
+void AIBridge_setListenPort(Int port)  { s_configuredPort[0] = port; }
+void AIBridge_setBotSlot(Int slot)     { s_configuredSlot[0] = slot; }
+Int  AIBridge_getListenPort()          { return s_configuredPort[0]; }
+Int  AIBridge_getBotSlot()             { return s_configuredSlot[0]; }
+void AIBridge_setListenPort2(Int port) { s_configuredPort[1] = port; }
+void AIBridge_setBotSlot2(Int slot)    { s_configuredSlot[1] = slot; }
 
 namespace
 {
@@ -1253,17 +1256,28 @@ AIBridge* createAIBridge()
 
 AIBridge::AIBridge()
 	: m_started(FALSE)
-	, m_server(nullptr)
 {
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
+	{
+		m_server[i]    = nullptr;
+		m_slot[i]      = -1;
+		m_port[i]      = 0;
+		m_helloSent[i] = FALSE;
+	}
 }
 
 AIBridge::~AIBridge()
 {
-	if (m_server != nullptr)
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
 	{
-		m_server->shutdownAll();
-		delete m_server;
-		m_server = nullptr;
+		if (m_server[i] != nullptr)
+		{
+			m_server[i]->shutdownAll();
+			delete m_server[i];
+			m_server[i] = nullptr;
+		}
 	}
 	if (s_obsLogFile != nullptr)
 	{
@@ -1274,7 +1288,11 @@ AIBridge::~AIBridge()
 
 Bool AIBridge::isEnabled() const
 {
-	return s_configuredPort > 0;
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
+		if (s_configuredPort[i] > 0)
+			return TRUE;
+	return FALSE;
 }
 
 void AIBridge::init()
@@ -1288,49 +1306,62 @@ void AIBridge::init()
 			DEBUG_LOG(("AIBridge: could not open obs log '%s'", s_obsLogPath.str()));
 	}
 
-	// Lazily start the listener only if -aibridgeport was passed.
-	if (isEnabled() && !m_started)
+	// Latch the configured (port, slot) per channel and start a listener for each
+	// channel that has a port. Slot stays a LOBBY slot here; it resolves to an
+	// engine player index per-tick (ThePlayerList is not populated yet at init).
+	Bool anyServer = FALSE;
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
 	{
-		m_server = new AIBridgeServer;
-		if (m_server->startListening(s_configuredPort))
-			m_started = TRUE;
-		else
+		m_slot[i]      = s_configuredSlot[i];
+		m_port[i]      = s_configuredPort[i];
+		m_helloSent[i] = FALSE;
+		if (m_port[i] > 0 && m_server[i] == nullptr)
 		{
-			delete m_server;
-			m_server = nullptr;
+			AIBridgeServer* srv = new AIBridgeServer;
+			if (srv->startListening(m_port[i]))
+				m_server[i] = srv;
+			else
+				delete srv;
 		}
+		if (m_server[i] != nullptr)
+			anyServer = TRUE;
 	}
+	m_started = anyServer;
 
 	// Register the per-frame pump so observations are also produced during the
 	// headless -replay loop, which does not run GameEngine::update().
-	if (m_server != nullptr || s_obsLogFile != nullptr)
+	if (anyServer || s_obsLogFile != nullptr)
 		TheHeadlessReplayFrameHook = aibridgeReplayFrameTick;
 }
 
 void AIBridge::reset()
 {
-	// Per-game reset: drop any client and clear buffers, but keep the
-	// listener up so the same bot process can reconnect for the next game.
-	if (m_server != nullptr)
+	// Per-game reset: drop any clients and re-arm each listener so the same bot
+	// processes can reconnect for the next game.
+	Bool anyServer = FALSE;
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
 	{
-		m_server->shutdownAll();
-		delete m_server;
-		m_server = nullptr;
-		m_started = FALSE;
-	}
-	if (isEnabled())
-	{
-		m_server = new AIBridgeServer;
-		if (m_server->startListening(s_configuredPort))
+		if (m_server[i] != nullptr)
 		{
-			m_started = TRUE;
+			m_server[i]->shutdownAll();
+			delete m_server[i];
+			m_server[i] = nullptr;
 		}
-		else
+		m_helloSent[i] = FALSE;
+		if (m_port[i] > 0)
 		{
-			delete m_server;
-			m_server = nullptr;
+			AIBridgeServer* srv = new AIBridgeServer;
+			if (srv->startListening(m_port[i]))
+				m_server[i] = srv;
+			else
+				delete srv;
 		}
+		if (m_server[i] != nullptr)
+			anyServer = TRUE;
 	}
+	m_started = anyServer;
 }
 
 void AIBridge::update()
@@ -1342,9 +1373,11 @@ void AIBridge::update()
 
 Bool AIBridge::isCommandSourceLive() const
 {
-	if (s_configuredSlot < 0) return FALSE;
-	if (m_server == nullptr) return FALSE;
-	return m_server->isClientConnected();
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
+		if (m_slot[i] >= 0 && m_server[i] != nullptr && m_server[i]->isClientConnected())
+			return TRUE;
+	return FALSE;
 }
 
 namespace
@@ -1376,87 +1409,91 @@ namespace
 Bool AIBridge_isControllingPlayer(Int playerIndex)
 {
 	if (playerIndex < 0) return FALSE;
-	if (s_configuredSlot < 0) return FALSE;
-	return resolveBotPlayerIndex(s_configuredSlot) == playerIndex;
+	Int i;
+	for (i = 0; i < AIBridge::MAX_BRIDGE_CH; ++i)
+		if (s_configuredSlot[i] >= 0 && resolveBotPlayerIndex(s_configuredSlot[i]) == playerIndex)
+			return TRUE;
+	return FALSE;
 }
 
 void AIBridge::tick()
 {
-	const Bool haveServer = (m_started && m_server != nullptr);
-	const Bool haveLog    = (s_obsLogFile != nullptr);
+	const Bool haveLog = (s_obsLogFile != nullptr);
+	Bool haveAnyServer = FALSE;
+	Int i;
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
+		if (m_server[i] != nullptr) { haveAnyServer = TRUE; break; }
 	// Nothing to do unless a socket bridge is live or an observation log is open.
-	if (!haveServer && !haveLog)
+	if (!haveAnyServer && !haveLog)
 		return;
 
-	// Resolve the configured lobby slot to the engine player index once per tick.
-	const Int botPlayerIndex = resolveBotPlayerIndex(s_configuredSlot);
-
-	if (haveServer)
+	// Service each channel independently: poll its socket, greet a fresh client,
+	// drain its action batches (stamped with THAT channel's player index), and
+	// stream it an observation from THAT channel's perspective. Two channels let
+	// two external controllers each drive their own player in the same game.
+	for (i = 0; i < MAX_BRIDGE_CH; ++i)
 	{
-		// Drive socket I/O.
-		m_server->poll();
+		AIBridgeServer* srv = m_server[i];
+		if (srv == nullptr)
+			continue;
 
-		// On a fresh connection, send Hello first. Detect the connection edge via
-		// a sticky bit combined with the public isClientConnected().
-		static Bool s_helloSent = FALSE;
-		if (!m_server->isClientConnected())
+		// Resolve this channel's lobby slot to an engine player index each tick.
+		const Int botPlayerIndex = resolveBotPlayerIndex(m_slot[i]);
+
+		srv->poll();
+
+		// On a fresh connection, send Hello first (sticky per-channel edge bit).
+		if (!srv->isClientConnected())
 		{
-			s_helloSent = FALSE;
+			m_helloSent[i] = FALSE;
 		}
-		else if (!s_helloSent)
+		else if (!m_helloSent[i])
 		{
 			ByteWriter w;
 			buildHelloPayload(w, botPlayerIndex);
-			m_server->sendFrame(MSG_HELLO, w.data(), w.size());
-			s_helloSent = TRUE;
+			srv->sendFrame(MSG_HELLO, w.data(), w.size());
+			m_helloSent[i] = TRUE;
 		}
 
-		// Drain inbound action batches.
-		if (isCommandSourceLive())
+		// Drain inbound frames. Honor action batches only when this channel has a
+		// slot configured and a client connected; otherwise discard so the inbound
+		// buffer can't grow unbounded (observation-only mode).
+		const Bool live = (m_slot[i] >= 0) && srv->isClientConnected();
+		Int msgType;
+		const UnsignedByte* payload = nullptr;
+		Int payloadSize = 0;
+		while (srv->popInboundFrame(msgType, payload, payloadSize))
 		{
-			Int msgType;
-			const UnsignedByte* payload = nullptr;
-			Int payloadSize = 0;
-			while (m_server->popInboundFrame(msgType, payload, payloadSize))
-			{
-				if (msgType == MSG_ACTION_BATCH)
-					parseActionBatch(botPlayerIndex, payload, payloadSize);
-				else if (msgType == MSG_HELLO_ACK)
-					; // optional; ignored
-				else
-					DEBUG_LOG(("AIBridge: unknown inbound msg type %d", msgType));
-			}
+			if (live && msgType == MSG_ACTION_BATCH)
+				parseActionBatch(botPlayerIndex, payload, payloadSize);
+			else if (msgType == MSG_ACTION_BATCH || msgType == MSG_HELLO_ACK)
+				; // action in obs-only mode, or optional ack: ignore
+			else
+				DEBUG_LOG(("AIBridge: unknown inbound msg type %d", msgType));
 		}
-		else
+
+		// Stream this channel's observation to its connected client.
+		if (srv->isClientConnected())
 		{
-			// Even in observation-only mode, drain & discard inbound frames so
-			// the buffer doesn't grow unbounded.
-			Int msgType;
-			const UnsignedByte* payload = nullptr;
-			Int payloadSize = 0;
-			while (m_server->popInboundFrame(msgType, payload, payloadSize))
-				(void)msgType;
+			ByteWriter w;
+			buildObservationPayload(w, botPlayerIndex);
+			srv->sendFrame(MSG_OBSERVATION, w.data(), w.size());
 		}
 	}
 
-	// Emit an observation for this frame. The live socket bridge only sends when a
-	// bot is connected; the observation log (used for offline replay -> dataset
-	// extraction, where the flat-out headless replay loop starves wine's socket
-	// layer) is written every Nth frame regardless. Build the payload at most once.
-	const Bool clientConnected = haveServer && m_server->isClientConnected();
-	Bool writeLog = FALSE;
+	// Observation log: a single perspective (the primary channel's slot), written
+	// every Nth frame regardless of any socket client. Used for offline replay ->
+	// dataset extraction, where the flat-out headless replay loop starves wine's
+	// async socket layer so a direct file write is the reliable path.
 	if (haveLog)
 	{
 		const UnsignedInt frame = (TheGameLogic != nullptr) ? TheGameLogic->getFrame() : 0;
-		writeLog = (s_obsLogDecimate <= 1) || ((frame % (UnsignedInt)s_obsLogDecimate) == 0);
-	}
-	if (clientConnected || writeLog)
-	{
-		ByteWriter w;
-		buildObservationPayload(w, botPlayerIndex);
-		if (clientConnected)
-			m_server->sendFrame(MSG_OBSERVATION, w.data(), w.size());
+		const Bool writeLog = (s_obsLogDecimate <= 1) || ((frame % (UnsignedInt)s_obsLogDecimate) == 0);
 		if (writeLog)
+		{
+			ByteWriter w;
+			buildObservationPayload(w, resolveBotPlayerIndex(m_slot[0]));
 			writeObsLogFrame(MSG_OBSERVATION, w.data(), w.size());
+		}
 	}
 }

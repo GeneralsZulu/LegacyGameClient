@@ -159,7 +159,11 @@ run_build() {
     local target="$2"
     local interactive="$3"
 
-    local docker_flags=""
+    # Extra flags for `docker run`, overridable via DOCKER_BUILD_FLAGS. Default
+    # empty = unchanged behavior. Used e.g. to pass `--network host` when the
+    # host's default docker bridge can't create veth pairs (missing veth kernel
+    # module after a kernel update).
+    local docker_flags="${DOCKER_BUILD_FLAGS:-}"
     if [[ "$interactive" == "true" ]]; then
         docker_flags="-it --entrypoint bash"
     fi

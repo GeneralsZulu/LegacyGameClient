@@ -20,9 +20,13 @@
 // Replays therefore reproduce a bridge-driven game with no bot present.
 //
 // Activation: command-line flags
-//   -aibridgeport <port>      open localhost listener; required to enable
-//   -aibridgeslot  <0..7>     slot index whose playerIndex stamps actions;
+//   -aibridgeport  <port>     open localhost listener (channel 0); required to enable
+//   -aibridgeslot  <0..7>     slot index whose playerIndex stamps channel-0 actions;
 //                             omit for observation-only mode
+//   -aibridgeport2 <port>     open a SECOND independent listener (channel 1)
+//   -aibridgeslot2 <0..7>     slot for channel 1
+// A second channel lets two external controllers each drive one player in the
+// same headless game (bot-vs-bot self-play, with no scripted AI in the loop).
 //
 // Wire protocol: see Common/AIBridge/AIBridge.cpp for the binary frame
 // format. All frames are little-endian.
@@ -39,6 +43,9 @@ void  AIBridge_setListenPort(Int port);
 void  AIBridge_setBotSlot(Int slot);
 Int   AIBridge_getListenPort();
 Int   AIBridge_getBotSlot();
+// Channel 1 (second bot), for bot-vs-bot in one game.
+void  AIBridge_setListenPort2(Int port);
+void  AIBridge_setBotSlot2(Int slot);
 
 // TRUE when the AIBridge is driving the given engine player index. The scripted
 // AISkirmishPlayer calls this to suppress its own army/combat orders for a
@@ -65,13 +72,24 @@ public:
 	// True when a port has been configured and the listener is (or will be) up.
 	Bool isEnabled() const;
 
-	// True when a bot slot is configured AND a client is currently connected.
-	// Only when this is true should action injection be honored.
+	// True when a bot slot is configured AND a client is currently connected
+	// on ANY channel. Only when a channel is live should its action injection
+	// be honored (checked per-channel inside tick()).
 	Bool isCommandSourceLive() const;
+
+	// Number of independent bot channels. 2 is enough for bot-vs-bot self-play;
+	// bump if a future mode needs more externally-driven players in one game.
+	enum { MAX_BRIDGE_CH = 2 };
 
 private:
 	Bool              m_started;
-	AIBridgeServer*   m_server;
+	// Per-channel state. Channel i owns its own listener/client socket
+	// (m_server[i]), the lobby slot it stamps actions for (m_slot[i]), its
+	// listen port (m_port[i]), and a sticky "hello sent this connection" bit.
+	AIBridgeServer*   m_server[MAX_BRIDGE_CH];
+	Int               m_slot[MAX_BRIDGE_CH];
+	Int               m_port[MAX_BRIDGE_CH];
+	Bool              m_helloSent[MAX_BRIDGE_CH];
 
 	// Disallow copy.
 	AIBridge(const AIBridge&);
