@@ -38,6 +38,7 @@
 
 #include "GameNetwork/networkutil.h"   // ResolveIP
 #include "Common/GlobalData.h"         // m_coordPunchTTL override
+#include "Common/ReleaseLog.h"
 
 // timeGetTime is provided by the engine's PreRTS.h on both Windows and the
 // stub used by docker/Linux builds.
@@ -633,12 +634,29 @@ Bool OnlineCoordinatorAPI::openUdpOnPort(UnsignedShort bindPort, Int& outFd, Uns
 	a.sin_port        = htons(bindPort);
 	if (bind(fd, (struct sockaddr*)&a, sizeof(a)) == SOCKET_ERROR)
 	{
+		// Preferred port taken (typically a second client behind the same
+		// NAT / on the same machine, e.g. someone watching while another
+		// instance plays). Fall back to an ephemeral port: peers always
+		// send to the coordinator-observed EXTERNAL address, and the local
+		// socket is handed off by fd (initFromFD / AdoptFD), so nothing
+		// downstream depends on the local port number.
+		if (bindPort != 0)
+		{
+			a.sin_port = 0;
+			if (bind(fd, (struct sockaddr*)&a, sizeof(a)) != SOCKET_ERROR)
+			{
+				ReleaseLog("Coordinator: UDP port %u taken; using an ephemeral port instead",
+					(unsigned)bindPort);
+				goto bound;
+			}
+		}
 		CLOSE_SOCKET(fd);
 		AsciiString msg;
 		msg.format("udp bind failed on port %u", (unsigned)bindPort);
 		setError(msg);
 		return FALSE;
 	}
+bound:
 	// Read back what we actually bound to (matters when bindPort=0).
 	struct sockaddr_in b;
 	// VC6 winsock has no socklen_t; int* works on both stacks.

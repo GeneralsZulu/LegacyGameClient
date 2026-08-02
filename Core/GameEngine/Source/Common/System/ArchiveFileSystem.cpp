@@ -224,9 +224,17 @@ void ArchiveFileSystem::loadZuluBigsFrom(const AsciiString& dir)
 	FilenameListIter it;
 	for (it = files.begin(); it != files.end(); ++it)
 	{
-		// Already loaded (explicit -mod naming the same file, or a re-init)?
-		if (m_archiveFileMap.find(*it) != m_archiveFileMap.end())
+		// The plain *.big install-dir scan has usually loaded this archive
+		// already, but at BASE priority (first-wins), where retail archives
+		// like WindowZH.big shadow its files. Re-applying the directory
+		// tree with overwrite promotes every entry to mod priority without
+		// reopening the file.
+		ArchiveFileMap::iterator existing = m_archiveFileMap.find(*it);
+		if (existing != m_archiveFileMap.end())
+		{
+			loadIntoDirectoryTree(existing->second, TRUE);
 			continue;
+		}
 		ArchiveFile *archiveFile = openArchiveFile(it->str());
 		if (archiveFile != nullptr)
 		{

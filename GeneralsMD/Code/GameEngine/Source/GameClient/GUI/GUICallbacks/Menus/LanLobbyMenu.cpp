@@ -823,9 +823,9 @@ static void rebuildGamesListbox()
 		}
 		else
 		{
-			row.format("%s   [%s]   %d/%d   map:%s   id:%s",
+			row.format("%s   [%s]   %d/%d   %s",
 				g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
-				g.map.str(), g.id.str());
+				g.map.str());
 		}
 		UnicodeString u;
 		u.translate(row);
@@ -1018,7 +1018,26 @@ static void pumpCoordinator()
 		if (!s_coordPendingHostName.isEmpty())
 		{
 			UnicodeString u; u.translate(s_coordPendingHostName);
-			s_coord->requestHost(u, AsciiString("unknown"), 2);
+			// Advertise the real map the lobby will open with (the same
+			// preference LanGameOptionsMenuInit applies) so the games list
+			// shows something meaningful instead of "unknown 0/2".
+			LANPreferences pref;
+			AsciiString mapPath = pref.getPreferredMap();
+			Int maxPlayers = 2;
+			AsciiString mapLeaf = mapPath;
+			if (TheMapCache)
+			{
+				const MapMetaData* md = TheMapCache->findMap(mapPath);
+				if (md && md->m_numPlayers > 0)
+					maxPlayers = md->m_numPlayers;
+			}
+			// Leaf name reads better than the full maps\...\... path.
+			{
+				const char* leaf = mapPath.reverseFind('\\');
+				if (leaf && leaf[1] != '\0')
+					mapLeaf = leaf + 1;
+			}
+			s_coord->requestHost(u, mapLeaf, maxPlayers);
 			s_coordPendingHostName.clear();
 		}
 		else if (!s_coordPendingJoinID.isEmpty())

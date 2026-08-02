@@ -796,6 +796,17 @@ void LANAPI::OnPlayerJoin( Int slot, UnicodeString playerName )
 
 		// Send out the game options
 		RequestGameOptions(GenerateGameOptionsString(), true);
+
+		// Direct-connect (online) games: joiners arrive through the
+		// coordinator with no LAN-lobby presence beforehand, so give the
+		// host an explicit heads-up in chat (on LAN you watch people walk
+		// in from the lobby; online they just materialize in a slot).
+		if (m_currentGame->getIsDirectConnect())
+		{
+			UnicodeString msg;
+			msg.format(L"%s has joined the game.", playerName.str());
+			OnChat(L"", 0, msg, LANCHAT_SYSTEM);
+		}
 	}
 
 	lanUpdateSlotList();
