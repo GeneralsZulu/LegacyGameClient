@@ -34,6 +34,7 @@
 #include "Lib/BaseType.h"
 #include "Common/crc.h"
 #include "Common/GameEngine.h"
+#include "Common/version.h"
 #include "Common/GlobalData.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/NameKeyGenerator.h"
@@ -796,10 +797,17 @@ static void connectCoordinatorIfNeeded()
 	// in-game data) so ConnectionManager's later socket inherits an already-
 	// punched mapping. The TCP signaling port is the listed coordinator port;
 	// UDP STUN is on the port reported in hello_ok.
-	ReleaseLog("Coordinator connect: %s:%u nick=%s", host.str(), (unsigned)tcpPort,
-		s_coordCurrentNick.str());
+	// Send the real build version so the coordinator can refuse to match
+	// clients running different game versions (which would only meet again
+	// as an in-game desync). TheVersion is the same string the main menu
+	// shows (APPVERSION via the installer chain).
+	AsciiString buildVersion = "zulu/unknown";
+	if (TheVersion)
+		buildVersion = TheVersion->getAsciiVersion();
+	ReleaseLog("Coordinator connect: %s:%u nick=%s version=%s", host.str(), (unsigned)tcpPort,
+		s_coordCurrentNick.str(), buildVersion.str());
 	if (!s_coord->connect(host, tcpPort,
-		s_coordCurrentNick, AsciiString("zulu/1"),
+		s_coordCurrentNick, buildVersion,
 		/*lobbyBindPort=*/8086, /*gameBindPort=*/NETWORK_BASE_PORT_NUMBER))
 	{
 		ReleaseLog("Coordinator connect FAILED: %s", s_coord->lastError().str());
@@ -919,12 +927,24 @@ static void pumpCoordinator()
 		}
 		if (state == OnlineCoordinatorAPI::STATE_ERROR)
 		{
+			// Definitive rejections must not be retried or paraphrased: a
+			// version mismatch reads the same on every attempt, and the
+			// server's message names both versions, which is exactly what
+			// the user needs to see.
+			Bool definitiveError = (strstr(s_coord->lastError().str(), "version mismatch") != NULL);
+			if (definitiveError)
+			{
+				coordinatorPostStatus(s_coord->lastError().str());
+				s_coordLastJoinID.clear();
+				s_coordJoinRetries = 0;
+				connectCoordinatorIfNeeded();
+			}
 			// A failed JOIN attempt (usually "punch: no inbound packet
 			// within timeout") retries automatically, like LAN where a
 			// dropped join request is invisible to the user. connect()
 			// tears down the failed attempt's sockets, and re-queueing the
 			// pending id re-dispatches the join once READY again.
-			if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty()
+			else if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty()
 				&& s_coordJoinRetries < COORD_JOIN_MAX_RETRIES)
 			{
 				++s_coordJoinRetries;
