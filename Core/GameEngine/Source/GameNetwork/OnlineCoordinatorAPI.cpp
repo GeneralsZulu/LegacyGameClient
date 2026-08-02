@@ -548,12 +548,16 @@ Bool OnlineCoordinatorAPI::stashGameSocketForGameStart()
 		DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: no game socket to stash"));
 		return FALSE;
 	}
-	if (!m_punchOkGame || m_peerInfo.gamePunchedIP == 0 || m_peerInfo.gamePunchedPort == 0)
-	{
-		DEBUG_LOG(("OnlineCoordinatorAPI::stashGameSocketForGameStart: punch state incomplete (ok=%d ip=0x%08x port=%u)",
-			(int)m_punchOkGame, m_peerInfo.gamePunchedIP, m_peerInfo.gamePunchedPort));
-		return FALSE;
-	}
+	// A punched peer is NOT required. The host now hands off as soon as its
+	// game is listed, before anyone has joined: there is no peer yet, and
+	// the primary-peer fields stay zero until joiners register themselves
+	// via addStashedGamePeer (pumpStashedKeepalive handles a stash whose
+	// only peers are the "extra" ones). Refusing to stash here left the
+	// socket owned by a coordinator that is about to stop punching, so the
+	// first joiner's game-port punch had nothing to open the host's mapping
+	// and failed with lobby=true game=false.
+	const Bool havePunchedPeer =
+		(m_punchOkGame && m_peerInfo.gamePunchedIP != 0 && m_peerInfo.gamePunchedPort != 0);
 	// Replace whatever was previously stashed (shouldn't happen in a clean
 	// flow, but a stale FD must not leak across rematches).
 	if (s_stashGameFd != -1)
@@ -563,8 +567,8 @@ Bool OnlineCoordinatorAPI::stashGameSocketForGameStart()
 	}
 	s_stashGameFd            = m_udpFdGame;
 	s_stashGameLocalPort     = m_udpBoundPortGame;
-	s_stashGamePeerIPHost    = m_peerInfo.gamePunchedIP;
-	s_stashGamePeerPortHost  = m_peerInfo.gamePunchedPort;
+	s_stashGamePeerIPHost    = havePunchedPeer ? m_peerInfo.gamePunchedIP   : 0;
+	s_stashGamePeerPortHost  = havePunchedPeer ? m_peerInfo.gamePunchedPort : 0;
 	s_stashKeepaliveNextMs   = timeGetTime();
 	s_stashKeepaliveNick     = m_nick;
 	m_udpFdGame              = -1;

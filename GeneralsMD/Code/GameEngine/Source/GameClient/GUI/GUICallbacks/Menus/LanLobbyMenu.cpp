@@ -882,6 +882,7 @@ static void coordinatorJoinOrObserveRow(Int rowSelected)
 }
 
 static void doCoordinatorHandoffToLAN();
+static void doCoordinatorHostHandoffToLAN();
 
 // User-facing text for each coordinator state transition. Returns null for
 // states that are pure plumbing (the user doesn't need a line for them).
@@ -986,6 +987,25 @@ static void pumpCoordinator()
 	// it further in this tick.
 	if (!s_coord)
 		return;
+
+	// Host: as soon as the coordinator ACKS our listing (game_id in hand,
+	// so joiners can actually find us), hand off to the LAN lobby instead
+	// of waiting for a first joiner to punch. This is what makes hosting
+	// feel like LAN -- you sit in the real lobby, pick the map and chat --
+	// and it removes the first-joiner special case entirely: every joiner
+	// now arrives through the post-handoff path that joiners 2..N already
+	// used. Checked per tick (not on state change) because STATE_HOSTING
+	// is entered when the request is SENT; the ack lands a round trip later.
+	if (!s_coordHandoffDone
+	    && s_coord->amIHost()
+	    && s_coord->state() == OnlineCoordinatorAPI::STATE_HOSTING
+	    && !s_coord->hostedGameID().isEmpty())
+	{
+		doCoordinatorHostHandoffToLAN();
+		// The handoff pushed the game-options screen, which tore down this
+		// menu's gadgets; nothing below may touch them this tick.
+		return;
+	}
 
 	// When READY, periodically refresh the games list and dispatch any
 	// pending host/join action that was queued before the connection
@@ -1123,6 +1143,62 @@ static void pumpCoordinator()
 	{
 		rebuildGamesListbox();
 	}
+}
+
+// Host-side handoff, run as soon as the coordinator confirms our game is
+// listed -- BEFORE any joiner shows up. The host lands in the real game
+// lobby immediately, exactly like LAN: pick the map, chat, wait.
+//
+// Every joiner (including the first) then arrives through the same
+// post-handoff path joiners 2..N already used: the coordinator delivers
+// peer_info to LanGameOptionsMenu, which plumbs the punched game port into
+// TheLAN and fires NAT-opening probes/keepalives at the joiner's lobby
+// address while the joiner does the active punching.
+static void doCoordinatorHostHandoffToLAN()
+{
+	if (!s_coord || s_coordHandoffDone) return;
+	DEBUG_LOG(("HOST HANDOFF: start (pre-joiner)"));
+
+	// Set BEFORE anything can push a screen: RequestGameCreate's
+	// OnGameCreate callback runs TheShell->push synchronously, which runs
+	// LanLobbyMenuShutdown mid-call; with the flag clear that would tear
+	// down the coordinator session every joiner still needs.
+	s_coordHandoffDone = TRUE;
+
+	// Park the punched game socket in the module-level stash (keepalives
+	// keep its NAT mapping alive through the lobby phase; ConnectionManager
+	// adopts the FD at game start), then release the lobby socket so
+	// TheLAN can rebind 8086. TCP signaling stays up for joiner delivery.
+	if (!s_coord->stashGameSocketForGameStart())
+	{
+		DEBUG_LOG(("HOST HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
+	}
+	s_coord->closeLobbyUdpForHostHandoff();
+
+	if (!TheLAN)
+	{
+		TheLAN = NEW LANAPI();
+	}
+	TheLAN->init();
+	UnsignedInt localIP = TheGlobalData->m_defaultIP;
+	if (!localIP)
+	{
+		IPEnumeration IPs;
+		EnumeratedIP* list = IPs.getAddresses();
+		if (list) localIP = list->getIP();
+	}
+	if (!TheLAN->SetLocalIP(localIP))
+	{
+		coordinatorPostStatus("LAN: SetLocalIP failed after coordinator handoff");
+		DEBUG_LOG(("HOST HANDOFF: SetLocalIP returned FALSE"));
+	}
+	TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
+
+	UnicodeString gameName = GadgetTextEntryGetText(textEntryPlayerName);
+	gameName.concat(L"'s game");
+	TheLAN->RequestGameCreate(gameName, /*isDirectConnect=*/TRUE);
+	ReleaseLog("Coordinator host handoff to LAN done (pre-joiner)");
+	DEBUG_LOG(("HOST HANDOFF: done"));
 }
 
 static void doCoordinatorHandoffToLAN()
