@@ -99,6 +99,26 @@ relay. Gotchas discovered building this:
   then `Recorder::update tick mode=5` lines = live playback running.
 - Server side: `grep relay /tmp/natlab/cncstats.log` shows attach/pair.
 
+## Classic LAN observe test (bridged "lanlab")
+
+Verified 2026-08-02: the direct TCP-8188 LAN observer path, driven through
+the real retail UI. Recipe: one bridge + two netns = a flat LAN;
+plain-flag clients (no -coord*); drive the UI with xdotool + screenshots.
+
+```bash
+sudo ip link add br77 type bridge && sudo ip link set br77 up
+for N in lanH lanO; do sudo ip netns add $N; done
+# veth pair per netns, IPs 192.168.77.11/.12 on the bridge, then launch
+# prefD/prefE clients inside lanH/lanO with only: -win -quickstart -noaudio
+```
+
+UI path: MULTIPLAYER (823,222) -> NETWORK (823,221) -> host: CREATE GAME
+(178,671) -> slot2 dropdown (253,204) -> "Easy Army" (121,324) -> PLAY
+GAME (209,683). Observer: double-click the greyed "[name]" row in Games
+(380,180) -> "in progress. Watch it as an observer?" -> YES (388,497).
+Verify in the observer's ObserverLog.txt: "TCP connect kickoff to
+<host>:8188", snapshot, then mode=5 ticks.
+
 ## Hard-won gotchas
 
 - `wine explorer /desktop=...` is REQUIRED: bare Xvfb has no WM, the game gets
