@@ -323,18 +323,46 @@ public:
 	void setDirectConnectRemoteGamePort( UnsignedShort port ) { m_directConnectRemoteGamePort = port; }
 	UnsignedShort getDirectConnectRemoteGamePort() const { return m_directConnectRemoteGamePort; }
 
-	/// Record a joiner's punched external game-data port keyed by their
-	/// external lobby IP. Populated by the lobby UI as the coordinator
-	/// delivers peer_info for each new joiner. handleRequestJoin looks the
-	/// joiner up here before falling back to the single-value setter above.
-	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort port )
+	/// Record a joiner's punched external game-data port. Keyed by BOTH the
+	/// external IP and the peer's external LOBBY port, because two players
+	/// behind one NAT share an IP: keying on IP alone let the second joiner
+	/// overwrite the first's game port, and the host would then send in-game
+	/// traffic for one of them to the other's port. Populated by the lobby UI
+	/// as the coordinator delivers peer_info for each new joiner;
+	/// handleRequestJoin looks the joiner up here (by the source port of the
+	/// join request) before falling back to the single-value setter above.
+	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort lobbyPort, UnsignedShort gamePort )
 	{
-		m_directConnectGamePorts[ip] = port;
+		for (size_t i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
+			{
+				m_directConnectGamePorts[i].gamePort = gamePort;
+				return;
+			}
+		}
+		DirectConnectPeerPorts entry;
+		entry.ip        = ip;
+		entry.lobbyPort = lobbyPort;
+		entry.gamePort  = gamePort;
+		m_directConnectGamePorts.push_back(entry);
 	}
-	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip ) const
+	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip, UnsignedShort lobbyPort ) const
 	{
-		std::map<UnsignedInt, UnsignedShort>::const_iterator it = m_directConnectGamePorts.find(ip);
-		return (it == m_directConnectGamePorts.end()) ? (UnsignedShort)0 : it->second;
+		size_t i;
+		// Exact (ip, lobby port) match first.
+		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
+				return m_directConnectGamePorts[i].gamePort;
+		}
+		// Fall back to IP-only (peer whose lobby port we never learned).
+		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip)
+				return m_directConnectGamePorts[i].gamePort;
+		}
+		return (UnsignedShort)0;
 	}
 
 	/// Send a tiny fill-in-style LOBBY_ANNOUNCE packet directly to (ip:port)
@@ -442,7 +470,13 @@ protected:
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
 	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
 	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER. Single-value version for 2-player coord.
-	std::map<UnsignedInt, UnsignedShort> m_directConnectGamePorts; ///< Per-peer punched game-data port keyed by external lobby IP. N-player coord populates this from coordinator peer_info.
+	struct DirectConnectPeerPorts
+	{
+		UnsignedInt   ip;         ///< peer's external IP
+		UnsignedShort lobbyPort;  ///< peer's external lobby port (tells same-IP peers apart)
+		UnsignedShort gamePort;   ///< peer's punched external game-data port
+	};
+	std::vector<DirectConnectPeerPorts> m_directConnectGamePorts; ///< Per-peer punched game-data ports from coordinator peer_info (N-player coord).
 	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
 	UnsignedShort				m_dispatchSenderPort;///< Source port of the LAN message currently being dispatched. Lets reply-style handlers send back through NAT-translated mappings instead of hardcoded lobbyPort.
 

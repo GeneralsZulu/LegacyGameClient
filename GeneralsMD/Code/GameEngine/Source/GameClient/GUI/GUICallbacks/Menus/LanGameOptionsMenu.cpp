@@ -1557,7 +1557,7 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 			{
 				if (p.gamePunchedPort != 0)
 				{
-					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.gamePunchedPort);
+					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.punchedPort, p.gamePunchedPort);
 				}
 				// TTL-limited probe NOW (opens our lobby mapping before the
 				// joiner's first blast can poison it, without reaching the

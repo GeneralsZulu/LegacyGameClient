@@ -442,7 +442,7 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					UnsignedShort peerGamePort = 0;
 					if (m_currentGame->getIsDirectConnect())
 					{
-						peerGamePort = lookupDirectConnectGamePort(senderIP);
+						peerGamePort = lookupDirectConnectGamePort(senderIP, m_dispatchSenderPort);
 						if (peerGamePort == 0)
 							peerGamePort = m_directConnectRemoteGamePort;
 					}
