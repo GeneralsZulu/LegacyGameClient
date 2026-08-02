@@ -594,6 +594,15 @@ void OnlineCoordinatorAPI::disconnect()
 	m_newPeers.clear();
 }
 
+Int OnlineCoordinatorAPI::takeLobbyUdpFdForHandoff()
+{
+	Int fd = m_udpFdLobby;
+	m_udpFdLobby = -1;   // caller owns it now; disconnect() must not close it
+	m_postHandoff = TRUE;
+	DEBUG_LOG(("OnlineCoordinatorAPI: lobby socket fd=%d handed to TheLAN; post-handoff mode", fd));
+	return fd;
+}
+
 void OnlineCoordinatorAPI::closeLobbyUdpForHostHandoff()
 {
 	if (m_udpFdLobby != -1)

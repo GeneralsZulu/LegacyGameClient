@@ -389,6 +389,11 @@ public:
 	virtual LANPlayer * LookupPlayer( UnsignedInt playerIP );													///< return a pointer to a player we know about
 	virtual Bool SetLocalIP( UnsignedInt localIP ) override;																		///< For multiple NIC machines
 	virtual void SetLocalIP( AsciiString localIP ) override;																		///< For multiple NIC machines
+	/// Online handoff: adopt the coordinator's already-punched lobby socket
+	/// by fd instead of rebinding the port. Preserves the NAT mapping the
+	/// peer was told to talk to (CGNATs give a rebound socket a new one).
+	/// Takes ownership of fd.
+	Bool SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd );
 	virtual Bool AmIHost() override;																											///< Am I hosting a game?
 	virtual UnicodeString GetMyName() override { return m_name; }                 ///< What's my name?
 	virtual LANGameInfo* GetMyGame() override { return m_currentGame; }					      ///< What's my Game?

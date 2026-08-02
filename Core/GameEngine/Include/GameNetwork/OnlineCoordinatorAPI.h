@@ -115,6 +115,12 @@ public:
 	// peer queue for the UI to drain. m_state stays at STATE_HOSTING.
 	void closeLobbyUdpForHostHandoff();
 
+	// Preferred over closeLobbyUdpForHostHandoff: transfer the punched lobby
+	// socket to TheLAN by fd so its NAT mapping (the address the coordinator
+	// brokered to peers) survives the handoff. Returns -1 if there is none.
+	// Also enters post-handoff mode.
+	Int  takeLobbyUdpFdForHandoff();
+
 	// Pull the next post-handoff peer_info off the queue. Returns FALSE when
 	// the queue is empty. Used by the lobby UI to plumb each new joiner's
 	// punched ports into TheLAN before that joiner's MSG_REQUEST_JOIN arrives

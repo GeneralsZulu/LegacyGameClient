@@ -1173,7 +1173,9 @@ static void doCoordinatorHostHandoffToLAN()
 	{
 		DEBUG_LOG(("HOST HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
 	}
-	s_coord->closeLobbyUdpForHostHandoff();
+	// Hand the punched lobby socket to TheLAN by fd. Rebinding the port
+	// instead would lose the NAT mapping peers are told to talk to.
+	Int lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
 
 	if (!TheLAN)
 	{
@@ -1187,7 +1189,10 @@ static void doCoordinatorHostHandoffToLAN()
 		EnumeratedIP* list = IPs.getAddresses();
 		if (list) localIP = list->getIP();
 	}
-	if (!TheLAN->SetLocalIP(localIP))
+	Bool lanReady = (lobbyFd != -1)
+		? TheLAN->SetLocalIPAdoptingSocket(localIP, lobbyFd)
+		: TheLAN->SetLocalIP(localIP);
+	if (!lanReady)
 	{
 		coordinatorPostStatus("LAN: SetLocalIP failed after coordinator handoff");
 		DEBUG_LOG(("HOST HANDOFF: SetLocalIP returned FALSE"));
@@ -1211,6 +1216,7 @@ static void doCoordinatorHandoffToLAN()
 	// are: m_amIHost is set inside requestHost/requestJoin so it cannot
 	// drift out of sync with what we actually asked the coordinator for.
 	Bool weAreHost = s_coord->amIHost();
+	Int  lobbyFd   = -1;   // punched lobby socket handed to TheLAN below
 	DEBUG_LOG(("HANDOFF: start weAreHost=%d peerIP=0x%08x peerPort=%u gamePeerIP=0x%08x gamePeerPort=%u",
 		(int)weAreHost, peerIP, peerPort, peer.gamePunchedIP, peer.gamePunchedPort));
 
@@ -1230,22 +1236,26 @@ static void doCoordinatorHandoffToLAN()
 		DEBUG_LOG(("HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
 	}
 
-	// Release the coordinator's lobby UDP socket so TheLAN can rebind 8086.
-	// The NAT mapping established during punch persists for ~30s+, well
-	// within the few ms it takes us to rebind.
+	// Hand the punched lobby UDP socket to TheLAN by fd (NOT close+rebind:
+	// the NAT mapping belongs to the socket, and CGNATs give a replacement
+	// socket a different external port than the one peers were told).
 	if (weAreHost)
 	{
 		// N-player: keep TCP signaling alive so the coordinator can deliver
 		// peer_info for additional joiners while this host stays in the
 		// lobby. The s_coord instance survives LanLobbyMenuShutdown (see
 		// guard there) and is pumped by LanGameOptionsMenu.
-		s_coord->closeLobbyUdpForHostHandoff();
-		DEBUG_LOG(("HANDOFF: coord lobby UDP closed; TCP kept alive for additional joiners"));
+		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
+		DEBUG_LOG(("HANDOFF: coord lobby fd=%d handed over; TCP kept alive for additional joiners", lobbyFd));
 	}
 	else
 	{
 		// Joiners don't need to talk to the coordinator any more; their
 		// in-game connection goes through the host (packet router model).
+		// Take the punched lobby socket BEFORE disconnecting so disconnect()
+		// doesn't close it -- the host was told to reply to the external
+		// address that socket owns, and a rebound socket may not get it back.
+		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
 		s_coord->disconnect();
 		DEBUG_LOG(("HANDOFF: coord disconnected"));
 	}
@@ -1263,8 +1273,11 @@ static void doCoordinatorHandoffToLAN()
 		EnumeratedIP* list = IPs.getAddresses();
 		if (list) localIP = list->getIP();
 	}
-	DEBUG_LOG(("HANDOFF: localIP=0x%08x", localIP));
-	if (!TheLAN->SetLocalIP(localIP))
+	DEBUG_LOG(("HANDOFF: localIP=0x%08x lobbyFd=%d", localIP, lobbyFd));
+	Bool lanReady = (lobbyFd != -1)
+		? TheLAN->SetLocalIPAdoptingSocket(localIP, lobbyFd)
+		: TheLAN->SetLocalIP(localIP);
+	if (!lanReady)
 	{
 		coordinatorPostStatus("LAN: SetLocalIP failed after coordinator handoff");
 		DEBUG_LOG(("HANDOFF: SetLocalIP returned FALSE"));

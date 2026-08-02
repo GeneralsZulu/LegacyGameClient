@@ -1545,6 +1545,10 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 		OnlineCoordinatorAPI::PeerInfo p;
 		while (coord->consumeNewPeer(&p))
 		{
+			ReleaseLog("Options pump: new joiner %s lobby=%d.%d.%d.%d:%u game=%d.%d.%d.%d:%u",
+				p.nick.str(),
+				PRINTF_IP_AS_4_INTS(p.punchedIP), p.punchedPort,
+				PRINTF_IP_AS_4_INTS(p.gamePunchedIP), p.gamePunchedPort);
 			DEBUG_LOG(("LanGameOptionsMenu: new joiner %s lobby=0x%08x:%u game=0x%08x:%u",
 				p.nick.str(),
 				p.punchedIP, p.punchedPort,

@@ -1536,6 +1536,38 @@ Bool LANAPI::SetLocalIP( UnsignedInt localIP )
 	return retval;
 }
 
+Bool LANAPI::SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd )
+{
+	// Online (coordinator) handoff: take over the very socket that did the
+	// STUN discovery and the hole punch, instead of closing it and binding
+	// a fresh one on the same port.
+	//
+	// Rebinding looks equivalent but is not: the NAT mapping belongs to the
+	// SOCKET, not the port. Carrier-grade NATs (Starlink was the case that
+	// exposed this) allocate a NEW external port to the replacement socket,
+	// so the peer -- which the coordinator told to talk to the ORIGINAL
+	// external port -- ends up punching an address nothing listens on, and
+	// our replies arrive from a port its NAT never expected and drops.
+	// Symptom: punch outcome lobby=false while game=true, because the
+	// in-game socket is handed over by fd and keeps its mapping.
+	m_localIP = localIP;
+	m_transport->reset();
+	Bool retval = m_transport->initFromFD(fd, localIP, lobbyPort);
+	if (!retval)
+	{
+		// initFromFD owns (and has closed) the fd on failure; fall back to a
+		// fresh bind so the lobby still works on LAN-ish networks.
+		ReleaseLog("LAN: adopting coordinator lobby socket FAILED; falling back to a fresh bind");
+		retval = m_transport->init(m_localIP, lobbyPort);
+	}
+	else
+	{
+		ReleaseLog("LAN: adopted the punched coordinator lobby socket (port %u)", (unsigned)lobbyPort);
+	}
+	m_transport->allowBroadcasts(true);
+	return retval;
+}
+
 void LANAPI::SetLocalIP( AsciiString localIP )
 {
 	UnsignedInt resolvedIP = ResolveIP(localIP);
