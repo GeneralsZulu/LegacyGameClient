@@ -735,6 +735,18 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	disconnect();
 	m_lastError.clear();
 
+	// A brand-new session means any previous attempt was abandoned (failed
+	// join, punch retry, backing out of the lobby). Its stashed in-game
+	// socket would otherwise live forever: it holds NETWORK_BASE_PORT_NUMBER,
+	// so the fresh attempt's game socket falls back to an ephemeral port,
+	// and — worse — ConnectionManager could later adopt that dead session's
+	// socket, whose keepalives point at a peer we are no longer joining.
+	if (hasStashedGameSocket())
+	{
+		ReleaseLog("Coordinator: discarding stashed game socket from an abandoned attempt");
+		discardStashedGameSocket();
+	}
+
 	UnsignedInt ipHostOrder = ResolveIP(coordHost);
 	if (ipHostOrder == 0)
 	{

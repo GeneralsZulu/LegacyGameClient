@@ -126,6 +126,16 @@ void LanLobbyMenuShutdownHostCoordinator()
 		delete s_coord;
 		s_coord = nullptr;
 	}
+	// Backing out abandons the game, so let go of the punched in-game
+	// socket too. Left behind it would keep holding NETWORK_BASE_PORT_NUMBER
+	// and, worse, ConnectionManager would happily adopt this dead session's
+	// socket for the NEXT game the player starts -- including a plain LAN
+	// or skirmish game that has nothing to do with the coordinator.
+	if (OnlineCoordinatorAPI::hasStashedGameSocket())
+	{
+		ReleaseLog("Coordinator: releasing stashed game socket (host abandoned the lobby)");
+		OnlineCoordinatorAPI::discardStashedGameSocket();
+	}
 }
 
 // Ownership transfer at game start: the host keeps its coordinator TCP

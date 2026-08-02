@@ -109,17 +109,21 @@ void LANAPI::OnAccept( UnsignedInt playerIP, Bool status )
 {
 	if( AmIHost() )
 	{
-		Int i = 0;
-		for (; i < MAX_SLOTS; i++)
+		// Resolve by (IP, source port), not IP alone: two players behind one
+		// NAT share a public IP, and an IP-only match would apply the second
+		// player's accept to the first -- leaving the second stuck
+		// un-accepted forever (the start button never unlocks).
+		Int i = findSlotForSender(playerIP);
+		if (i < 0)
 		{
-			if (m_currentGame->getIP(i) == playerIP)
-			{
-				if(status)
-					m_currentGame->getLANSlot(i)->setAccept();
-				else
-					m_currentGame->getLANSlot(i)->unAccept();
-				break;
-			}
+			i = MAX_SLOTS;
+		}
+		else
+		{
+			if(status)
+				m_currentGame->getLANSlot(i)->setAccept();
+			else
+				m_currentGame->getLANSlot(i)->unAccept();
 		}
 		if (i != MAX_SLOTS )
 		{
@@ -143,14 +147,15 @@ void LANAPI::OnHasMap( UnsignedInt playerIP, Bool status )
 {
 	if( AmIHost() )
 	{
-		Int i = 0;
-		for (; i < MAX_SLOTS; i++)
+		// Same-NAT disambiguation as OnAccept above.
+		Int i = findSlotForSender(playerIP);
+		if (i < 0)
 		{
-			if (m_currentGame->getIP(i) == playerIP)
-			{
-				m_currentGame->getLANSlot(i)->setMapAvailability( status );
-				break;
-			}
+			i = MAX_SLOTS;
+		}
+		else
+		{
+			m_currentGame->getLANSlot(i)->setMapAvailability( status );
 		}
 		if (i != MAX_SLOTS )
 		{

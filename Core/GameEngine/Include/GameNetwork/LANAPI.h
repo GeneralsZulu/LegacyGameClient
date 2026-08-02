@@ -394,6 +394,11 @@ public:
 	/// peer was told to talk to (CGNATs give a rebound socket a new one).
 	/// Takes ownership of fd.
 	Bool SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd );
+
+	/// Slot index for the peer whose message is currently being dispatched.
+	/// Matches (IP, source port) first so two players sharing one public IP
+	/// (same household/NAT) are told apart; falls back to IP-only. -1 if none.
+	Int findSlotForSender( UnsignedInt senderIP ) const;
 	virtual Bool AmIHost() override;																											///< Am I hosting a game?
 	virtual UnicodeString GetMyName() override { return m_name; }                 ///< What's my name?
 	virtual LANGameInfo* GetMyGame() override { return m_currentGame; }					      ///< What's my Game?

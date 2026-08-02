@@ -691,14 +691,9 @@ void LANAPI::handleSetAccept( LANMessage *msg, UnsignedInt senderIP )
 {
 	if (!m_inLobby && m_currentGame && !m_currentGame->isGameInProgress())
 	{
-		int player;
-		for (player = 0; player < MAX_SLOTS; ++player)
+		if (findSlotForSender(senderIP) >= 0)
 		{
-			if (m_currentGame->getIP(player) == senderIP)
-			{
-				OnAccept(senderIP, msg->Accept.isAccepted);
-				break;
-			}
+			OnAccept(senderIP, msg->Accept.isAccepted);
 		}
 	}
 }
@@ -805,14 +800,17 @@ void LANAPI::handleGameOptions( LANMessage *msg, UnsignedInt senderIP )
 {
 	if (!m_inLobby && m_currentGame && !m_currentGame->isGameInProgress())
 	{
-		int player;
-		for (player = 0; player < MAX_SLOTS; ++player)
+		// (IP, port)-aware so two players behind one NAT are not confused
+		// for each other -- crediting the wrong slot would starve the other
+		// of keepalives and get it dropped as "not responding".
+		int player = findSlotForSender(senderIP);
+		if (player >= 0)
 		{
-			if (m_currentGame->getIP(player) == senderIP)
-			{
-				OnGameOptions(senderIP, player, AsciiString(msg->GameOptions.options));
-				break;
-			}
+			OnGameOptions(senderIP, player, AsciiString(msg->GameOptions.options));
+		}
+		else
+		{
+			player = MAX_SLOTS;
 		}
 		// Direct-connect diagnostic: a game-options packet whose sender
 		// matches no slot IP means the peer's keepalives are arriving but

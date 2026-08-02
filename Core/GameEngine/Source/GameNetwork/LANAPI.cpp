@@ -241,6 +241,37 @@ void LANAPI::adoptCoordinator(OnlineCoordinatorAPI* coord)
 	}
 }
 
+Int LANAPI::findSlotForSender(UnsignedInt senderIP) const
+{
+	if (m_currentGame == nullptr)
+		return -1;
+
+	// Players behind one NAT share a public IP and differ only by port, so
+	// prefer an exact (IP, source port) match against the per-slot lobby
+	// port the host recorded when that player first spoke. Falls through to
+	// the historical IP-only match for LAN games (where lobby ports are all
+	// the same) and for peers whose port we have not learned yet.
+	if (m_dispatchSenderPort != 0)
+	{
+		for (Int i = 0; i < MAX_SLOTS; ++i)
+		{
+			const LANGameSlot *slot = m_currentGame->getConstLANSlot(i);
+			if (slot != nullptr && slot->isHuman() && slot->getIP() == senderIP
+				&& slot->getLobbyPort() == m_dispatchSenderPort)
+			{
+				return i;
+			}
+		}
+	}
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+	{
+		const LANGameSlot *slot = m_currentGame->getConstLANSlot(i);
+		if (slot != nullptr && slot->isHuman() && slot->getIP() == senderIP)
+			return i;
+	}
+	return -1;
+}
+
 void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 {
 	if (ip != 0)
@@ -258,18 +289,26 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 			}
 		}
 		// Choose the destination port in priority order:
-		//   1) per-peer lobby port stored on the matching game slot (the host
-		//      learns this from each joiner's source port when running behind
-		//      NAT through the online coordinator).
-		//   2) source port of the LAN message currently being dispatched (lets
-		//      a reply land back through the same NAT mapping the request came
-		//      through, even before a slot exists for that peer).
+		//   1) source port of the LAN message currently being dispatched. This
+		//      is the exact endpoint the request came from, so it is right even
+		//      when several players share one public IP (two people behind the
+		//      same router/NAT). It MUST outrank the slot scan below, which
+		//      matches on IP alone and would otherwise address the reply to
+		//      whichever of them occupies the earlier slot -- the second
+		//      joiner then never sees the answer and times out.
+		//   2) per-peer lobby port stored on the matching game slot (used for
+		//      sends we originate rather than reply to; the host learns this
+		//      from each joiner's source port when running behind NAT).
 		//   3) m_directConnectRemotePort, set by the coordinator on the joiner
 		//      side before RequestGameJoinDirectConnect so the joiner's first
 		//      sends to the host go to the punched mapping, not lobbyPort.
 		//   4) lobbyPort (LAN default, unchanged behavior).
 		UnsignedShort port = lobbyPort;
-		if (m_currentGame != nullptr)
+		if (m_dispatchSenderPort != 0 && ip == m_dispatchSenderIP)
+		{
+			port = m_dispatchSenderPort;
+		}
+		if (port == lobbyPort && m_currentGame != nullptr)
 		{
 			for (Int i = 0; i < MAX_SLOTS; ++i)
 			{
@@ -280,10 +319,6 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 					break;
 				}
 			}
-		}
-		if (port == lobbyPort && m_dispatchSenderPort != 0 && ip == m_dispatchSenderIP)
-		{
-			port = m_dispatchSenderPort;
 		}
 		if (port == lobbyPort && ip == m_directConnectRemoteIP && m_directConnectRemotePort != 0)
 		{
@@ -527,6 +562,14 @@ void LANAPI::update()
 			m_dispatchSenderPort = m_transport->m_inBuffer[i].port;
 
 			LANMessage *msg = (LANMessage *)(m_transport->m_inBuffer[i].data);
+			// Direct-connect diagnostic: log the join-flow control messages
+			// with their true source endpoint. GAME_OPTIONS is excluded (it
+			// is the 10s keepalive and would drown the log).
+			if (m_directConnectRemoteIP != 0 && msg->messageType != LANMessage::MSG_GAME_OPTIONS)
+			{
+				ReleaseLog("LAN dc RECV type=%d from %d.%d.%d.%d:%u",
+					(Int)msg->messageType, PRINTF_IP_AS_4_INTS(senderIP), m_dispatchSenderPort);
+			}
 			//DEBUG_LOG(("LAN message type %s from %ls (%s@%s)", GetMessageTypeString(msg->messageType).str(),
 			//	msg->name, msg->userName, msg->hostName));
 			switch (msg->messageType)
