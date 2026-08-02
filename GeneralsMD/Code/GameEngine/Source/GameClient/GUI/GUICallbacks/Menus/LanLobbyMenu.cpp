@@ -40,6 +40,7 @@
 #include "Common/Player.h"
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
+#include "Common/ReleaseLog.h"
 #include "Common/OptionPreferences.h"
 #include "GameClient/AnimateWindowManager.h"
 #include "GameClient/ClientInstance.h"
@@ -110,6 +111,7 @@ void LanLobbyMenuShutdownHostCoordinator()
 {
 	if (s_coord)
 	{
+		ReleaseLog("Coordinator teardown: LanLobbyMenuShutdownHostCoordinator");
 		s_coord->disconnect();
 		delete s_coord;
 		s_coord = nullptr;
@@ -227,13 +229,26 @@ Bool LANPreferences::usesSystemMapDir()
 	return FALSE;
 }
 
+// When no (valid) map preference exists, prefer the first OFFICIAL
+// multiplayer map. getDefaultMap(TRUE) returns the alphabetically first
+// multiplayer map of any kind, and with user maps installed that tends to be
+// something like "(3 Letter names required).map" (punctuation sorts before
+// letters), which is a terrible first impression for a fresh lobby.
+static AsciiString getDefaultLanMap()
+{
+	AsciiString ret = getDefaultOfficialMap();
+	if (ret.isEmpty())
+		ret = getDefaultMap(TRUE);
+	return ret;
+}
+
 AsciiString LANPreferences::getPreferredMap()
 {
 	AsciiString ret;
 	LANPreferences::const_iterator it = find("Map");
 	if (it == end())
 	{
-		ret = getDefaultMap(TRUE);
+		ret = getDefaultLanMap();
 		return ret;
 	}
 
@@ -241,7 +256,7 @@ AsciiString LANPreferences::getPreferredMap()
 	ret.trim();
 	if (ret.isEmpty() || !isValidMap(ret, TRUE))
 	{
-		ret = getDefaultMap(TRUE);
+		ret = getDefaultLanMap();
 		return ret;
 	}
 
@@ -539,6 +554,15 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	defaultName = prefs.getUserName();
 	defaultName.truncateTo(g_lanPlayerNameLength);
 
+	// Test automation: -coordnick overrides the persisted player name so
+	// multiple lab clients sharing an install don't collide on the
+	// duplicate-name check.
+	if (!TheGlobalData->m_coordNick.isEmpty())
+	{
+		defaultName.translate(TheGlobalData->m_coordNick);
+		defaultName.truncateTo(g_lanPlayerNameLength);
+	}
+
 	GadgetTextEntrySetText( textEntryPlayerName, defaultName);
 	// Clear the text entry line
 	GadgetTextEntrySetText(textEntryChat, UnicodeString::TheEmptyString);
@@ -658,9 +682,15 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 		const Bool hostKeepAlive = (s_coordHandoffDone && s_coord->amIHost());
 		if (!hostKeepAlive)
 		{
+			ReleaseLog("Coordinator teardown: LanLobbyMenuShutdown (handoffDone=%d amIHost=%d)",
+				(int)s_coordHandoffDone, (int)s_coord->amIHost());
 			s_coord->disconnect();
 			delete s_coord;
 			s_coord = nullptr;
+		}
+		else
+		{
+			ReleaseLog("Coordinator kept alive through lobby shutdown (host N-player path)");
 		}
 	}
 	// If the handoff to TheLAN already happened we keep s_useCoordinator
@@ -725,17 +755,33 @@ static void connectCoordinatorIfNeeded()
 	}
 	s_coordCurrentNick = readPlayerNickAscii();
 	AsciiString host = COORD_HOST_DEFAULT;
+	UnsignedShort tcpPort = COORD_TCP_PORT_DEFAULT;
+	// -coordhost "host[:port]" override for lab/testing.
+	if (!TheGlobalData->m_coordHost.isEmpty())
+	{
+		host = TheGlobalData->m_coordHost;
+		const char* colon = strchr(host.str(), ':');
+		if (colon)
+		{
+			tcpPort = (UnsignedShort)atoi(colon + 1);
+			AsciiString hostOnly;
+			for (const char* p = host.str(); p != colon; ++p)
+				hostOnly.concat(*p);
+			host = hostOnly;
+		}
+	}
 	// Bind UDP/8086 (lobby) so the punched NAT mapping is on the port the LAN
 	// code will rebind after PUNCH_OK, AND UDP/8088 (NETWORK_BASE_PORT_NUMBER,
 	// in-game data) so ConnectionManager's later socket inherits an already-
 	// punched mapping. The TCP signaling port is the listed coordinator port;
 	// UDP STUN is on the port reported in hello_ok.
-	if (!s_coord->connect(host, COORD_TCP_PORT_DEFAULT,
+	ReleaseLog("Coordinator connect: %s:%u nick=%s", host.str(), (unsigned)tcpPort,
+		s_coordCurrentNick.str());
+	if (!s_coord->connect(host, tcpPort,
 		s_coordCurrentNick, AsciiString("zulu/1"),
 		/*lobbyBindPort=*/8086, /*gameBindPort=*/NETWORK_BASE_PORT_NUMBER))
 	{
-		DEBUG_LOG(("connectCoordinatorIfNeeded: connect failed: %s",
-			s_coord->lastError().str()));
+		ReleaseLog("Coordinator connect FAILED: %s", s_coord->lastError().str());
 	}
 }
 
@@ -768,6 +814,24 @@ static void coordinatorPostStatus(const char* msg)
 
 static void doCoordinatorHandoffToLAN();
 
+// User-facing text for each coordinator state transition. Returns null for
+// states that are pure plumbing (the user doesn't need a line for them).
+static const char* coordStateStatusText(OnlineCoordinatorAPI::State state)
+{
+	switch (state)
+	{
+	case OnlineCoordinatorAPI::STATE_CONNECTING:  return "Connecting to the online service...";
+	case OnlineCoordinatorAPI::STATE_HANDSHAKING: return nullptr;
+	case OnlineCoordinatorAPI::STATE_DISCOVERING: return "Detecting your internet address...";
+	case OnlineCoordinatorAPI::STATE_READY:       return "Online. You can host or join a game.";
+	case OnlineCoordinatorAPI::STATE_HOSTING:     return "Game registered. Waiting for players to join...";
+	case OnlineCoordinatorAPI::STATE_JOINING:     return "Joining game...";
+	case OnlineCoordinatorAPI::STATE_PUNCHING:    return "Connecting to the other player...";
+	case OnlineCoordinatorAPI::STATE_PUNCH_OK:    return "Connected!";
+	default: return nullptr;
+	}
+}
+
 static void pumpCoordinator()
 {
 	OnlineCoordinatorAPI::State prevState = s_coord->state();
@@ -776,14 +840,18 @@ static void pumpCoordinator()
 
 	if (state != prevState)
 	{
-		AsciiString msg;
-		msg.format("coordinator state -> %d", (Int)state);
-		coordinatorPostStatus(msg.str());
+		const char* stateText = coordStateStatusText(state);
+		if (stateText != nullptr)
+			coordinatorPostStatus(stateText);
+		ReleaseLog("Coordinator state %d -> %d%s%s", (Int)prevState, (Int)state,
+			(state == OnlineCoordinatorAPI::STATE_ERROR) ? " error: " : "",
+			(state == OnlineCoordinatorAPI::STATE_ERROR) ? s_coord->lastError().str() : "");
 		if (state == OnlineCoordinatorAPI::STATE_READY)
 		{
-			AsciiString s;
-			s.format("public addr: %s", s_coord->publicAddr().str());
-			coordinatorPostStatus(s.str());
+			// The public address is diagnostic gold when players report punch
+			// failures, but it reads as noise to most users; keep it in the
+			// ReleaseLog only.
+			ReleaseLog("Coordinator public addr: %s", s_coord->publicAddr().str());
 			// Immediately fetch games on first READY transition.
 			s_coord->requestList();
 			s_coordLastListMs = timeGetTime();
@@ -791,7 +859,7 @@ static void pumpCoordinator()
 		if (state == OnlineCoordinatorAPI::STATE_ERROR)
 		{
 			AsciiString s;
-			s.format("error: %s", s_coord->lastError().str());
+			s.format("Connection error: %s", s_coord->lastError().str());
 			coordinatorPostStatus(s.str());
 		}
 		if (state == OnlineCoordinatorAPI::STATE_PUNCH_OK && !s_coordHandoffDone)
@@ -814,6 +882,33 @@ static void pumpCoordinator()
 	// finished handshaking.
 	if (state == OnlineCoordinatorAPI::STATE_READY)
 	{
+		// Test automation: queue the host/join action once we're READY.
+		// Join waits until the games list contains the wanted name.
+		static Bool coordAutoDispatched = FALSE;
+		if (!coordAutoDispatched)
+		{
+			if (!TheGlobalData->m_coordAutoHostName.isEmpty())
+			{
+				s_coordPendingHostName = TheGlobalData->m_coordAutoHostName;
+				coordAutoDispatched = TRUE;
+				coordinatorPostStatus("auto: hosting");
+			}
+			else if (!TheGlobalData->m_coordAutoJoinName.isEmpty())
+			{
+				const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
+				for (size_t gi = 0; gi < games.size(); ++gi)
+				{
+					if (games[gi].name == TheGlobalData->m_coordAutoJoinName)
+					{
+						s_coordPendingJoinID = games[gi].id;
+						coordAutoDispatched = TRUE;
+						coordinatorPostStatus("auto: joining");
+						break;
+					}
+				}
+			}
+		}
+
 		UnsignedInt nowMs = timeGetTime();
 		if (nowMs - s_coordLastListMs > COORD_LIST_REFRESH_MS)
 		{
@@ -854,6 +949,13 @@ static void doCoordinatorHandoffToLAN()
 	Bool weAreHost = s_coord->amIHost();
 	DEBUG_LOG(("HANDOFF: start weAreHost=%d peerIP=0x%08x peerPort=%u gamePeerIP=0x%08x gamePeerPort=%u",
 		(int)weAreHost, peerIP, peerPort, peer.gamePunchedIP, peer.gamePunchedPort));
+
+	// Mark the handoff BEFORE anything below can push a screen:
+	// RequestGameCreate's OnGameCreate callback runs TheShell->push
+	// SYNCHRONOUSLY, which runs LanLobbyMenuShutdown mid-call. If the flag
+	// isn't set yet, the host-keepalive check there sees handoffDone=FALSE
+	// and tears down the coordinator session that joiners 2..N still need.
+	s_coordHandoffDone = TRUE;
 
 	// Move the punched game UDP socket into the module-level stash so it
 	// outlives the coordinator (and this menu); a keepalive sender keeps
@@ -922,7 +1024,7 @@ static void doCoordinatorHandoffToLAN()
 		DEBUG_LOG(("HANDOFF: about to RequestGameCreate"));
 		TheLAN->RequestGameCreate(gameName, /*isDirectConnect=*/TRUE);
 		DEBUG_LOG(("HANDOFF: RequestGameCreate returned"));
-		coordinatorPostStatus("punch ok; hosting via direct-connect LAN");
+		coordinatorPostStatus("Setting up your game lobby...");
 	}
 	else
 	{
@@ -931,13 +1033,12 @@ static void doCoordinatorHandoffToLAN()
 		TheLAN->setDirectConnectRemotePort(peerPort);
 		TheLAN->RequestGameJoinDirectConnect(peerIP);
 		DEBUG_LOG(("HANDOFF: RequestGameJoinDirectConnect returned"));
-		AsciiString s;
-		s.format("punch ok; joining %u.%u.%u.%u:%u via direct connect",
-			(peerIP >> 24) & 0xff, (peerIP >> 16) & 0xff,
-			(peerIP >> 8) & 0xff, (peerIP) & 0xff, peerPort);
-		coordinatorPostStatus(s.str());
+		coordinatorPostStatus("Connected to host. Joining the game lobby...");
 	}
-	s_coordHandoffDone = TRUE;
+	ReleaseLog("Coordinator handoff to LAN done (host=%d peer=%u.%u.%u.%u:%u)",
+		(int)weAreHost,
+		(peerIP >> 24) & 0xff, (peerIP >> 16) & 0xff,
+		(peerIP >> 8) & 0xff, peerIP & 0xff, peerPort);
 	DEBUG_LOG(("HANDOFF: done"));
 }
 
@@ -1157,7 +1258,7 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 						gameName.format("%s's game", nick.str());
 						s_coordPendingHostName = gameName;
 						s_coordPendingJoinID.clear();
-						coordinatorPostStatus("queued host request; awaiting STUN");
+						coordinatorPostStatus("Creating game as soon as the connection is ready...");
 					}
 					else
 					{
@@ -1192,9 +1293,7 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 							connectCoordinatorIfNeeded();
 							s_coordPendingJoinID = s_coordListedIDs[rowSelected];
 							s_coordPendingHostName.clear();
-							AsciiString status;
-							status.format("queued join %s; awaiting STUN", s_coordPendingJoinID.str());
-							coordinatorPostStatus(status.str());
+							coordinatorPostStatus("Joining game as soon as the connection is ready...");
 						}
 					}
 					else if (rowSelected >= 0)

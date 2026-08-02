@@ -1690,9 +1690,14 @@ void ConnectionManager::initTransport() {
 			// trust the kernel-reported value above).
 			if (localPort != 0)
 				m_localPort = localPort;
-			m_transport->initFromFD(fd, m_localAddr, m_localPort);
-			ReleaseLog("Game transport adopted punched coordinator socket on port %d", m_localPort);
-			return;
+			if (m_transport->initFromFD(fd, m_localAddr, m_localPort)) {
+				ReleaseLog("Game transport adopted punched coordinator socket on port %d", m_localPort);
+				return;
+			}
+			// Adoption failed (initFromFD closed the fd and left its own
+			// ReleaseLog line). The punched NAT mapping is lost, but a fresh
+			// bind below can still save the match on LAN/open networks, and
+			// on failure it leaves the definitive log line either way.
 		}
 		DEBUG_LOG(("ConnectionManager::initTransport - stash reported live but takeStashedGameFd returned -1; falling back to fresh bind"));
 	}

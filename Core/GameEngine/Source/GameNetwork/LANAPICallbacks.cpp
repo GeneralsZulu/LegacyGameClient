@@ -37,6 +37,7 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
 #include "Common/RandomValue.h"
+#include "Common/ReleaseLog.h"
 #include "Common/UserPreferences.h"
 #include "GameClient/Color.h"
 #include "GameClient/GameText.h"
@@ -564,6 +565,19 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 			if (options.compare("HELLO") == 0)
 			{
 				m_currentGame->setPlayerLastHeard(playerSlot, timeGetTime());
+				// Direct-connect diagnostic: positive confirmation that the
+				// joiner's keepalive arrived and was credited. Throttled.
+				if (m_currentGame->getIsDirectConnect())
+				{
+					static UnsignedInt s_lastHelloCreditLogMs = 0;
+					UnsignedInt nowLog = timeGetTime();
+					if (nowLog - s_lastHelloCreditLogMs > 10000)
+					{
+						s_lastHelloCreditLogMs = nowLog;
+						ReleaseLog("LAN dc HELLO credited slot=%d ip=%d.%d.%d.%d",
+							playerSlot, PRINTF_IP_AS_4_INTS(playerIP));
+					}
+				}
 			}
 			else
 			{

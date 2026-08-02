@@ -37,6 +37,7 @@
 #endif
 
 #include "GameNetwork/networkutil.h"   // ResolveIP
+#include "Common/GlobalData.h"         // m_coordPunchTTL override
 
 // timeGetTime is provided by the engine's PreRTS.h on both Windows and the
 // stub used by docker/Linux builds.
@@ -53,6 +54,25 @@ static const UnsignedInt  STUN_PROBE_INTERVAL_MS = 500;
 static const Int          STUN_PROBE_MAX_TRIES   = 6;
 static const UnsignedInt  PUNCH_BLAST_INTERVAL_MS = 200;
 static const UnsignedInt  PUNCH_TIMEOUT_MS        = 8000;
+// The first punch volley goes out with a low IP TTL: enough hops to cross
+// our own NAT(s) (home router + possible CGNAT) and create the outbound
+// mapping, but expiring in transit before reaching the peer's NAT. Without
+// this, whichever side's first packet lands early creates an unsolicited
+// conntrack entry on Linux-style NATs that occupies the peer's advertised
+// mapping and silently diverts their SNAT to a different port -- both sides
+// then blast dead addresses forever (reproduced in the netns NAT lab; the
+// low-TTL first volley fixes it there deterministically).
+static const Int          PUNCH_LOW_TTL_DEFAULT   = 4;
+static const Int          PUNCH_FULL_TTL          = 128;
+static const UnsignedInt  PUNCH_LOW_TTL_MS        = 600;
+
+// -coordpunchttl override (the netns lab needs 2; the internet default is 4).
+static Int punchLowTTL(void)
+{
+	if (TheGlobalData && TheGlobalData->m_coordPunchTTL > 0)
+		return TheGlobalData->m_coordPunchTTL;
+	return PUNCH_LOW_TTL_DEFAULT;
+}
 static const UnsignedInt  TCP_RX_BUF_HIGH_WATER   = 64 * 1024;
 // Keepalive interval for the stashed game socket. Well under the most
 // aggressive NAT UDP idle TTLs (commonly 30s on home routers).
@@ -73,7 +93,9 @@ static AsciiString   s_stashKeepaliveNick;
 // (N-player: each subsequent joiner). The first peer above is the original
 // punched peer and is always sent to first; entries here are sent in order
 // alongside it on each keepalive tick.
-struct StashGamePeer { UnsignedInt ipHost; UnsignedShort portHost; };
+static void setPunchTTL(Int fd, Int ttl);   // defined below with the punch pump
+
+struct StashGamePeer { UnsignedInt ipHost; UnsignedShort portHost; Bool lowTtlProbeSent; };
 static std::vector<StashGamePeer> s_stashGameExtraPeers;
 
 
@@ -369,6 +391,7 @@ void OnlineCoordinatorAPI::addStashedGamePeer(UnsignedInt ipHost, UnsignedShort 
 	StashGamePeer p;
 	p.ipHost   = ipHost;
 	p.portHost = portHost;
+	p.lowTtlProbeSent = FALSE;
 	s_stashGameExtraPeers.push_back(p);
 	// Fire one immediately so the host's NAT installs an outbound mapping
 	// before this joiner's first inbound packet arrives.
@@ -406,12 +429,32 @@ void OnlineCoordinatorAPI::pumpStashedKeepalive()
 		dst.sin_port        = htons(s_stashGamePeerPortHost);
 		sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
 	}
+	Bool sentLowTtlProbe = FALSE;
 	for (size_t i = 0; i < s_stashGameExtraPeers.size(); ++i)
 	{
 		dst.sin_addr.s_addr = htonl(s_stashGameExtraPeers[i].ipHost);
 		dst.sin_port        = htons(s_stashGameExtraPeers[i].portHost);
-		sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+		if (!s_stashGameExtraPeers[i].lowTtlProbeSent)
+		{
+			// First packet toward a brand-new joiner: TTL-limited so it
+			// opens OUR mapping but expires before it can poison the
+			// joiner's NAT (the joiner hasn't started punching yet).
+			setPunchTTL(s_stashGameFd, punchLowTTL());
+			sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+			setPunchTTL(s_stashGameFd, PUNCH_FULL_TTL);
+			s_stashGameExtraPeers[i].lowTtlProbeSent = TRUE;
+			sentLowTtlProbe = TRUE;
+		}
+		else
+		{
+			sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+		}
 	}
+	// A new joiner is mid-punch right now (8s deadline); make sure it sees
+	// full-TTL inbound game traffic well before that instead of waiting a
+	// whole keepalive interval.
+	if (sentLowTtlProbe)
+		s_stashKeepaliveNextMs = nowMs + 2000;
 }
 
 // Parse an "ip:port" string into host-order UnsignedInt + UnsignedShort.
@@ -460,6 +503,8 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_punchDeadlineMs(0)
 	, m_punchOkLobby(FALSE)
 	, m_punchOkGame(FALSE)
+	, m_punchTtl(0)
+	, m_lastHeartbeatMs(0)
 {
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
 }
@@ -874,17 +919,74 @@ void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& public
 	}
 }
 
+// Set the IPv4 unicast TTL on a punch socket. On Windows the numeric value
+// of IP_TTL depends on the winsock generation: winsock.h (WS1) says 7,
+// ws2_32 uses 4, and which one the stack honors depends on which import
+// library won at link time. Set both; the wrong one is a harmless
+// no-op/ENOPROTOOPT on the other stack.
+static void setPunchTTL(Int fd, Int ttl)
+{
+	if (fd == -1) return;
+#ifdef _WIN32
+	setsockopt(fd, IPPROTO_IP, 4, (const char*)&ttl, sizeof(ttl));
+	setsockopt(fd, IPPROTO_IP, 7, (const char*)&ttl, sizeof(ttl));
+#else
+	setsockopt(fd, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl));
+#endif
+}
+
+void OnlineCoordinatorAPI::sendPunchOutcome(Bool ok)
+{
+	if (m_tcpFd == -1) return;
+	UnsignedInt nowMs = timeGetTime();
+	UnsignedInt tookMs = (nowMs > m_punchStartMs) ? (nowMs - m_punchStartMs) : 0;
+	AsciiString line;
+	line.format("{\"type\":\"punch_outcome\",\"data\":{\"ok\":%s,\"lobby_ok\":%s,\"game_ok\":%s,\"ms\":%u,\"role\":\"%s\"}}",
+		ok ? "true" : "false",
+		m_punchOkLobby ? "true" : "false",
+		m_punchOkGame  ? "true" : "false",
+		tookMs,
+		m_amIHost ? "host" : "guest");
+	sendJsonLine(line);
+}
+
 void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 {
 	if (m_state != STATE_PUNCHING) return;
 	if (!m_peerInfoArmed) return;
 	if (nowMs >= m_punchDeadlineMs)
 	{
+		sendPunchOutcome(FALSE);
+		if (m_amIHost && !m_postHandoff && !m_newPeers.empty())
+		{
+			// The current joiner never punched through, but another joiner is
+			// queued. Promote it instead of killing the whole lobby. No punch
+			// delay: the queued peer started blasting when its peer_info was
+			// delivered, so it's us who is late.
+			DEBUG_LOG(("OnlineCoordinatorAPI: punch timed out for %s; promoting next queued joiner %s",
+				m_peerInfo.nick.str(), m_newPeers.front().nick.str()));
+			m_peerInfo = m_newPeers.front();
+			m_newPeers.erase(m_newPeers.begin());
+			m_punchOkLobby     = FALSE;
+			m_punchOkGame      = FALSE;
+			m_punchTtl         = 0;   // restart the low-TTL phase for the new peer
+			m_punchStartMs     = nowMs;
+			m_punchNextBlastMs = nowMs;
+			m_punchDeadlineMs  = nowMs + PUNCH_TIMEOUT_MS;
+			return;
+		}
 		setError(AsciiString("punch: no inbound packet within timeout"));
 		return;
 	}
 	if (nowMs >= m_punchNextBlastMs)
 	{
+		Int wantTtl = (nowMs < m_punchStartMs + PUNCH_LOW_TTL_MS) ? punchLowTTL() : PUNCH_FULL_TTL;
+		if (wantTtl != m_punchTtl)
+		{
+			setPunchTTL(m_udpFdLobby, wantTtl);
+			setPunchTTL(m_udpFdGame,  wantTtl);
+			m_punchTtl = wantTtl;
+		}
 		if (!m_punchOkLobby)
 			blastPunchPacketsOn(m_udpFdLobby, m_peerInfo.publicAddr, m_peerInfo.localAddr);
 		if (!m_punchOkGame)
@@ -914,6 +1016,7 @@ void OnlineCoordinatorAPI::pumpUdpRecv()
 			(m_peerInfo.gamePunchedIP) & 0xff,
 			m_peerInfo.gamePunchedPort));
 		setState(STATE_PUNCH_OK);
+		sendPunchOutcome(TRUE);
 	}
 }
 
@@ -990,7 +1093,15 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 					(srcIPHost >> 8) & 0xff, (srcIPHost) & 0xff, srcPortHost));
 			}
 			// Send one acknowledgement so the peer also sees inbound traffic
-			// quickly even if its first blast was lost.
+			// quickly even if its first blast was lost. Inbound traffic means
+			// both NAT mappings are settled, so the low-TTL phase (if still
+			// active) is over: the ACK must survive the full path.
+			if (m_punchTtl != PUNCH_FULL_TTL)
+			{
+				setPunchTTL(m_udpFdLobby, PUNCH_FULL_TTL);
+				setPunchTTL(m_udpFdGame,  PUNCH_FULL_TTL);
+				m_punchTtl = PUNCH_FULL_TTL;
+			}
 			char ack[32];
 			Int ackLen = snprintf(ack, sizeof(ack), "ACK from %s", m_nick.str());
 			if (ackLen > 0)
@@ -1056,6 +1167,23 @@ void OnlineCoordinatorAPI::update()
 		hello.concat("}}");
 		sendJsonLine(hello);
 		setState(STATE_HANDSHAKING);
+	}
+
+	// Keepalive: the coordinator reaps sessions idle for 5 minutes, and a
+	// host can easily sit in the game-options screen longer than that
+	// without generating any TCP traffic (its game silently vanishes from
+	// the list). One heartbeat a minute keeps LastSeen fresh, pre- and
+	// post-handoff alike.
+	if (m_tcpFd != -1 && m_state != STATE_CONNECTING)
+	{
+		const UnsignedInt HEARTBEAT_INTERVAL_MS = 60 * 1000;
+		if (m_lastHeartbeatMs == 0)
+			m_lastHeartbeatMs = nowMs;
+		else if (nowMs - m_lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS)
+		{
+			sendJsonLine(AsciiString("{\"type\":\"heartbeat\"}"));
+			m_lastHeartbeatMs = nowMs;
+		}
 	}
 
 	pumpTcpRecv();
@@ -1237,14 +1365,20 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		parseHostOrderIpPort(p.publicAddr,     &p.punchedIP,     &p.punchedPort);
 		parseHostOrderIpPort(p.gamePublicAddr, &p.gamePunchedIP, &p.gamePunchedPort);
 
-		if (m_postHandoff)
+		if (m_postHandoff || m_peerInfoArmed)
 		{
-			// We no longer own the UDP sockets, so we can't STUN/punch on
-			// behalf of this new peer. Stash the addrs and let the lobby UI
-			// drain the queue; it'll plumb the game-port into TheLAN and
-			// fire a NAT-opening packet via TheLAN's transport.
-			DEBUG_LOG(("OnlineCoordinatorAPI: post-handoff peer_info from %s (game %s); queueing for UI",
-				p.publicAddr.str(), p.gamePublicAddr.str()));
+			// Two reasons we can't punch this peer right now:
+			//  - post-handoff: we no longer own the UDP sockets. The lobby UI
+			//    drains the queue and plumbs the game-port into TheLAN.
+			//  - a punch is already armed for another peer (or has completed
+			//    and is awaiting the UI handoff). Overwriting m_peerInfo here
+			//    would redirect the in-flight punch mid-blast and strand the
+			//    first joiner. Queue instead; the queue is drained by the UI
+			//    once we enter post-handoff, or promoted by pumpPunch if the
+			//    current punch times out.
+			DEBUG_LOG(("OnlineCoordinatorAPI: peer_info from %s (game %s) while %s; queueing",
+				p.publicAddr.str(), p.gamePublicAddr.str(),
+				m_postHandoff ? "post-handoff" : "punch already in flight"));
 			m_newPeers.push_back(p);
 			return;
 		}
@@ -1253,6 +1387,7 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		m_peerInfoArmed = TRUE;
 		m_punchOkLobby = FALSE;
 		m_punchOkGame  = FALSE;
+		m_punchTtl     = 0;   // force TTL (re)apply on the first blast
 		UnsignedInt nowMs = timeGetTime();
 		m_punchStartMs     = nowMs + (UnsignedInt)m_peerInfo.punchInMS;
 		m_punchNextBlastMs = m_punchStartMs;

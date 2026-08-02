@@ -341,6 +341,11 @@ public:
 	/// joiner, the host fires this so its NAT lets the joiner's subsequent
 	/// MSG_REQUEST_GAME_INFO through (for non-cone NATs).
 	void sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHost );
+	// TTL-limited NAT-opening probe: creates our outbound lobby-socket
+	// mapping without reaching (and poisoning) the peer's NAT. Fire this
+	// the moment the coordinator reports a new joiner, then follow up with
+	// a full-TTL sendNATKeepalive once the joiner has started punching.
+	void sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortHost );
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
@@ -412,6 +417,16 @@ protected:
 	PendingActionType		m_pendingAction;	///< What action are we performing?
 	UnsignedInt					m_expiration;						///< When should we give up on our action?
 	UnsignedInt					m_actionTimeout;
+	// Join-request retransmit: MSG_REQUEST_GAME_INFO / MSG_REQUEST_JOIN are
+	// single UDP packets; over punched NAT paths either can be lost (e.g.
+	// while the host is mid-handoff creating its game), which used to surface
+	// as "Connection timed out" on the joiner. While ACT_JOIN or
+	// ACT_JOINDIRECTCONNECT is pending, update() re-sends the stashed request
+	// once a second until it is answered or m_expiration hits. The host
+	// answers re-joins idempotently (see handleRequestJoin).
+	LANMessage					m_pendingResendMsg;   ///< Verbatim copy of the last join-flow request
+	UnsignedInt					m_pendingResendIP;    ///< Destination passed to sendMessage for it
+	UnsignedInt					m_nextResendMs;       ///< When to fire the next retry (0 = disarmed)
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
 	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
 	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER. Single-value version for 2-player coord.

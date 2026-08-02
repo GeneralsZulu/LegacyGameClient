@@ -52,6 +52,11 @@ public:
 	/// the same socket (and therefore the same NAT mapping) that was punched
 	/// during the coordinator session.
 	Bool initFromFD( Int fd, UnsignedInt ip, UnsignedShort port );
+	// Immediately send a tiny raw probe with a temporary IPv4 TTL. Used as a
+	// NAT-opening packet that creates our outbound mapping but expires in
+	// transit before it can reach (and poison) the peer's NAT. Bypasses the
+	// normal queue/CRC framing; the payload is meant to be dropped.
+	Bool sendNATProbe( UnsignedInt ip, UnsignedShort port, Int ttl );
 	void reset();
 	Bool update();									///< Call this once a GameEngine tick, regardless of whether the frame advances.
 

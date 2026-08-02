@@ -14,10 +14,11 @@ const (
 	MsgList       = "list"
 	MsgGames      = "games"
 	MsgJoin       = "join"
-	MsgPeerInfo   = "peer_info"
-	MsgHeartbeat  = "heartbeat"
-	MsgError      = "error"
-	MsgBye        = "bye"
+	MsgPeerInfo     = "peer_info"
+	MsgHeartbeat    = "heartbeat"
+	MsgPunchOutcome = "punch_outcome"
+	MsgError        = "error"
+	MsgBye          = "bye"
 )
 
 type Envelope struct {
@@ -80,6 +81,16 @@ type PeerInfo struct {
 	LocalAddr      string `json:"local_addr"`
 	PunchInMS      int    `json:"punch_in_ms"`
 	Role           string `json:"role"`
+}
+
+// PunchOutcome is fire-and-forget telemetry from a client after a hole
+// punch attempt, so real-world punch success rates are visible server-side.
+type PunchOutcome struct {
+	OK      bool   `json:"ok"`
+	LobbyOK bool   `json:"lobby_ok"`
+	GameOK  bool   `json:"game_ok"`
+	MS      int    `json:"ms"`
+	Role    string `json:"role"`
 }
 
 type Error struct {

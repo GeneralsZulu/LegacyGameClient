@@ -2,6 +2,14 @@
 
 Online matchmaking + NAT-traversal signaling service for the Generals client.
 
+**Production home:** the service now runs inside cncstats
+(`github.com/bill-rich/cncstats`, `pkg/coordinator`), started automatically by
+the cncstats binary on `:27500`/`:27501` (override with `COORD_TCP_ADDR` /
+`COORD_UDP_ADDR`, disable with `COORD_DISABLED=1`). `protocol.go` and
+`server.go` here are the reference copies for the game client and for local
+testing with stuntest; keep them in sync with the cncstats copies when the
+wire protocol changes.
+
 Two binaries:
 
 - `cmd/coord` runs the service. TCP for signaling, UDP for STUN-style public-address discovery.
@@ -75,31 +83,21 @@ Both stuntest processes should report `PUNCH OK` after the join.
 
 ## Deploy to cncstats.computersrfun.org
 
-1. Cross-compile on dev box (or build on server):
+The coordinator ships with cncstats now: deploy cncstats as usual and open the
+ports. The standalone `cmd/coord` + `deploy/coordinator.service` path below is
+kept only as a fallback if the coordinator ever needs to run separately.
 
-   ```
-   GOOS=linux GOARCH=amd64 go build -o coord ./cmd/coord
-   scp coord cncstats.computersrfun.org:/tmp/coord
-   ```
-
-2. On the server, as root:
-
-   ```
-   useradd -r -s /usr/sbin/nologin coord
-   install -m 0755 /tmp/coord /usr/local/bin/coord
-   install -m 0644 deploy/coordinator.service /etc/systemd/system/coordinator.service
-   systemctl daemon-reload
-   systemctl enable --now coordinator
-   ```
-
-3. Firewall:
+1. Firewall:
 
    ```
    ufw allow 27500/tcp
    ufw allow 27501/udp
    ```
 
-4. Verify from a remote machine:
+   (With docker-compose the ports are already published by the compose file;
+   with a bare binary nothing else is needed.)
+
+2. Verify from a remote machine:
 
    ```
    ./stuntest -nick remote-test

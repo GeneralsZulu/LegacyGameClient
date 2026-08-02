@@ -35,6 +35,7 @@
 #include "Common/Registry.h"
 #include "Common/GlobalData.h"
 #include "Common/QuotedPrintable.h"
+#include "Common/ReleaseLog.h"
 #include "Common/UserPreferences.h"
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/LANAPICallbacks.h"
@@ -130,7 +131,12 @@ void LANAPI::handleGameAnnounce( LANMessage *msg, UnsignedInt senderIP )
 				delete game;
 				return;
 			}
-			RequestGameJoin(game, m_directConnectRemoteIP);
+			// Duplicate announces are normal now that the join flow retries
+			// its requests: only escalate to MSG_REQUEST_JOIN once. While
+			// ACT_JOIN is already pending, a second RequestGameJoin would
+			// bounce off the busy guard and surface a bogus join failure.
+			if (m_pendingAction != ACT_JOIN)
+				RequestGameJoin(game, m_directConnectRemoteIP);
 		}
 	}
 	else
@@ -375,14 +381,35 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 				LANGameSlot *slot = m_currentGame->getLANSlot(player);
 				if (slot->isHuman() && slot->getName().compare(msg->name) == 0)
 				{
-					// just deny duplicates
-					reply.messageType = LANMessage::MSG_JOIN_DENY;
-					reply.GameNotJoined.reason = LANAPIInterface::RET_DUPLICATE_NAME;
-					reply.GameNotJoined.gameIP = m_localIP;
-					reply.GameNotJoined.playerIP = senderIP;
+					if (slot->getIP() == senderIP)
+					{
+						// Same name AND same address: this is the same player
+						// re-sending MSG_REQUEST_JOIN because our JOIN_ACCEPT
+						// (or their request) was lost. Joins are now retried by
+						// the client over lossy NAT paths, so answer
+						// idempotently with the slot they already occupy
+						// instead of denying as a duplicate.
+						reply.messageType = LANMessage::MSG_JOIN_ACCEPT;
+						wcslcpy(reply.GameJoined.gameName, m_currentGame->getName().str(), ARRAY_SIZE(reply.GameJoined.gameName));
+						reply.GameJoined.slotPosition = player;
+						reply.GameJoined.gameIP = m_localIP;
+						reply.GameJoined.playerIP = senderIP;
+						// Refresh the punched lobby-port mapping in case their
+						// NAT rebound between attempts.
+						slot->setLobbyPort(m_dispatchSenderPort);
+						slot->setLastHeard(timeGetTime());
+						DEBUG_LOG(("LANAPI::handleRequestJoin - re-join from same player at slot %d; resending accept.", player));
+					}
+					else
+					{
+						// just deny duplicates
+						reply.messageType = LANMessage::MSG_JOIN_DENY;
+						reply.GameNotJoined.reason = LANAPIInterface::RET_DUPLICATE_NAME;
+						reply.GameNotJoined.gameIP = m_localIP;
+						reply.GameNotJoined.playerIP = senderIP;
+						DEBUG_LOG(("LANAPI::handleRequestJoin - join denied because of duplicate names."));
+					}
 					canJoin = false;
-
-					DEBUG_LOG(("LANAPI::handleRequestJoin - join denied because of duplicate names."));
 					break;
 				}
 			}
@@ -763,6 +790,24 @@ void LANAPI::handleGameOptions( LANMessage *msg, UnsignedInt senderIP )
 			{
 				OnGameOptions(senderIP, player, AsciiString(msg->GameOptions.options));
 				break;
+			}
+		}
+		// Direct-connect diagnostic: a game-options packet whose sender
+		// matches no slot IP means the peer's keepalives are arriving but
+		// being ignored, which reads as "player not responding" on our end.
+		if (player == MAX_SLOTS && m_currentGame->getIsDirectConnect())
+		{
+			static UnsignedInt s_lastNoMatchLogMs = 0;
+			UnsignedInt nowLog = timeGetTime();
+			if (nowLog - s_lastNoMatchLogMs > 5000)
+			{
+				s_lastNoMatchLogMs = nowLog;
+				ReleaseLog("LAN dc GAMEOPT from unmatched sender %d.%d.%d.%d (opts=%.32s) slots: %d.%d.%d.%d %d.%d.%d.%d %d.%d.%d.%d %d.%d.%d.%d",
+					PRINTF_IP_AS_4_INTS(senderIP), msg->GameOptions.options,
+					PRINTF_IP_AS_4_INTS(m_currentGame->getIP(0)),
+					PRINTF_IP_AS_4_INTS(m_currentGame->getIP(1)),
+					PRINTF_IP_AS_4_INTS(m_currentGame->getIP(2)),
+					PRINTF_IP_AS_4_INTS(m_currentGame->getIP(3)));
 			}
 		}
 	}

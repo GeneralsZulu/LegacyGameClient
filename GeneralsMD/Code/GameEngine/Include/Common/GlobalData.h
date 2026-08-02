@@ -382,6 +382,15 @@ public:
 	// Latency insertion, packet loss for network debugging
 	Int m_netMinPlayers;					///< Min players needed to start a net game
 
+	// Online-coordinator test automation (see LanLobbyMenu/LanGameOptionsMenu).
+	// All default to off; used to drive multi-client punch tests headlessly.
+	AsciiString m_coordHost;				///< override coordinator "host[:port]" ("" = built-in default)
+	AsciiString m_coordNick;				///< override lobby player name ("" = prefs)
+	AsciiString m_coordAutoHostName;		///< nonempty: auto-enter online lobby and host game with this name
+	AsciiString m_coordAutoJoinName;		///< nonempty: auto-enter online lobby and join first game with this name
+	Int m_coordAutoStart;					///< >0: host auto-starts at N players; joiners auto-accept
+	Int m_coordPunchTTL;					///< IP TTL for the low-TTL first punch volley (default 4; lab uses 2)
+
 	UnsignedInt m_defaultIP;			///< preferred IP address for LAN
 	UnsignedInt m_firewallBehavior;	///< Last detected firewall behavior
 	Bool m_firewallSendDelay;			///< Use send delay for firewall connection negotiations

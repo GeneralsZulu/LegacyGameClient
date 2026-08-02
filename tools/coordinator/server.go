@@ -70,6 +70,9 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	games    map[string]*gameState
+	// Lifetime punch telemetry counters (see MsgPunchOutcome).
+	punchOK   int
+	punchFail int
 }
 
 func NewServer() *Server {
@@ -181,7 +184,9 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 			}
 			return
 		}
+		s.mu.Lock()
 		sess.LastSeen = time.Now()
+		s.mu.Unlock()
 		var env Envelope
 		if err := json.Unmarshal(line, &env); err != nil {
 			sess.send(MsgError, Error{Message: "bad envelope"})
@@ -199,6 +204,21 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 func (s *Server) handleMessage(sess *Session, env *Envelope) error {
 	switch env.Type {
 	case MsgHeartbeat:
+		return nil
+	case MsgPunchOutcome:
+		var m PunchOutcome
+		if err := json.Unmarshal(env.Data, &m); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		if m.OK {
+			s.punchOK++
+		} else {
+			s.punchFail++
+		}
+		s.mu.Unlock()
+		log.Printf("punch outcome session=%s nick=%q role=%s ok=%v lobby=%v game=%v ms=%d",
+			sess.Token[:8], sess.Nick, m.Role, m.OK, m.LobbyOK, m.GameOK, m.MS)
 		return nil
 	case MsgHost:
 		var m Host
@@ -298,38 +318,42 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 		return fmt.Errorf("game %s not found", m.GameID)
 	}
 	host := g.hostSess
+	if host == sess {
+		s.mu.Unlock()
+		return fmt.Errorf("cannot join your own game")
+	}
 	sess.LocalAddr = m.LocalAddr
 	sess.PublicAddr = m.PublicAddr
 	sess.GamePublicAddr = m.GamePublicAddr
-	s.mu.Unlock()
-
-	if host == sess {
-		return fmt.Errorf("cannot join your own game")
-	}
-
-	if err := host.send(MsgPeerInfo, PeerInfo{
+	// Snapshot both peers' fields while holding the lock; sends below run
+	// unlocked and must not touch shared Session state.
+	guestInfo := PeerInfo{
 		Nick:           sess.Nick,
 		PublicAddr:     sess.PublicAddr,
 		GamePublicAddr: sess.GamePublicAddr,
 		LocalAddr:      sess.LocalAddr,
 		PunchInMS:      PunchDelayMS,
 		Role:           "host",
-	}); err != nil {
-		return fmt.Errorf("host send: %w", err)
 	}
-	if err := sess.send(MsgPeerInfo, PeerInfo{
+	hostInfo := PeerInfo{
 		Nick:           host.Nick,
 		PublicAddr:     host.PublicAddr,
 		GamePublicAddr: host.GamePublicAddr,
 		LocalAddr:      host.LocalAddr,
 		PunchInMS:      PunchDelayMS,
 		Role:           "guest",
-	}); err != nil {
+	}
+	s.mu.Unlock()
+
+	if err := host.send(MsgPeerInfo, guestInfo); err != nil {
+		return fmt.Errorf("host send: %w", err)
+	}
+	if err := sess.send(MsgPeerInfo, hostInfo); err != nil {
 		return fmt.Errorf("guest send: %w", err)
 	}
 	log.Printf("matched host=%s(lobby=%s game=%s) <-> guest=%s(lobby=%s game=%s) game=%s",
-		host.Nick, host.PublicAddr, host.GamePublicAddr,
-		sess.Nick, sess.PublicAddr, sess.GamePublicAddr, m.GameID)
+		hostInfo.Nick, hostInfo.PublicAddr, hostInfo.GamePublicAddr,
+		guestInfo.Nick, guestInfo.PublicAddr, guestInfo.GamePublicAddr, m.GameID)
 	return nil
 }
 
@@ -371,20 +395,21 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 		if n >= STUNRequestSize {
 			purpose = buf[4+SessionTokenBytes]
 		}
+		public := fmt.Sprintf("%s:%d", ip4.String(), src.Port)
 		s.mu.Lock()
 		sess, ok := s.sessions[token]
+		if ok {
+			switch purpose {
+			case STUNPurposeGame:
+				sess.GamePublicAddr = public
+			default:
+				sess.PublicAddr = public
+			}
+		}
 		s.mu.Unlock()
 		if !ok {
 			log.Printf("STUN probe with unknown token from %s", src)
 			continue
-		}
-
-		public := fmt.Sprintf("%s:%d", ip4.String(), src.Port)
-		switch purpose {
-		case STUNPurposeGame:
-			sess.GamePublicAddr = public
-		default:
-			sess.PublicAddr = public
 		}
 
 		resp := make([]byte, STUNResponseSize)

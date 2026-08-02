@@ -29,6 +29,7 @@
 #include "Common/crc.h"
 #include "Common/GameState.h"
 #include "Common/Registry.h"
+#include "Common/ReleaseLog.h"
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/networkutil.h"
@@ -87,6 +88,8 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_directConnectRemoteIP = 0;
 	m_directConnectRemoteGamePort = 0;
 	m_actionTimeout = 5000; // ms
+	m_pendingResendIP = 0;
+	m_nextResendMs = 0;
 	m_lastUpdate = 0;
 	m_transport = new Transport;
 	m_isActive = TRUE;
@@ -214,6 +217,18 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 {
 	if (ip != 0)
 	{
+		// Joiner side of a direct-connect game: rewrite the host's LAN-local
+		// IP (as recorded in slot 0 from the options string) to the punched
+		// coordinator mapping; the local IP is unroutable across NATs.
+		if (m_currentGame != nullptr && m_currentGame->getIsDirectConnect() &&
+			!AmIHost() && m_directConnectRemoteIP != 0 && ip != m_directConnectRemoteIP)
+		{
+			LANGameSlot *hostSlot = m_currentGame->getLANSlot(0);
+			if (hostSlot != nullptr && ip == hostSlot->getIP())
+			{
+				ip = m_directConnectRemoteIP;
+			}
+		}
 		// Choose the destination port in priority order:
 		//   1) per-peer lobby port stored on the matching game slot (the host
 		//      learns this from each joiner's source port when running behind
@@ -256,14 +271,60 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 			if (i != localSlot) {
 				LANGameSlot *slot = m_currentGame->getLANSlot(i);
 				if ((slot != nullptr) && (slot->isHuman())) {
+					UnsignedInt   destIP = slot->getIP();
 					UnsignedShort port = slot->getLobbyPort() != 0 ? slot->getLobbyPort() : lobbyPort;
-					m_transport->queueSend(slot->getIP(), port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
+					// Joiner side: the host's slot (0) carries the host's
+					// LAN-local IP from the options string, which is
+					// unroutable from behind another NAT. Send host-bound
+					// traffic to the punched coordinator mapping instead --
+					// without this the joiner's periodic HELLO never reaches
+					// the host and it drops us ~20s after joining.
+					if (i == 0 && !AmIHost() && m_directConnectRemoteIP != 0)
+					{
+						destIP = m_directConnectRemoteIP;
+						if (m_directConnectRemotePort != 0)
+							port = m_directConnectRemotePort;
+					}
+					// Diagnostic breadcrumb for the NAT keepalive path: game
+					// options (HELLO et al) are the host's liveness signal, so
+					// record exactly where each one is aimed. Throttled.
+					if (msg->messageType == LANMessage::MSG_GAME_OPTIONS)
+					{
+						static UnsignedInt s_lastHelloLogMs = 0;
+						UnsignedInt nowLog = timeGetTime();
+						if (nowLog - s_lastHelloLogMs > 5000)
+						{
+							s_lastHelloLogMs = nowLog;
+							ReleaseLog("LAN dc-send GAMEOPT slot=%d dest=%d.%d.%d.%d:%u (slotIP=%d.%d.%d.%d lobbyPort=%u) remote=%d.%d.%d.%d:%u localSlot=%d",
+								i, PRINTF_IP_AS_4_INTS(destIP), port,
+								PRINTF_IP_AS_4_INTS(slot->getIP()), slot->getLobbyPort(),
+								PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP), m_directConnectRemotePort,
+								localSlot);
+						}
+					}
+					m_transport->queueSend(destIP, port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 				}
 			}
 		}
 	}
 	else
 	{
+		// A coordinator (direct-connect) session should never fall through to
+		// LAN broadcast: it means the game object lost its direct-connect
+		// flag and unicast keepalives are now going nowhere routable.
+		if (m_directConnectRemoteIP != 0)
+		{
+			static UnsignedInt s_lastBcastLogMs = 0;
+			UnsignedInt nowLog = timeGetTime();
+			if (nowLog - s_lastBcastLogMs > 5000)
+			{
+				s_lastBcastLogMs = nowLog;
+				ReleaseLog("LAN dc BROADCAST-FALLBACK type=%d game=%p directConnect=%d remote=%d.%d.%d.%d:%u",
+					msg->messageType, (void*)m_currentGame,
+					m_currentGame ? (Int)m_currentGame->getIsDirectConnect() : -1,
+					PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP), m_directConnectRemotePort);
+			}
+		}
 		m_transport->queueSend(m_broadcastAddr, lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 	}
 }
@@ -626,6 +687,10 @@ void LANAPI::update()
 			{
 				if (m_currentGame->getIP(p) && m_currentGame->getPlayerLastHeard(p) + s_resendDelta*8 < now)
 				{
+					ReleaseLog("LAN host dropping slot %d ip=%d.%d.%d.%d lastHeard=%u now=%u delta=%u",
+						p, PRINTF_IP_AS_4_INTS(m_currentGame->getIP(p)),
+						m_currentGame->getPlayerLastHeard(p), now,
+						now - m_currentGame->getPlayerLastHeard(p));
 					LANMessage msg;
 					fillInLANMessage( &msg );
 					UnicodeString theStr;
@@ -647,6 +712,18 @@ void LANAPI::update()
 	if (gameListChanged)
 	{
 		OnGameList(m_games);
+	}
+
+	// Retransmit an unanswered join-flow request. A single UDP packet over a
+	// punched NAT path is easily lost (worst case: the host is mid-handoff,
+	// tearing down its coordinator lobby, when our MSG_REQUEST_JOIN lands);
+	// without a retry that one loss shows up as "Connection timed out".
+	if ((m_pendingAction == ACT_JOIN || m_pendingAction == ACT_JOINDIRECTCONNECT)
+		&& m_nextResendMs != 0 && now >= m_nextResendMs)
+	{
+		DEBUG_LOG(("LANAPI::update - retrying join request (action %d)", (Int)m_pendingAction));
+		sendMessage(&m_pendingResendMsg, m_pendingResendIP);
+		m_nextResendMs = now + 1000;
 	}
 
 	// Time out old actions
@@ -730,6 +807,19 @@ void LANAPI::sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHos
 		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
 }
 
+void LANAPI::sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortHost )
+{
+	if (destIPHost == 0 || destPortHost == 0) return;
+	if (!m_transport) return;
+	Int ttl = 4;
+	if (TheGlobalData && TheGlobalData->m_coordPunchTTL > 0)
+		ttl = TheGlobalData->m_coordPunchTTL;
+	m_transport->sendNATProbe(destIPHost, destPortHost, ttl);
+	DEBUG_LOG(("LANAPI::sendNATProbeLowTTL - probed %u.%u.%u.%u:%u",
+		(destIPHost >> 24) & 0xff, (destIPHost >> 16) & 0xff,
+		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
+}
+
 void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 {
 	if ((m_pendingAction != ACT_NONE) && (m_pendingAction != ACT_JOINDIRECTCONNECT))
@@ -783,6 +873,10 @@ void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 
 	m_pendingAction = ACT_JOIN;
 	m_expiration = timeGetTime() + m_actionTimeout;
+	// Arm the once-a-second retransmit (see update()).
+	m_pendingResendMsg = msg;
+	m_pendingResendIP = ip;
+	m_nextResendMs = timeGetTime() + 1000;
 }
 
 void LANAPI::RequestGameJoinDirectConnect(UnsignedInt ipaddress)
@@ -811,6 +905,10 @@ void LANAPI::RequestGameJoinDirectConnect(UnsignedInt ipaddress)
 
 	m_pendingAction = ACT_JOINDIRECTCONNECT;
 	m_expiration = timeGetTime() + m_actionTimeout;
+	// Arm the once-a-second retransmit (see update()).
+	m_pendingResendMsg = msg;
+	m_pendingResendIP = ipaddress;
+	m_nextResendMs = timeGetTime() + 1000;
 }
 
 void LANAPI::RequestGameLeave()

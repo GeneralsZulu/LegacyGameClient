@@ -113,6 +113,7 @@ class UDP
   Int           AdoptFD(Int fd, UnsignedInt IP, UnsignedShort port);
   Int           Write(const unsigned char *msg,UnsignedInt len,UnsignedInt IP,UnsignedShort port);
   Int           Read(unsigned char *msg,UnsignedInt len,sockaddr_in *from);
+  Int           GetFD(void) const { return fd; }   ///< raw socket, for socket options (e.g. TTL-limited NAT probes)
   sockStat         GetStatus();
   void             ClearStatus();
   //int              Wait(Int sec,Int usec,fd_set &returnSet);

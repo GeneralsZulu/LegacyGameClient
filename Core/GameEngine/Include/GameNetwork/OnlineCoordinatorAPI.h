@@ -223,9 +223,18 @@ private:
 	UnsignedInt   m_punchDeadlineMs;
 	Bool          m_punchOkLobby;
 	Bool          m_punchOkGame;
+	// TTL currently applied to both punch sockets (0 = not yet applied).
+	// The first PUNCH_LOW_TTL_MS of blasts go out with a low TTL so they
+	// open our NAT mapping without reaching (and poisoning) the peer's NAT.
+	Int           m_punchTtl;
 
 	// TCP receive buffer (raw bytes; lines extracted in pumpTcpRecv)
 	std::vector<char> m_rxBuf;
+
+	// Periodic keepalive to the coordinator: the server reaps sessions idle
+	// for SessionTTL (5 min), which would silently delist a host still
+	// sitting in the game-options screen. Any message refreshes LastSeen.
+	UnsignedInt   m_lastHeartbeatMs;
 
 	void  setState(State s);
 	void  setError(const AsciiString& msg);
@@ -237,6 +246,9 @@ private:
 	void  sendJsonLine(const AsciiString& line);
 	void  pumpTcpRecv();
 	void  onTcpMessage(const char* msgType, const char* dataJsonObj);
+	// Fire-and-forget punch result to the coordinator so real-world punch
+	// success rates are visible in its logs/status.
+	void  sendPunchOutcome(Bool ok);
 
 	// purpose: 0 = lobby, 1 = game (matches STUNPurpose* in protocol.go).
 	void  sendStunProbe(Int fd, unsigned char purpose);

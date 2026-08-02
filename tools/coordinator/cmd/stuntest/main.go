@@ -10,10 +10,39 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/GeneralsZulu/LegacyGameClient/tools/coordinator"
 )
+
+// setTTL sets the IPv4 TTL on the punch socket. The first punch volley goes
+// out with a low TTL: enough hops to cross our own NAT(s) and create the
+// outbound mapping, but expiring in transit before it reaches the peer's
+// NAT. An early full-TTL packet arriving before the peer's own first
+// outbound would otherwise create an unsolicited conntrack entry on
+// Linux-style NATs that occupies the peer's advertised mapping and diverts
+// their SNAT to a different port (observed in the natlab: punch deadlocks
+// with both sides refreshing each other's poison entries).
+func setTTL(u *net.UDPConn, ttl int) {
+	raw, err := u.SyscallConn()
+	if err != nil {
+		return
+	}
+	raw.Control(func(fd uintptr) {
+		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+	})
+}
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
 type client struct {
 	coordAddr    string
@@ -261,11 +290,31 @@ func (c *client) punch(pi *coordinator.PeerInfo) error {
 		}
 	}()
 
+	// Low-TTL first phase; see setTTL. PUNCH_LOW_TTL=0 disables.
+	lowTTL := envInt("PUNCH_LOW_TTL", 4)
+	lowTTLMs := envInt("PUNCH_LOW_TTL_MS", 600)
+	start := time.Now()
+	if lowTTL > 0 {
+		setTTL(c.udp, lowTTL)
+		log.Printf("punching with TTL=%d for the first %dms", lowTTL, lowTTLMs)
+	}
+	ttlRestored := lowTTL <= 0
+	restoreTTL := func() {
+		if !ttlRestored {
+			setTTL(c.udp, 64)
+			ttlRestored = true
+		}
+	}
+	defer restoreTTL()
+
 	deadline := time.Now().Add(8 * time.Second)
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 
 	for time.Now().Before(deadline) {
+		if !ttlRestored && time.Since(start) >= time.Duration(lowTTLMs)*time.Millisecond {
+			restoreTTL()
+		}
 		c.udp.WriteToUDP(msg, pubAddr)
 		if locAddr != nil {
 			c.udp.WriteToUDP(msg, locAddr)
@@ -273,13 +322,22 @@ func (c *client) punch(pi *coordinator.PeerInfo) error {
 		select {
 		case got := <-rx:
 			close(stop)
+			restoreTTL()
 			log.Printf("PUNCH OK: %s", got)
 			c.udp.WriteToUDP(fmt.Appendf(nil, "ACK from %s", c.nick), pubAddr)
+			c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
+				OK: true, LobbyOK: true, GameOK: true,
+				MS:   int(time.Since(start).Milliseconds()),
+				Role: pi.Role,
+			})
 			return nil
 		case <-tick.C:
 		}
 	}
 	close(stop)
+	c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
+		OK: false, MS: int(time.Since(start).Milliseconds()), Role: pi.Role,
+	})
 	return fmt.Errorf("no packet received within 8s")
 }
 

@@ -32,6 +32,7 @@
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
 #include "Common/GameEngine.h"
+#include "Common/ReleaseLog.h"
 //#include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/udp.h"
 
@@ -218,6 +219,12 @@ Int UDP::AdoptFD(Int fdIn, UnsignedInt IP, UnsignedShort Port)
   }
   else
   {
+    // Suspicious: a healthy bound socket answers getsockname. The socket may
+    // still work (send/recv only need the fd), so keep going with the
+    // caller's values, but leave evidence in the uploadable log in case this
+    // match ends up with a dead transport.
+    ReleaseLog("UDP AdoptFD: getsockname failed on fd=%d, trusting caller %d.%d.%d.%d:%d",
+      fdIn, (IP>>24)&0xff, (IP>>16)&0xff, (IP>>8)&0xff, IP&0xff, Port);
     myIP   = IP;
     myPort = Port;
     addr.sin_addr.s_addr = htonl(IP);
