@@ -150,6 +150,7 @@ public:
 	ArchiveFile* getArchiveFile(const AsciiString& filename, FileInstance instance = 0) const;
 
 	void loadMods();
+	void loadZuluBigsFrom(const AsciiString& dir); ///< load every Zulu*.big in dir at mod (override) priority, name order
 
 	ArchivedDirectoryInfo* friend_getArchivedDirectoryInfo(const Char* directory);
 

@@ -222,6 +222,54 @@ void LANObserverHost::closeConn(ObserverConn* conn)
 	delete conn;
 }
 
+Bool LANObserverHost::adoptObserverFd(Int fd, const UnicodeString& name)
+{
+	if (fd < 0)
+		return FALSE;
+	setNonBlocking(fd);
+
+	if (m_replayPath.isEmpty())
+	{
+		LANObsLog("LANObserverHost::adoptObserverFd - no replay path wired yet; dropping fd=%d", fd);
+		CLOSE_SOCKET(fd);
+		return FALSE;
+	}
+
+	ObserverConn* conn = new ObserverConn();
+	conn->socketFd     = fd;
+	conn->readHandle   = NULL;
+	conn->readOffset   = 0;
+	conn->snapshotSize = 0;
+	conn->sentHeader   = FALSE;
+	conn->connectedAt  = timeGetTime();
+	conn->name         = name;
+
+	conn->readHandle = fopen(m_replayPath.str(), "rb");
+	if (!conn->readHandle)
+	{
+		LANObsLog("LANObserverHost::adoptObserverFd - fopen('%s') FAILED (errno=%d); dropping fd=%d",
+			m_replayPath.str(), errno, fd);
+		closeConn(conn);
+		return FALSE;
+	}
+	// See acceptNew for why stdio buffering must be off on the read handle.
+	setvbuf(conn->readHandle, NULL, _IONBF, 0);
+	fseek(conn->readHandle, 0, SEEK_END);
+	long sz = ftell(conn->readHandle);
+	if (sz < 0) sz = 0;
+	conn->snapshotSize = (UnsignedInt)sz;
+	fseek(conn->readHandle, 0, SEEK_SET);
+
+	LANObserverStreamHeader hdr;
+	hdr.snapshotSize = conn->snapshotSize;
+	const unsigned char* p = (const unsigned char*)&hdr;
+	conn->sendBuf.insert(conn->sendBuf.end(), p, p + sizeof(hdr));
+
+	m_conns.push_back(conn);
+	LANObsLog("LANObserverHost: adopted relay observer fd=%d snapshot=%u", fd, conn->snapshotSize);
+	return TRUE;
+}
+
 void LANObserverHost::acceptNew(UnicodeString* outNames, Int outNamesCap, Int& outCount)
 {
 	if (m_listenFd == -1)
@@ -379,7 +427,9 @@ Bool LANObserverHost::pumpSendToSocket(ObserverConn* conn)
 
 Int LANObserverHost::update(UnicodeString* outNewObserverNames, Int outNamesCap)
 {
-	if (m_listenFd == -1)
+	// Adopted relay observers must be pumped even when the LAN listen
+	// socket is down (bind failure), so only gate the accept step.
+	if (m_listenFd == -1 && m_conns.empty())
 		return 0;
 
 	Int newCount = 0;
@@ -483,6 +533,39 @@ Bool LANObserverClient::connect(UnsignedInt ipNetworkOrder, UnsignedShort port, 
 		(ipNetworkOrder) & 0xff, (ipNetworkOrder>>8) & 0xff,
 		(ipNetworkOrder>>16) & 0xff, (ipNetworkOrder>>24) & 0xff, port, fd);
 	DEBUG_LOG(("LANObserverClient::connect - connecting fd=%d to port %u", fd, port));
+	return TRUE;
+}
+
+Bool LANObserverClient::adoptFd(Int fd, const AsciiString& localPath)
+{
+	close();
+
+	if (fd < 0)
+		return FALSE;
+	if (!setNonBlocking(fd))
+	{
+		CLOSE_SOCKET(fd);
+		return FALSE;
+	}
+
+	m_writeHandle = fopen(localPath.str(), "wb");
+	if (!m_writeHandle)
+	{
+		LANObsLog("LANObserverClient::adoptFd - fopen('%s', wb) FAILED (errno=%d)", localPath.str(), errno);
+		CLOSE_SOCKET(fd);
+		return FALSE;
+	}
+	// Same coherency requirement as connect(): the recorder reads this file
+	// through its own handle while we append.
+	setvbuf(m_writeHandle, NULL, _IONBF, 0);
+
+	m_socketFd = fd;
+	m_localPath = localPath;
+	// The relay socket is already connected end to end; the next bytes on
+	// the wire are the snapshot header.
+	m_state = STATE_BUFFERING;
+	m_connectStartedAt = timeGetTime();
+	LANObsLog("LANObserverClient: adopted relay fd=%d", fd);
 	return TRUE;
 }
 

@@ -85,6 +85,15 @@ static AsciiString              s_coordPendingJoinID;    // game id to join once
 static AsciiString              s_coordCurrentNick;      // sent in HELLO at connect time
 static std::vector<AsciiString> s_coordListedIDs;        // parallel to listbox rows
 static Bool                     s_coordHandoffDone  = FALSE;
+// LAN-like join resilience: remember the last join target so a failed
+// attempt (usually a punch timeout) can transparently reconnect and retry
+// instead of parking the lobby on an error.
+static AsciiString              s_coordLastJoinID;
+static Int                      s_coordJoinRetries  = 0;
+static const Int                COORD_JOIN_MAX_RETRIES = 2;
+// Observe-in-progress: game id whose observe request should be sent once
+// the coordinator connection is READY (mirrors s_coordPendingJoinID).
+static AsciiString              s_coordPendingObserveID;
 
 static const char* COORD_HOST_DEFAULT = "cncstats.computersrfun.org";
 static const UnsignedShort COORD_TCP_PORT_DEFAULT = 27500;
@@ -104,9 +113,9 @@ OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost()
 	return s_coord;
 }
 
-// Cross-menu teardown: LanGameOptionsMenu calls this when the host actually
-// starts the game (no more joiners can come in) or when the host backs out
-// of the lobby. Idempotent.
+// Cross-menu teardown: LanGameOptionsMenu calls this when the host backs
+// out of the lobby (game start now RELEASES the session into LANAPI
+// instead, see LanLobbyMenuReleaseCoordinator). Idempotent.
 void LanLobbyMenuShutdownHostCoordinator()
 {
 	if (s_coord)
@@ -116,6 +125,18 @@ void LanLobbyMenuShutdownHostCoordinator()
 		delete s_coord;
 		s_coord = nullptr;
 	}
+}
+
+// Ownership transfer at game start: the host keeps its coordinator TCP
+// session alive through the match so viewers can request to observe the
+// in-progress game (relayed through the coordinator). The caller (game
+// start path) hands the returned instance to TheLAN->adoptCoordinator();
+// after this, no lobby teardown path touches it.
+OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator()
+{
+	OnlineCoordinatorAPI* c = s_coord;
+	s_coord = nullptr;
+	return c;
 }
 
 // Forward declarations for the coordinator helpers; the definitions live
@@ -795,12 +816,21 @@ static void rebuildGamesListbox()
 	{
 		const OnlineCoordinatorAPI::GameListEntry& g = games[i];
 		AsciiString row;
-		row.format("%s   [%s]   %d/%d   map:%s   id:%s",
-			g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
-			g.map.str(), g.id.str());
+		if (g.inProgress)
+		{
+			row.format("%s   [%s]   IN PROGRESS - double-click to watch",
+				g.name.str(), g.hostNick.str());
+		}
+		else
+		{
+			row.format("%s   [%s]   %d/%d   map:%s   id:%s",
+				g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
+				g.map.str(), g.id.str());
+		}
 		UnicodeString u;
 		u.translate(row);
-		GadgetListBoxAddEntryText(listboxGames, u, textColor, -1, 0);
+		GadgetListBoxAddEntryText(listboxGames, u,
+			g.inProgress ? GameMakeColor(200, 200, 160, 255) : textColor, -1, 0);
 		s_coordListedIDs.push_back(g.id);
 	}
 }
@@ -810,6 +840,37 @@ static void coordinatorPostStatus(const char* msg)
 	UnicodeString u;
 	u.translate(AsciiString(msg));
 	GadgetListBoxAddEntryText(listboxChatWindow, u, GameMakeColor(180, 180, 255, 255), -1, 0);
+}
+
+// Shared handler for "the user picked a game row": in-progress games get an
+// observe request (watch via the coordinator relay), waiting games get the
+// normal join flow. Both are queued and dispatched once the coordinator
+// connection reports READY.
+static void coordinatorJoinOrObserveRow(Int rowSelected)
+{
+	if (rowSelected < 0 || rowSelected >= (Int)s_coordListedIDs.size())
+		return;
+	connectCoordinatorIfNeeded();
+
+	Bool observe = FALSE;
+	const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
+	if (rowSelected < (Int)games.size() && games[rowSelected].inProgress)
+		observe = TRUE;
+
+	if (observe)
+	{
+		s_coordPendingObserveID = s_coordListedIDs[rowSelected];
+		s_coordPendingJoinID.clear();
+		s_coordPendingHostName.clear();
+		coordinatorPostStatus("Requesting to watch the game...");
+	}
+	else
+	{
+		s_coordPendingJoinID = s_coordListedIDs[rowSelected];
+		s_coordPendingObserveID.clear();
+		s_coordPendingHostName.clear();
+		coordinatorPostStatus("Joining game as soon as the connection is ready...");
+	}
 }
 
 static void doCoordinatorHandoffToLAN();
@@ -858,12 +919,41 @@ static void pumpCoordinator()
 		}
 		if (state == OnlineCoordinatorAPI::STATE_ERROR)
 		{
-			AsciiString s;
-			s.format("Connection error: %s", s_coord->lastError().str());
-			coordinatorPostStatus(s.str());
+			// A failed JOIN attempt (usually "punch: no inbound packet
+			// within timeout") retries automatically, like LAN where a
+			// dropped join request is invisible to the user. connect()
+			// tears down the failed attempt's sockets, and re-queueing the
+			// pending id re-dispatches the join once READY again.
+			if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty()
+				&& s_coordJoinRetries < COORD_JOIN_MAX_RETRIES)
+			{
+				++s_coordJoinRetries;
+				ReleaseLog("Coordinator join retry %d/%d after error: %s",
+					s_coordJoinRetries, COORD_JOIN_MAX_RETRIES, s_coord->lastError().str());
+				coordinatorPostStatus("Connection attempt failed. Retrying...");
+				connectCoordinatorIfNeeded();
+				s_coordPendingJoinID = s_coordLastJoinID;
+			}
+			else if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty())
+			{
+				// Retries exhausted: give a human answer and put the lobby
+				// back into a usable browsing state.
+				coordinatorPostStatus("Could not connect to that game's host. Their network may be blocking the connection.");
+				s_coordLastJoinID.clear();
+				s_coordJoinRetries = 0;
+				connectCoordinatorIfNeeded();
+			}
+			else
+			{
+				AsciiString s;
+				s.format("Connection error: %s", s_coord->lastError().str());
+				coordinatorPostStatus(s.str());
+			}
 		}
 		if (state == OnlineCoordinatorAPI::STATE_PUNCH_OK && !s_coordHandoffDone)
 		{
+			s_coordLastJoinID.clear();
+			s_coordJoinRetries = 0;
 			doCoordinatorHandoffToLAN();
 			// Handoff triggers TheShell->push which synchronously runs
 			// LanLobbyMenuShutdown, which deletes s_coord. The rest of this
@@ -900,9 +990,19 @@ static void pumpCoordinator()
 				{
 					if (games[gi].name == TheGlobalData->m_coordAutoJoinName)
 					{
-						s_coordPendingJoinID = games[gi].id;
+						// Same decision a human double-click makes: watch
+						// in-progress games, join waiting ones.
+						if (games[gi].inProgress)
+						{
+							s_coordPendingObserveID = games[gi].id;
+							coordinatorPostStatus("auto: observing");
+						}
+						else
+						{
+							s_coordPendingJoinID = games[gi].id;
+							coordinatorPostStatus("auto: joining");
+						}
 						coordAutoDispatched = TRUE;
-						coordinatorPostStatus("auto: joining");
 						break;
 					}
 				}
@@ -923,8 +1023,57 @@ static void pumpCoordinator()
 		}
 		else if (!s_coordPendingJoinID.isEmpty())
 		{
+			s_coordLastJoinID = s_coordPendingJoinID;
 			s_coord->requestJoin(s_coordPendingJoinID);
 			s_coordPendingJoinID.clear();
+		}
+		else if (!s_coordPendingObserveID.isEmpty())
+		{
+			s_coord->requestObserve(s_coordPendingObserveID);
+			s_coordPendingObserveID.clear();
+		}
+	}
+
+	// Observe accepted: attach our end of the relay and hand the connected
+	// socket to the LAN observer client. From here the flow is identical to
+	// watching a LAN game (snapshot buffering, map fetch, live playback).
+	{
+		AsciiString observeToken;
+		if (s_coord->consumeObserveOkToken(&observeToken))
+		{
+			Int relayFd = s_coord->openObserverRelayFd(observeToken, FALSE);
+			if (relayFd >= 0)
+			{
+				// Coordinator mode enters the lobby WITHOUT a LANAPI (it is
+				// normally created during the join handoff, which an
+				// observer never runs). The observer machinery lives on
+				// TheLAN, so bring one up now; the relay socket replaces
+				// any direct host connection.
+				if (!TheLAN)
+				{
+					// Our coordinator session still holds UDP/8086;
+					// release it or TheLAN->init()'s bind fails and the
+					// socket-error path boots us to the main menu.
+					s_coord->closeLobbyUdpForHostHandoff();
+					TheLAN = NEW LANAPI();
+					TheLAN->init();
+					UnsignedInt localIP = TheGlobalData->m_defaultIP;
+					if (!localIP)
+					{
+						IPEnumeration IPs;
+						EnumeratedIP* list = IPs.getAddresses();
+						if (list) localIP = list->getIP();
+					}
+					TheLAN->SetLocalIP(localIP);
+					TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
+				}
+				coordinatorPostStatus("Connected. Buffering the game for playback...");
+				TheLAN->RequestObserveAdoptedFd(relayFd);
+			}
+			else
+			{
+				coordinatorPostStatus("Could not connect to the observer relay.");
+			}
 		}
 	}
 
@@ -1181,12 +1330,7 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 
 					if (s_useCoordinator && s_coord)
 					{
-						if (rowSelected >= 0 && rowSelected < (Int)s_coordListedIDs.size())
-						{
-							connectCoordinatorIfNeeded();
-							s_coordPendingJoinID = s_coordListedIDs[rowSelected];
-							s_coordPendingHostName.clear();
-						}
+						coordinatorJoinOrObserveRow(rowSelected);
 					}
 					else if (rowSelected >= 0 && TheLAN)
 					{
@@ -1290,10 +1434,7 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 						}
 						else
 						{
-							connectCoordinatorIfNeeded();
-							s_coordPendingJoinID = s_coordListedIDs[rowSelected];
-							s_coordPendingHostName.clear();
-							coordinatorPostStatus("Joining game as soon as the connection is ready...");
+							coordinatorJoinOrObserveRow(rowSelected);
 						}
 					}
 					else if (rowSelected >= 0)

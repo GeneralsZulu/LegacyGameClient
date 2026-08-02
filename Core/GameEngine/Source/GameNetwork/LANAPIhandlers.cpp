@@ -760,6 +760,28 @@ void LANAPI::handleChat( LANMessage *msg, UnsignedInt senderIP )
 				break;
 			}
 		}
+
+		// Direct-connect games: joiners have punched mappings only to the
+		// HOST, so a joiner's chat unicast to another joiner's address is
+		// unroutable and silently lost. The host relays each joiner's chat
+		// to every other joiner verbatim (msg->name carries the original
+		// speaker, so attribution survives the relay). Only the host relays
+		// and it never relays its own messages, so no loops are possible.
+		if (m_currentGame && m_currentGame->getIsDirectConnect() && AmIHost()
+			&& senderIP != m_localIP && player < MAX_SLOTS)
+		{
+			Int localSlot = m_currentGame->getLocalSlotNum();
+			for (Int relayTo = 0; relayTo < MAX_SLOTS; ++relayTo)
+			{
+				if (relayTo == player || relayTo == localSlot)
+					continue;
+				LANGameSlot *slot = m_currentGame->getLANSlot(relayTo);
+				if (slot != nullptr && slot->isHuman() && slot->getIP() != 0)
+				{
+					sendMessage(msg, slot->getIP());
+				}
+			}
+		}
 	}
 }
 

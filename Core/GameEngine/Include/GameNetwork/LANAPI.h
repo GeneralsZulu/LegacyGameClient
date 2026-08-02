@@ -37,6 +37,8 @@
 #include "GameNetwork/LANGameInfo.h"
 #include "GameNetwork/LANObserverStream.h"
 
+class OnlineCoordinatorAPI;
+
 //static const Int g_lanPlayerNameLength = 20;
 static const Int g_lanPlayerNameLength = 12; // reduced length because of game option length
 //static const Int g_lanLoginNameLength = 16;
@@ -460,6 +462,7 @@ protected:
 	// stream eventually closes.
 	LANObserverHost*			m_observerHost;
 	LANObserverClient*		m_observerClient;
+	OnlineCoordinatorAPI*	m_inGameCoord;                  // host: coordinator session adopted at game start (observer relay)
 	Bool									m_observerClientPlaybackKicked; // we called playbackFileLiveObserver already
 	UnsignedInt						m_observerProgressLastMs;       // last time we posted a download-progress chat line
 	UnsignedInt						m_observerProgressLastBytes;    // bytes reported at the last progress post
@@ -479,9 +482,22 @@ public:
 	// the host and starts buffering bytes into a scratch .rep file.
 	void RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort);
 
+	// Online (coordinator) variant: the stream socket was spliced through
+	// the coordinator relay and is already connected; adopt it instead of
+	// dialing the host directly (which NAT would block).
+	void RequestObserveAdoptedFd(Int fd);
+
 	// Host accessors used by chat notifications etc.
 	Int   getObserverCount() const { return m_observerHost ? m_observerHost->observerCount() : 0; }
 	Bool  isObservingClient() const { return m_observerClient != nullptr; }
+
+	// Online-coordinator session carried into the game. The host adopts the
+	// lobby's OnlineCoordinatorAPI at game start (instead of tearing it
+	// down) so viewers can request to observe the in-progress game; the
+	// updateObserver pump keeps it alive and services observer_request
+	// tokens by attaching relay connections to m_observerHost. Ownership
+	// transfers here; reset() deletes it.
+	void adoptCoordinator(OnlineCoordinatorAPI* coord);
 
 public:
 	// Observer state-machine pump. Normally invoked from update() at the LAN

@@ -59,6 +59,7 @@ public:
 		AsciiString   map;
 		Int           players;
 		Int           maxPlayers;
+		Int           inProgress;   // 1 once the host reported game_started
 	};
 
 	struct PeerInfo
@@ -128,6 +129,20 @@ public:
 	void requestHost(const UnicodeString& gameName, const AsciiString& mapName, Int maxPlayers);
 	void requestUnhost();
 	void requestJoin(const AsciiString& gameID);
+
+	// --- Observing in-progress games (relayed through the coordinator) ---
+	// TCP hole punching is unreliable, so the observer stream is relayed:
+	// both the host and the viewer dial OUT to the coordinator with a
+	// one-line relay_attach handshake, and the server splices the two
+	// connections. The spliced socket then carries the exact same bytes as
+	// a direct LAN observer connection (snapshot header + growing .rep).
+	void sendGameStarted();                          ///< host: mark our listed game in progress
+	void requestObserve(const AsciiString& gameID);  ///< viewer: ask to observe an in-progress game
+	Bool consumeObserverRequestToken(AsciiString* outToken); ///< host: next pending observer relay token
+	Bool consumeObserveOkToken(AsciiString* outToken);       ///< viewer: token from observe_ok, once
+	// Open a fresh TCP connection to the coordinator, send the relay_attach
+	// line, and return the connected fd (caller owns it; -1 on failure).
+	Int  openObserverRelayFd(const AsciiString& token, Bool asHost);
 
 	// Hand the game UDP socket off to the global stash so it survives the
 	// destruction of this OnlineCoordinatorAPI instance at handoff time
@@ -235,6 +250,12 @@ private:
 	// for SessionTTL (5 min), which would silently delist a host still
 	// sitting in the game-options screen. Any message refreshes LastSeen.
 	UnsignedInt   m_lastHeartbeatMs;
+
+	// Observer relay bookkeeping. Tokens arrive over the signaling TCP;
+	// openObserverRelayFd dials a separate connection per token.
+	UnsignedShort m_coordTcpPort;                   // remembered from connect()
+	std::vector<AsciiString> m_observerReqTokens;   // host side: pending observer_request tokens
+	AsciiString   m_observeOkToken;                 // viewer side: token from observe_ok
 
 	void  setState(State s);
 	void  setError(const AsciiString& msg);

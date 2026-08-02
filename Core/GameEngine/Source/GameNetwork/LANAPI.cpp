@@ -95,6 +95,7 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_isActive = TRUE;
 	m_observerHost = nullptr;
 	m_observerClient = nullptr;
+	m_inGameCoord = nullptr;
 	m_observerClientPlaybackKicked = FALSE;
 	m_observerProgressLastMs = 0;
 	m_observerProgressLastBytes = 0;
@@ -211,6 +212,33 @@ void LANAPI::reset()
 	// inherit a stale listen socket or live client connection.
 	stopObserverHost();
 	stopObserverClient();
+
+	// Drop the in-game coordinator session (observer relay) carried over
+	// from the previous match, if any.
+	if (m_inGameCoord)
+	{
+		ReleaseLog("Coordinator teardown: LANAPI::reset (in-game session)");
+		m_inGameCoord->disconnect();
+		delete m_inGameCoord;
+		m_inGameCoord = nullptr;
+	}
+}
+
+void LANAPI::adoptCoordinator(OnlineCoordinatorAPI* coord)
+{
+	if (m_inGameCoord && m_inGameCoord != coord)
+	{
+		m_inGameCoord->disconnect();
+		delete m_inGameCoord;
+	}
+	m_inGameCoord = coord;
+	if (coord)
+	{
+		// Tell the coordinator our listed game is now in progress so the
+		// games list can advertise "observe" instead of "join".
+		coord->sendGameStarted();
+		ReleaseLog("Coordinator adopted for in-game observer relay");
+	}
 }
 
 void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
@@ -1541,7 +1569,16 @@ void LANAPI::setIsActive(Bool isActive) {
 // =====================================================================
 
 #include "Common/Recorder.h"
+#include "Common/FileSystem.h"
 #include "GameNetwork/MapDownloadHook.h"
+
+// Socket close for the relay fd path; LANAPI.cpp otherwise only touches
+// sockets through Transport/UDP wrappers.
+#ifdef _WIN32
+#define LANAPI_CLOSE_SOCKET(fd) ::closesocket(fd)
+#else
+#define LANAPI_CLOSE_SOCKET(fd) ::close(fd)
+#endif
 
 // Find a cached map by CRC. The MapCache is keyed by lowercased filename, but
 // the live-observer flow only knows the map by the CRC carried in the replay
@@ -1659,7 +1696,11 @@ void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 	m_observerClient = new LANObserverClient();
 
 	// Scratch file in the replay dir. Reuse a single name so we don't pile
-	// up junk; the file is rewritten each session.
+	// up junk; the file is rewritten each session. A fresh install that has
+	// never recorded a replay has no Replays\ directory yet, so create it
+	// or the fopen below fails with ENOENT.
+	if (TheFileSystem)
+		TheFileSystem->createDirectory(RecorderClass::getReplayDir());
 	AsciiString path = RecorderClass::getReplayDir();
 	path.concat("_live_observer");
 	path.concat(RecorderClass::getReplayExtention());
@@ -1678,6 +1719,42 @@ void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 		TheRecorder->setLiveObserverStreamOpen(TRUE);
 	m_observerClientPlaybackKicked = FALSE;
 	DEBUG_LOG(("LANAPI::RequestObserve - observing host %08X port %u", hostIP, observerPort));
+}
+
+void LANAPI::RequestObserveAdoptedFd(Int fd)
+{
+	LANObsLog("RequestObserveAdoptedFd: fd=%d", fd);
+	if (fd < 0)
+		return;
+
+	// No reconnect target exists for a relayed stream: a retry would need a
+	// whole new observe request through the coordinator. Disable the
+	// connect-retry machinery; failures surface the normal error dialog.
+	s_observeHostIPHostOrder = 0;
+	s_observeConnectPort     = 0;
+	s_observeAttemptsLeft    = 0;
+	s_observeLastBytes       = 0;
+	s_observeLastProgressMs  = timeGetTime();
+
+	stopObserverClient();
+	m_observerClient = new LANObserverClient();
+
+	// Same fresh-install consideration as RequestObserve above.
+	if (TheFileSystem)
+		TheFileSystem->createDirectory(RecorderClass::getReplayDir());
+	AsciiString path = RecorderClass::getReplayDir();
+	path.concat("_live_observer");
+	path.concat(RecorderClass::getReplayExtention());
+
+	if (!m_observerClient->adoptFd(fd, path))
+	{
+		LANObsLog("RequestObserveAdoptedFd: adoptFd failed");
+		stopObserverClient();
+		return;
+	}
+	if (TheRecorder)
+		TheRecorder->setLiveObserverStreamOpen(TRUE);
+	m_observerClientPlaybackKicked = FALSE;
 }
 
 // Make sure the map referenced by the just-buffered live-observer snapshot
@@ -1800,7 +1877,38 @@ void LANAPI::updateObserver()
 		}
 	}
 
-	if (m_observerHost && m_observerHost->isRunning())
+	// Online-coordinator observer relay (host side): keep the adopted
+	// coordinator session alive during the match and service observe
+	// requests by dialing a relay connection per token and attaching it to
+	// the observer host exactly like an accepted LAN observer.
+	if (m_inGameCoord)
+	{
+		m_inGameCoord->update();
+		AsciiString token;
+		while (m_inGameCoord->consumeObserverRequestToken(&token))
+		{
+			LANObsLog("updateObserver: observer_request token=%s; opening relay", token.str());
+			if (!m_observerHost)
+				startObserverHost();
+			Int relayFd = m_inGameCoord->openObserverRelayFd(token, TRUE);
+			if (relayFd >= 0 && m_observerHost)
+			{
+				UnicodeString name = L"Online observer";
+				if (m_observerHost->adoptObserverFd(relayFd, name))
+				{
+					UnicodeString msg;
+					msg.format(L"%s connected through the online relay.", name.str());
+					OnChat(L"", 0, msg, LANCHAT_SYSTEM);
+				}
+			}
+			else if (relayFd >= 0)
+			{
+				LANAPI_CLOSE_SOCKET(relayFd);
+			}
+		}
+	}
+
+	if (m_observerHost)
 	{
 		// Capture up to a handful of names per tick for chat notification.
 		UnicodeString newNames[4];

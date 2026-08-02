@@ -78,6 +78,26 @@ sudo ip netns exec clientA sudo -u $USER env DISPLAY=:91 WINEPREFIX=$BASE/prefA 
 - Coordinator: `curl -s localhost:18080/coordinator/status` (sessions, games, punch_ok/fail).
 - Screenshots: `DISPLAY=:91 import -window root /tmp/shot.png`.
 
+## Observer (relay) test
+
+A 4th client (dave) can watch the in-progress game through the coordinator
+relay. Gotchas discovered building this:
+
+- One netns supports ONE game client: the coordinator binds UDP 8086/8088 at
+  connect, so a second client in the same netns fails with "udp bind failed
+  on port 8086". Run the observer from the HOST netns (the relay is pure
+  outbound TCP, NAT plays no part) or add a clientD netns.
+- prefD setup: same wineboot + /reg:32 registry keys + per-prefix Documents
+  dance as A-C, plus its own Xvfb (:94). Verify the display exists before
+  launching (`DISPLAY=:94 xdpyinfo`): a missing Xvfb surfaces as a bogus
+  "Please make sure you have DirectX 8.1 or higher installed" crash.
+- Launch: same flags as a joiner (`-coordnick dave -coordautojoin labgame`).
+  If the game is already in progress, auto-join automatically becomes
+  auto-observe (list row shows IN PROGRESS).
+- Watch `ObserverLog.txt` in dave's user data dir: relay adopt, buffering,
+  then `Recorder::update tick mode=5` lines = live playback running.
+- Server side: `grep relay /tmp/natlab/cncstats.log` shows attach/pair.
+
 ## Hard-won gotchas
 
 - `wine explorer /desktop=...` is REQUIRED: bare Xvfb has no WM, the game gets

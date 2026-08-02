@@ -505,6 +505,7 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_punchOkGame(FALSE)
 	, m_punchTtl(0)
 	, m_lastHeartbeatMs(0)
+	, m_coordTcpPort(0)
 {
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
 }
@@ -710,9 +711,12 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 		return FALSE;
 	}
 	m_coordIPNet = htonl(ipHostOrder);
+	m_coordTcpPort = tcpPort;
 	m_nick    = nick;
 	m_version = version;
 	m_games.clear();
+	m_observerReqTokens.clear();
+	m_observeOkToken.clear();
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
 	m_peerInfoArmed = FALSE;
 	m_amIHost = FALSE;
@@ -789,6 +793,78 @@ void OnlineCoordinatorAPI::requestUnhost()
 	sendJsonLine(AsciiString("{\"type\":\"unhost\",\"data\":{}}"));
 	m_hostedGameID.clear();
 	setState(STATE_READY);
+}
+
+void OnlineCoordinatorAPI::sendGameStarted()
+{
+	if (m_tcpFd == -1) return;
+	sendJsonLine(AsciiString("{\"type\":\"game_started\",\"data\":{}}"));
+}
+
+void OnlineCoordinatorAPI::requestObserve(const AsciiString& gameID)
+{
+	if (m_state != STATE_READY) return;
+	AsciiString line = "{\"type\":\"observe\",\"data\":{\"game_id\":";
+	appendEscaped(line, gameID.str());
+	line.concat("}}");
+	sendJsonLine(line);
+}
+
+Bool OnlineCoordinatorAPI::consumeObserverRequestToken(AsciiString* outToken)
+{
+	if (m_observerReqTokens.empty())
+		return FALSE;
+	*outToken = m_observerReqTokens.front();
+	m_observerReqTokens.erase(m_observerReqTokens.begin());
+	return TRUE;
+}
+
+Bool OnlineCoordinatorAPI::consumeObserveOkToken(AsciiString* outToken)
+{
+	if (m_observeOkToken.isEmpty())
+		return FALSE;
+	*outToken = m_observeOkToken;
+	m_observeOkToken.clear();
+	return TRUE;
+}
+
+Int OnlineCoordinatorAPI::openObserverRelayFd(const AsciiString& token, Bool asHost)
+{
+	if (m_coordIPNet == 0 || m_coordTcpPort == 0)
+		return -1;
+
+	Int fd = (Int)socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+
+	// Blocking connect: the coordinator just spoke to us over TCP, so it is
+	// reachable; a stuck connect fails fast with a RST or the OS timeout.
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family      = AF_INET;
+	addr.sin_addr.s_addr = m_coordIPNet;
+	addr.sin_port        = htons(m_coordTcpPort);
+	if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI::openObserverRelayFd - connect failed (%d)", SOCK_ERR_LAST));
+		CLOSE_SOCKET(fd);
+		return -1;
+	}
+
+	AsciiString line = "{\"type\":\"relay_attach\",\"data\":{\"token\":";
+	appendEscaped(line, token.str());
+	line.concat(",\"role\":");
+	appendEscaped(line, asHost ? "host" : "viewer");
+	line.concat("}}\n");
+	Int len = (Int)strlen(line.str());
+	if (send(fd, line.str(), len, 0) != len)
+	{
+		DEBUG_LOG(("OnlineCoordinatorAPI::openObserverRelayFd - send failed (%d)", SOCK_ERR_LAST));
+		CLOSE_SOCKET(fd);
+		return -1;
+	}
+	DEBUG_LOG(("OnlineCoordinatorAPI::openObserverRelayFd - relay fd=%d role=%s", fd, asHost ? "host" : "viewer"));
+	return fd;
 }
 
 void OnlineCoordinatorAPI::requestJoin(const AsciiString& gameID)
@@ -1286,6 +1362,8 @@ static void gamesParseCb(const char* objStart, Int objLen, void* user)
 	if (parseStringField(obj, "map",       tmp, sizeof(tmp))) e.map      = tmp;
 	parseIntField(obj, "players",     &e.players);
 	parseIntField(obj, "max_players", &e.maxPlayers);
+	e.inProgress = 0;
+	parseIntField(obj, "in_progress", &e.inProgress);
 	ctx->out->push_back(e);
 }
 }
@@ -1393,6 +1471,33 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		m_punchNextBlastMs = m_punchStartMs;
 		m_punchDeadlineMs  = m_punchStartMs + PUNCH_TIMEOUT_MS;
 		setState(STATE_PUNCHING);
+		return;
+	}
+
+	if (strcmp(msgType, "observer_request") == 0)
+	{
+		// Host side: a viewer wants to observe our in-progress game. Queue
+		// the relay token; the in-game pump opens the relay connection and
+		// hands it to LANObserverHost.
+		char tok[128];
+		if (parseStringField(obj, "token", tok, sizeof(tok)))
+		{
+			m_observerReqTokens.push_back(AsciiString(tok));
+			DEBUG_LOG(("OnlineCoordinatorAPI: observer_request token=%s", tok));
+		}
+		return;
+	}
+
+	if (strcmp(msgType, "observe_ok") == 0)
+	{
+		// Viewer side: the coordinator accepted our observe request and
+		// told the host. The relay is ready for both attach connections.
+		char tok[128];
+		if (parseStringField(obj, "token", tok, sizeof(tok)))
+		{
+			m_observeOkToken = tok;
+			DEBUG_LOG(("OnlineCoordinatorAPI: observe_ok token=%s", tok));
+		}
 		return;
 	}
 

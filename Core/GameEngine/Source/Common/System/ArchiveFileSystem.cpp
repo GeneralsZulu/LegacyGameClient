@@ -49,6 +49,7 @@
 #include "Common/ArchiveFile.h"
 #include "Common/ArchiveFileSystem.h"
 #include "Common/AsciiString.h"
+#include "Common/LocalFileSystem.h"
 #include "Common/PerfTimer.h"
 
 
@@ -210,8 +211,48 @@ void ArchiveFileSystem::loadIntoDirectoryTree(ArchiveFile *archiveFile, Bool ove
 	}
 }
 
+// Load every Zulu*.big in `dir` at mod (override) priority, in name order so
+// a higher-versioned big (Zulu_152.big) wins over a plain Zulu.big.
+void ArchiveFileSystem::loadZuluBigsFrom(const AsciiString& dir)
+{
+	if (TheLocalFileSystem == nullptr)
+		return;
+
+	FilenameList files;
+	TheLocalFileSystem->getFileListInDirectory(dir, "", "Zulu*.big", files, FALSE);
+
+	FilenameListIter it;
+	for (it = files.begin(); it != files.end(); ++it)
+	{
+		// Already loaded (explicit -mod naming the same file, or a re-init)?
+		if (m_archiveFileMap.find(*it) != m_archiveFileMap.end())
+			continue;
+		ArchiveFile *archiveFile = openArchiveFile(it->str());
+		if (archiveFile != nullptr)
+		{
+			DEBUG_LOG(("ArchiveFileSystem::loadZuluBigsFrom - loading %s at mod priority.", it->str()));
+			loadIntoDirectoryTree(archiveFile, TRUE);
+			m_archiveFileMap[*it] = archiveFile;
+		}
+	}
+}
+
 void ArchiveFileSystem::loadMods()
 {
+	// The fork's own data must override retail archives even when the game
+	// is started without ZuluLauncher's "-mod Zulu.big": the plain *.big
+	// scan is first-wins in name order, so retail WindowZH.big silently
+	// shadows the fork's updated window layouts (fork-only gadgets vanish
+	// and joiners crash in the game-options screen). Auto-load Zulu bigs at
+	// mod priority from the install dir first, then the user data dir (the
+	// installer's home for Zulu.big) so the user-data copy wins. An
+	// explicit -mod on the command line takes over completely.
+	if (TheGlobalData->m_modBIG.isEmpty() && TheGlobalData->m_modDir.isEmpty())
+	{
+		loadZuluBigsFrom("");
+		loadZuluBigsFrom(TheGlobalData->getPath_UserData());
+	}
+
 	if (TheGlobalData->m_modBIG.isNotEmpty())
 	{
 		ArchiveFile *archiveFile = openArchiveFile(TheGlobalData->m_modBIG.str());

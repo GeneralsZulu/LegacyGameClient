@@ -626,10 +626,21 @@ void StartPressed()
 				GadgetComboBoxSetSelectedPos(comboBoxPlayer[i], SLOT_CLOSED);
 			}
 		}
-		// Slots are locked; no more joiners can arrive through the coord. Tear
-		// down the host's TCP signaling session so the gameID disappears from
-		// the listing.
-		LanLobbyMenuShutdownHostCoordinator();
+		// Slots are locked; no more joiners can arrive through the coord.
+		// Instead of tearing the session down, hand it to TheLAN: it stays
+		// alive through the match (marked in-progress on the server) so
+		// viewers can request to observe via the coordinator relay.
+		{
+			extern OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator();
+			OnlineCoordinatorAPI* inGameCoord = LanLobbyMenuReleaseCoordinator();
+			if (inGameCoord && TheLAN)
+				TheLAN->adoptCoordinator(inGameCoord);
+			else if (inGameCoord)
+			{
+				inGameCoord->disconnect();
+				delete inGameCoord;
+			}
+		}
 		Int seconds = TheMultiplayerSettings->getStartCountdownTimerSeconds();
 		if (seconds)
 			TheLAN->RequestGameStartTimer(seconds);
