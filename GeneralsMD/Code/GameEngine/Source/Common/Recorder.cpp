@@ -315,6 +315,7 @@ RecorderClass::RecorderClass()
 	m_playbackStaleObjectRefs = 0;
 	m_liveObserverStreamOpen      = FALSE;
 	m_liveObserverWaitingForBytes = FALSE;
+	m_liveObserverArming          = FALSE;
 	m_liveObserverRetryPos        = 0;
 	m_liveObserverFpsBoosted      = FALSE;
 	m_liveObserverSavedFpsLimit   = 0;
@@ -578,8 +579,12 @@ void RecorderClass::updatePlayback() {
 		// A live match always produces bytes within a few seconds (logic CRC
 		// messages are recorded on an interval even when nobody issues
 		// orders), so a long silence means the match is over: finalize
-		// instead of waiting forever.
-		const UnsignedInt LIVE_OBSERVER_STARVATION_TIMEOUT_MS = 30000;
+		// instead of waiting forever. The window must comfortably cover the
+		// longest legitimate silence: observing a game in its FIRST seconds
+		// means waiting through the host's entire blocking map load before
+		// the first command is ever flushed (30s+ on slow machines); 30s
+		// here killed exactly that case.
+		const UnsignedInt LIVE_OBSERVER_STARVATION_TIMEOUT_MS = 120000;
 		const UnsignedInt nowMs = timeGetTime();
 		if (m_liveObserverStarvedSinceMs == 0)
 		{
@@ -1376,13 +1381,20 @@ Bool RecorderClass::simulateReplay(AsciiString filename)
 Bool RecorderClass::playbackFileLiveObserver(AsciiString filename)
 {
 	LANObsLog("playbackFileLiveObserver entry: filename='%s'", filename.str());
+	m_liveObserverArming = TRUE;
 	Bool success = playbackFile(filename);
-	LANObsLog("playbackFile returned %s; m_nextFrame=%d", success?"TRUE":"FALSE", (Int)m_nextFrame);
+	m_liveObserverArming = FALSE;
+	LANObsLog("playbackFile returned %s; m_nextFrame=%d waitingAtOpen=%d",
+		success?"TRUE":"FALSE", (Int)m_nextFrame, m_liveObserverWaitingForBytes ? 1 : 0);
 	if (success)
 	{
 		m_mode = RECORDERMODETYPE_LIVE_OBSERVER;
-		m_liveObserverWaitingForBytes = FALSE;
-		m_liveObserverRetryPos        = 0;
+		// If the open-time first read already hit EOF (snapshot from a
+		// just-started game: header flushed, first command not yet), KEEP
+		// the armed wait state so updatePlayback's retry loop picks it up;
+		// otherwise start from a clean slate.
+		if (!m_liveObserverWaitingForBytes)
+			m_liveObserverRetryPos = 0;
 
 		// The stream owner set m_liveObserverStreamOpen before this call, but
 		// when a shell map was loaded, playbackFile() above just tore it down
@@ -1923,7 +1935,13 @@ void RecorderClass::readNextFrame() {
 	Int posBefore = m_file->position();
 	Int bytesRead = m_file->read(&m_nextFrame, sizeof(m_nextFrame));
 	if (bytesRead != sizeof(m_nextFrame)) {
-		if (isLiveObserverMode() && m_liveObserverStreamOpen)
+		// m_liveObserverArming covers the open-time read inside
+		// playbackFile, which runs before the mode flips to LIVE_OBSERVER
+		// (and after clearGameData has wiped m_liveObserverStreamOpen):
+		// a snapshot from a just-started game legitimately contains no
+		// commands yet, and stopping playback here queues the clear-game-
+		// data that later dumps the observer at the score screen.
+		if (m_liveObserverArming || (isLiveObserverMode() && m_liveObserverStreamOpen))
 		{
 			// Roll back any partial read and wait for more bytes to arrive.
 			// The retry in updatePlayback closes-and-reopens the file so the
