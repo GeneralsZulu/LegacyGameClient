@@ -83,10 +83,11 @@ sudo ip netns exec clientA sudo -u $USER env DISPLAY=:91 WINEPREFIX=$BASE/prefA 
 A 4th client (dave) can watch the in-progress game through the coordinator
 relay. Gotchas discovered building this:
 
-- One netns supports ONE game client: the coordinator binds UDP 8086/8088 at
-  connect, so a second client in the same netns fails with "udp bind failed
-  on port 8086". Run the observer from the HOST netns (the relay is pure
-  outbound TCP, NAT plays no part) or add a clientD netns.
+- A second client in the same netns now works: when UDP 8086/8088 are taken
+  the coordinator falls back to ephemeral ports (ReleaseLog: "UDP port 8086
+  taken; using an ephemeral port instead"). Verified with a 5th client
+  (eve, prefE, :95) observing from inside clientA's netns while alice
+  hosted there. Multiple simultaneous relay observers also verified.
 - prefD setup: same wineboot + /reg:32 registry keys + per-prefix Documents
   dance as A-C, plus its own Xvfb (:94). Verify the display exists before
   launching (`DISPLAY=:94 xdpyinfo`): a missing Xvfb surfaces as a bogus
