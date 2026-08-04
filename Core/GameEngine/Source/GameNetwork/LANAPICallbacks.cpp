@@ -37,6 +37,7 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
 #include "Common/RandomValue.h"
+#include "Common/ReleaseLog.h"
 #include "Common/UserPreferences.h"
 #include "GameClient/Color.h"
 #include "GameClient/GameText.h"
@@ -108,17 +109,21 @@ void LANAPI::OnAccept( UnsignedInt playerIP, Bool status )
 {
 	if( AmIHost() )
 	{
-		Int i = 0;
-		for (; i < MAX_SLOTS; i++)
+		// Resolve by (IP, source port), not IP alone: two players behind one
+		// NAT share a public IP, and an IP-only match would apply the second
+		// player's accept to the first -- leaving the second stuck
+		// un-accepted forever (the start button never unlocks).
+		Int i = findSlotForSender(playerIP);
+		if (i < 0)
 		{
-			if (m_currentGame->getIP(i) == playerIP)
-			{
-				if(status)
-					m_currentGame->getLANSlot(i)->setAccept();
-				else
-					m_currentGame->getLANSlot(i)->unAccept();
-				break;
-			}
+			i = MAX_SLOTS;
+		}
+		else
+		{
+			if(status)
+				m_currentGame->getLANSlot(i)->setAccept();
+			else
+				m_currentGame->getLANSlot(i)->unAccept();
 		}
 		if (i != MAX_SLOTS )
 		{
@@ -142,14 +147,15 @@ void LANAPI::OnHasMap( UnsignedInt playerIP, Bool status )
 {
 	if( AmIHost() )
 	{
-		Int i = 0;
-		for (; i < MAX_SLOTS; i++)
+		// Same-NAT disambiguation as OnAccept above.
+		Int i = findSlotForSender(playerIP);
+		if (i < 0)
 		{
-			if (m_currentGame->getIP(i) == playerIP)
-			{
-				m_currentGame->getLANSlot(i)->setMapAvailability( status );
-				break;
-			}
+			i = MAX_SLOTS;
+		}
+		else
+		{
+			m_currentGame->getLANSlot(i)->setMapAvailability( status );
 		}
 		if (i != MAX_SLOTS )
 		{
@@ -443,8 +449,35 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 	{
 		m_currentGame->setLastHeard(timeGetTime());
 		AsciiString oldOptions = GameInfoToAsciiString(m_currentGame); // save these off for if we get booted
+
+		// Remember our local slot index BEFORE the parse, because the parse
+		// overwrites slot IPs with the host's LAN view -- after that,
+		// getLocalSlotNum() (which matches by IP) would return -1.
+		Int preParseLocalSlotNum = m_currentGame->getLocalSlotNum();
+
 		if(ParseGameOptionsString(m_currentGame,options))
 		{
+			// Restore NAT-aware slot IPs and ports that the parse just
+			// clobbered with the host's LAN-view addresses. For direct-
+			// connect games the host's own slot needs to be its externally-
+			// routable IP (where this packet came from) so subsequent
+			// matching/routing works, and our own slot needs to be
+			// m_localIP so getLocalSlotNum() and isLocalPlayer() keep
+			// identifying us correctly. The game-data port on slot[0] must
+			// be the host's punched external port (ConnectionManager reads
+			// slot.getPort() when sending in-game), not the announced
+			// NETWORK_BASE_PORT_NUMBER which is the host's local 8088.
+			if (m_currentGame->getIsDirectConnect())
+			{
+				m_currentGame->getLANSlot(0)->setIP(playerIP);
+				if (m_directConnectRemoteGamePort != 0)
+					m_currentGame->getLANSlot(0)->setPort(m_directConnectRemoteGamePort);
+				if (preParseLocalSlotNum > 0)
+				{
+					m_currentGame->getLANSlot(preParseLocalSlotNum)->setIP(m_localIP);
+				}
+			}
+
 			// Peer-side cncstats download: if the host just advertised a
 			// map CRC we don't have locally, fetch it from the cncstats
 			// server now so the lobby preview can show immediately
@@ -537,6 +570,19 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 			if (options.compare("HELLO") == 0)
 			{
 				m_currentGame->setPlayerLastHeard(playerSlot, timeGetTime());
+				// Direct-connect diagnostic: positive confirmation that the
+				// joiner's keepalive arrived and was credited. Throttled.
+				if (m_currentGame->getIsDirectConnect())
+				{
+					static UnsignedInt s_lastHelloCreditLogMs = 0;
+					UnsignedInt nowLog = timeGetTime();
+					if (nowLog - s_lastHelloCreditLogMs > 10000)
+					{
+						s_lastHelloCreditLogMs = nowLog;
+						ReleaseLog("LAN dc HELLO credited slot=%d ip=%d.%d.%d.%d",
+							playerSlot, PRINTF_IP_AS_4_INTS(playerIP));
+					}
+				}
 			}
 			else
 			{
@@ -755,6 +801,17 @@ void LANAPI::OnPlayerJoin( Int slot, UnicodeString playerName )
 
 		// Send out the game options
 		RequestGameOptions(GenerateGameOptionsString(), true);
+
+		// Direct-connect (online) games: joiners arrive through the
+		// coordinator with no LAN-lobby presence beforehand, so give the
+		// host an explicit heads-up in chat (on LAN you watch people walk
+		// in from the lobby; online they just materialize in a slot).
+		if (m_currentGame->getIsDirectConnect())
+		{
+			UnicodeString msg;
+			msg.format(L"%s has joined the game.", playerName.str());
+			OnChat(L"", 0, msg, LANCHAT_SYSTEM);
+		}
 	}
 
 	lanUpdateSlotList();

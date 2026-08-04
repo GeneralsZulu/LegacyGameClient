@@ -29,7 +29,9 @@
 #include "Common/crc.h"
 #include "Common/GameState.h"
 #include "Common/Registry.h"
+#include "Common/ReleaseLog.h"
 #include "GameNetwork/LANAPI.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/networkutil.h"
 #include "Common/GlobalData.h"
 #include "Common/RandomValue.h"
@@ -84,12 +86,16 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_currentGame = nullptr;
 	m_broadcastAddr = INADDR_BROADCAST;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemoteGamePort = 0;
 	m_actionTimeout = 5000; // ms
+	m_pendingResendIP = 0;
+	m_nextResendMs = 0;
 	m_lastUpdate = 0;
 	m_transport = new Transport;
 	m_isActive = TRUE;
 	m_observerHost = nullptr;
 	m_observerClient = nullptr;
+	m_inGameCoord = nullptr;
 	m_observerClientPlaybackKicked = FALSE;
 	m_observerProgressLastMs = 0;
 	m_observerProgressLastBytes = 0;
@@ -120,6 +126,10 @@ void LANAPI::init()
 	m_isInLANMenu = TRUE;
 	m_currentGame = nullptr;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemotePort = 0;
+	m_directConnectRemoteGamePort = 0;
+	m_dispatchSenderIP = 0;
+	m_dispatchSenderPort = 0;
 
 	// A download from a previous session is no longer ours to finish, and a CRC
 	// that failed there deserves a fresh try in this one.
@@ -188,6 +198,10 @@ void LANAPI::reset()
 	m_games = nullptr;
 	m_lobbyPlayers = nullptr;
 	m_directConnectRemoteIP = 0;
+	m_directConnectRemotePort = 0;
+	m_directConnectRemoteGamePort = 0;
+	m_dispatchSenderIP = 0;
+	m_dispatchSenderPort = 0;
 	m_pendingAction = ACT_NONE;
 	m_expiration = 0;
 	m_inLobby = true;
@@ -198,13 +212,119 @@ void LANAPI::reset()
 	// inherit a stale listen socket or live client connection.
 	stopObserverHost();
 	stopObserverClient();
+
+	// Drop the in-game coordinator session (observer relay) carried over
+	// from the previous match, if any.
+	if (m_inGameCoord)
+	{
+		ReleaseLog("Coordinator teardown: LANAPI::reset (in-game session)");
+		m_inGameCoord->disconnect();
+		delete m_inGameCoord;
+		m_inGameCoord = nullptr;
+	}
+}
+
+void LANAPI::adoptCoordinator(OnlineCoordinatorAPI* coord)
+{
+	if (m_inGameCoord && m_inGameCoord != coord)
+	{
+		m_inGameCoord->disconnect();
+		delete m_inGameCoord;
+	}
+	m_inGameCoord = coord;
+	if (coord)
+	{
+		// Tell the coordinator our listed game is now in progress so the
+		// games list can advertise "observe" instead of "join".
+		coord->sendGameStarted();
+		ReleaseLog("Coordinator adopted for in-game observer relay");
+	}
+}
+
+Int LANAPI::findSlotForSender(UnsignedInt senderIP) const
+{
+	if (m_currentGame == nullptr)
+		return -1;
+
+	// Players behind one NAT share a public IP and differ only by port, so
+	// prefer an exact (IP, source port) match against the per-slot lobby
+	// port the host recorded when that player first spoke. Falls through to
+	// the historical IP-only match for LAN games (where lobby ports are all
+	// the same) and for peers whose port we have not learned yet.
+	if (m_dispatchSenderPort != 0)
+	{
+		for (Int i = 0; i < MAX_SLOTS; ++i)
+		{
+			const LANGameSlot *slot = m_currentGame->getConstLANSlot(i);
+			if (slot != nullptr && slot->isHuman() && slot->getIP() == senderIP
+				&& slot->getLobbyPort() == m_dispatchSenderPort)
+			{
+				return i;
+			}
+		}
+	}
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+	{
+		const LANGameSlot *slot = m_currentGame->getConstLANSlot(i);
+		if (slot != nullptr && slot->isHuman() && slot->getIP() == senderIP)
+			return i;
+	}
+	return -1;
 }
 
 void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 {
 	if (ip != 0)
 	{
-		m_transport->queueSend(ip, lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
+		// Joiner side of a direct-connect game: rewrite the host's LAN-local
+		// IP (as recorded in slot 0 from the options string) to the punched
+		// coordinator mapping; the local IP is unroutable across NATs.
+		if (m_currentGame != nullptr && m_currentGame->getIsDirectConnect() &&
+			!AmIHost() && m_directConnectRemoteIP != 0 && ip != m_directConnectRemoteIP)
+		{
+			LANGameSlot *hostSlot = m_currentGame->getLANSlot(0);
+			if (hostSlot != nullptr && ip == hostSlot->getIP())
+			{
+				ip = m_directConnectRemoteIP;
+			}
+		}
+		// Choose the destination port in priority order:
+		//   1) source port of the LAN message currently being dispatched. This
+		//      is the exact endpoint the request came from, so it is right even
+		//      when several players share one public IP (two people behind the
+		//      same router/NAT). It MUST outrank the slot scan below, which
+		//      matches on IP alone and would otherwise address the reply to
+		//      whichever of them occupies the earlier slot -- the second
+		//      joiner then never sees the answer and times out.
+		//   2) per-peer lobby port stored on the matching game slot (used for
+		//      sends we originate rather than reply to; the host learns this
+		//      from each joiner's source port when running behind NAT).
+		//   3) m_directConnectRemotePort, set by the coordinator on the joiner
+		//      side before RequestGameJoinDirectConnect so the joiner's first
+		//      sends to the host go to the punched mapping, not lobbyPort.
+		//   4) lobbyPort (LAN default, unchanged behavior).
+		UnsignedShort port = lobbyPort;
+		if (m_dispatchSenderPort != 0 && ip == m_dispatchSenderIP)
+		{
+			port = m_dispatchSenderPort;
+		}
+		if (port == lobbyPort && m_currentGame != nullptr)
+		{
+			for (Int i = 0; i < MAX_SLOTS; ++i)
+			{
+				LANGameSlot *slot = m_currentGame->getLANSlot(i);
+				if (slot != nullptr && slot->isHuman() && slot->getIP() == ip && slot->getLobbyPort() != 0)
+				{
+					port = slot->getLobbyPort();
+					break;
+				}
+			}
+		}
+		if (port == lobbyPort && ip == m_directConnectRemoteIP && m_directConnectRemotePort != 0)
+		{
+			port = m_directConnectRemotePort;
+		}
+		m_transport->queueSend(ip, port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 	}
 	else if ((m_currentGame != nullptr) && (m_currentGame->getIsDirectConnect()))
 	{
@@ -212,15 +332,62 @@ void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
 		for (Int i = 0; i < MAX_SLOTS; ++i)
 		{
 			if (i != localSlot) {
-				GameSlot *slot = m_currentGame->getSlot(i);
+				LANGameSlot *slot = m_currentGame->getLANSlot(i);
 				if ((slot != nullptr) && (slot->isHuman())) {
-					m_transport->queueSend(slot->getIP(), lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
+					UnsignedInt   destIP = slot->getIP();
+					UnsignedShort port = slot->getLobbyPort() != 0 ? slot->getLobbyPort() : lobbyPort;
+					// Joiner side: the host's slot (0) carries the host's
+					// LAN-local IP from the options string, which is
+					// unroutable from behind another NAT. Send host-bound
+					// traffic to the punched coordinator mapping instead --
+					// without this the joiner's periodic HELLO never reaches
+					// the host and it drops us ~20s after joining.
+					if (i == 0 && !AmIHost() && m_directConnectRemoteIP != 0)
+					{
+						destIP = m_directConnectRemoteIP;
+						if (m_directConnectRemotePort != 0)
+							port = m_directConnectRemotePort;
+					}
+					// Diagnostic breadcrumb for the NAT keepalive path: game
+					// options (HELLO et al) are the host's liveness signal, so
+					// record exactly where each one is aimed. Throttled.
+					if (msg->messageType == LANMessage::MSG_GAME_OPTIONS)
+					{
+						static UnsignedInt s_lastHelloLogMs = 0;
+						UnsignedInt nowLog = timeGetTime();
+						if (nowLog - s_lastHelloLogMs > 5000)
+						{
+							s_lastHelloLogMs = nowLog;
+							ReleaseLog("LAN dc-send GAMEOPT slot=%d dest=%d.%d.%d.%d:%u (slotIP=%d.%d.%d.%d lobbyPort=%u) remote=%d.%d.%d.%d:%u localSlot=%d",
+								i, PRINTF_IP_AS_4_INTS(destIP), port,
+								PRINTF_IP_AS_4_INTS(slot->getIP()), slot->getLobbyPort(),
+								PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP), m_directConnectRemotePort,
+								localSlot);
+						}
+					}
+					m_transport->queueSend(destIP, port, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 				}
 			}
 		}
 	}
 	else
 	{
+		// A coordinator (direct-connect) session should never fall through to
+		// LAN broadcast: it means the game object lost its direct-connect
+		// flag and unicast keepalives are now going nowhere routable.
+		if (m_directConnectRemoteIP != 0)
+		{
+			static UnsignedInt s_lastBcastLogMs = 0;
+			UnsignedInt nowLog = timeGetTime();
+			if (nowLog - s_lastBcastLogMs > 5000)
+			{
+				s_lastBcastLogMs = nowLog;
+				ReleaseLog("LAN dc BROADCAST-FALLBACK type=%d game=%p directConnect=%d remote=%d.%d.%d.%d:%u",
+					msg->messageType, (void*)m_currentGame,
+					m_currentGame ? (Int)m_currentGame->getIsDirectConnect() : -1,
+					PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP), m_directConnectRemotePort);
+			}
+		}
 		m_transport->queueSend(m_broadcastAddr, lobbyPort, (unsigned char *)msg, sizeof(LANMessage) /*, 0, 0 */);
 	}
 }
@@ -361,6 +528,11 @@ void LANAPI::update()
 		return;
 	}
 
+	// Tick the coordinator's lobby-phase keepalive sender so the punched
+	// NAT mapping on the game UDP port stays alive through the lobby. No-op
+	// when no socket is stashed (most LAN sessions).
+	OnlineCoordinatorAPI::pumpStashedKeepalive();
+
 	// Let the UDP socket breathe
 	if ((m_transport->update() == FALSE) && (LANSocketErrorDetected == FALSE)) {
 		if (m_isInLANMenu == TRUE) {
@@ -382,7 +554,22 @@ void LANAPI::update()
 				continue;
 			}
 
+			// Track the source port so reply-path sendMessage calls can
+			// route back through the same NAT mapping (matters for the
+			// online-coordinator flow; LAN packets always arrive on
+			// lobbyPort and behave identically).
+			m_dispatchSenderIP   = senderIP;
+			m_dispatchSenderPort = m_transport->m_inBuffer[i].port;
+
 			LANMessage *msg = (LANMessage *)(m_transport->m_inBuffer[i].data);
+			// Direct-connect diagnostic: log the join-flow control messages
+			// with their true source endpoint. GAME_OPTIONS is excluded (it
+			// is the 10s keepalive and would drown the log).
+			if (m_directConnectRemoteIP != 0 && msg->messageType != LANMessage::MSG_GAME_OPTIONS)
+			{
+				ReleaseLog("LAN dc RECV type=%d from %d.%d.%d.%d:%u",
+					(Int)msg->messageType, PRINTF_IP_AS_4_INTS(senderIP), m_dispatchSenderPort);
+			}
 			//DEBUG_LOG(("LAN message type %s from %ls (%s@%s)", GetMessageTypeString(msg->messageType).str(),
 			//	msg->name, msg->userName, msg->hostName));
 			switch (msg->messageType)
@@ -459,6 +646,12 @@ void LANAPI::update()
 
 			// Mark it as read
 			m_transport->m_inBuffer[i].length = 0;
+
+			// Clear the transient dispatch context so any sends queued from
+			// outside the dispatch loop (timers, user input) don't pick up
+			// a stale per-message port.
+			m_dispatchSenderIP   = 0;
+			m_dispatchSenderPort = 0;
 		}
 	}
 	if(LANbuttonPushed)
@@ -565,6 +758,10 @@ void LANAPI::update()
 			{
 				if (m_currentGame->getIP(p) && m_currentGame->getPlayerLastHeard(p) + s_resendDelta*8 < now)
 				{
+					ReleaseLog("LAN host dropping slot %d ip=%d.%d.%d.%d lastHeard=%u now=%u delta=%u",
+						p, PRINTF_IP_AS_4_INTS(m_currentGame->getIP(p)),
+						m_currentGame->getPlayerLastHeard(p), now,
+						now - m_currentGame->getPlayerLastHeard(p));
 					LANMessage msg;
 					fillInLANMessage( &msg );
 					UnicodeString theStr;
@@ -586,6 +783,18 @@ void LANAPI::update()
 	if (gameListChanged)
 	{
 		OnGameList(m_games);
+	}
+
+	// Retransmit an unanswered join-flow request. A single UDP packet over a
+	// punched NAT path is easily lost (worst case: the host is mid-handoff,
+	// tearing down its coordinator lobby, when our MSG_REQUEST_JOIN lands);
+	// without a retry that one loss shows up as "Connection timed out".
+	if ((m_pendingAction == ACT_JOIN || m_pendingAction == ACT_JOINDIRECTCONNECT)
+		&& m_nextResendMs != 0 && now >= m_nextResendMs)
+	{
+		DEBUG_LOG(("LANAPI::update - retrying join request (action %d)", (Int)m_pendingAction));
+		sendMessage(&m_pendingResendMsg, m_pendingResendIP);
+		m_nextResendMs = now + 1000;
 	}
 
 	// Time out old actions
@@ -650,6 +859,38 @@ void LANAPI::RequestLocations()
 	sendMessage(&msg);
 }
 
+void LANAPI::sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHost )
+{
+	if (destIPHost == 0 || destPortHost == 0) return;
+	if (!m_transport) return;
+	// MSG_REQUEST_LOCATIONS is a tiny, side-effect-free packet that any LAN
+	// peer accepts. We use it as the NAT-opening probe: the host fires this
+	// at a newly-arrived joiner's external lobby addr (which the coordinator
+	// just told us about) so the host's NAT installs an outbound mapping
+	// before the joiner's MSG_REQUEST_GAME_INFO arrives. For full-cone hosts
+	// this is a no-op; for port-restricted hosts it's required.
+	LANMessage msg;
+	msg.messageType = LANMessage::MSG_REQUEST_LOCATIONS;
+	fillInLANMessage( &msg );
+	m_transport->queueSend(destIPHost, destPortHost, (unsigned char*)&msg, sizeof(LANMessage));
+	DEBUG_LOG(("LANAPI::sendNATKeepalive - sent to %u.%u.%u.%u:%u",
+		(destIPHost >> 24) & 0xff, (destIPHost >> 16) & 0xff,
+		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
+}
+
+void LANAPI::sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortHost )
+{
+	if (destIPHost == 0 || destPortHost == 0) return;
+	if (!m_transport) return;
+	Int ttl = 4;
+	if (TheGlobalData && TheGlobalData->m_coordPunchTTL > 0)
+		ttl = TheGlobalData->m_coordPunchTTL;
+	m_transport->sendNATProbe(destIPHost, destPortHost, ttl);
+	DEBUG_LOG(("LANAPI::sendNATProbeLowTTL - probed %u.%u.%u.%u:%u",
+		(destIPHost >> 24) & 0xff, (destIPHost >> 16) & 0xff,
+		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
+}
+
 void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 {
 	if ((m_pendingAction != ACT_NONE) && (m_pendingAction != ACT_JOINDIRECTCONNECT))
@@ -703,6 +944,10 @@ void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 
 	m_pendingAction = ACT_JOIN;
 	m_expiration = timeGetTime() + m_actionTimeout;
+	// Arm the once-a-second retransmit (see update()).
+	m_pendingResendMsg = msg;
+	m_pendingResendIP = ip;
+	m_nextResendMs = timeGetTime() + 1000;
 }
 
 void LANAPI::RequestGameJoinDirectConnect(UnsignedInt ipaddress)
@@ -731,6 +976,10 @@ void LANAPI::RequestGameJoinDirectConnect(UnsignedInt ipaddress)
 
 	m_pendingAction = ACT_JOINDIRECTCONNECT;
 	m_expiration = timeGetTime() + m_actionTimeout;
+	// Arm the once-a-second retransmit (see update()).
+	m_pendingResendMsg = msg;
+	m_pendingResendIP = ipaddress;
+	m_nextResendMs = timeGetTime() + 1000;
 }
 
 void LANAPI::RequestGameLeave()
@@ -1330,6 +1579,38 @@ Bool LANAPI::SetLocalIP( UnsignedInt localIP )
 	return retval;
 }
 
+Bool LANAPI::SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd )
+{
+	// Online (coordinator) handoff: take over the very socket that did the
+	// STUN discovery and the hole punch, instead of closing it and binding
+	// a fresh one on the same port.
+	//
+	// Rebinding looks equivalent but is not: the NAT mapping belongs to the
+	// SOCKET, not the port. Carrier-grade NATs (Starlink was the case that
+	// exposed this) allocate a NEW external port to the replacement socket,
+	// so the peer -- which the coordinator told to talk to the ORIGINAL
+	// external port -- ends up punching an address nothing listens on, and
+	// our replies arrive from a port its NAT never expected and drops.
+	// Symptom: punch outcome lobby=false while game=true, because the
+	// in-game socket is handed over by fd and keeps its mapping.
+	m_localIP = localIP;
+	m_transport->reset();
+	Bool retval = m_transport->initFromFD(fd, localIP, lobbyPort);
+	if (!retval)
+	{
+		// initFromFD owns (and has closed) the fd on failure; fall back to a
+		// fresh bind so the lobby still works on LAN-ish networks.
+		ReleaseLog("LAN: adopting coordinator lobby socket FAILED; falling back to a fresh bind");
+		retval = m_transport->init(m_localIP, lobbyPort);
+	}
+	else
+	{
+		ReleaseLog("LAN: adopted the punched coordinator lobby socket (port %u)", (unsigned)lobbyPort);
+	}
+	m_transport->allowBroadcasts(true);
+	return retval;
+}
+
 void LANAPI::SetLocalIP( AsciiString localIP )
 {
 	UnsignedInt resolvedIP = ResolveIP(localIP);
@@ -1363,7 +1644,16 @@ void LANAPI::setIsActive(Bool isActive) {
 // =====================================================================
 
 #include "Common/Recorder.h"
+#include "Common/FileSystem.h"
 #include "GameNetwork/MapDownloadHook.h"
+
+// Socket close for the relay fd path; LANAPI.cpp otherwise only touches
+// sockets through Transport/UDP wrappers.
+#ifdef _WIN32
+#define LANAPI_CLOSE_SOCKET(fd) ::closesocket(fd)
+#else
+#define LANAPI_CLOSE_SOCKET(fd) ::close(fd)
+#endif
 
 // Find a cached map by CRC. The MapCache is keyed by lowercased filename, but
 // the live-observer flow only knows the map by the CRC carried in the replay
@@ -1481,7 +1771,11 @@ void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 	m_observerClient = new LANObserverClient();
 
 	// Scratch file in the replay dir. Reuse a single name so we don't pile
-	// up junk; the file is rewritten each session.
+	// up junk; the file is rewritten each session. A fresh install that has
+	// never recorded a replay has no Replays\ directory yet, so create it
+	// or the fopen below fails with ENOENT.
+	if (TheFileSystem)
+		TheFileSystem->createDirectory(RecorderClass::getReplayDir());
 	AsciiString path = RecorderClass::getReplayDir();
 	path.concat("_live_observer");
 	path.concat(RecorderClass::getReplayExtention());
@@ -1500,6 +1794,42 @@ void LANAPI::RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort)
 		TheRecorder->setLiveObserverStreamOpen(TRUE);
 	m_observerClientPlaybackKicked = FALSE;
 	DEBUG_LOG(("LANAPI::RequestObserve - observing host %08X port %u", hostIP, observerPort));
+}
+
+void LANAPI::RequestObserveAdoptedFd(Int fd)
+{
+	LANObsLog("RequestObserveAdoptedFd: fd=%d", fd);
+	if (fd < 0)
+		return;
+
+	// No reconnect target exists for a relayed stream: a retry would need a
+	// whole new observe request through the coordinator. Disable the
+	// connect-retry machinery; failures surface the normal error dialog.
+	s_observeHostIPHostOrder = 0;
+	s_observeConnectPort     = 0;
+	s_observeAttemptsLeft    = 0;
+	s_observeLastBytes       = 0;
+	s_observeLastProgressMs  = timeGetTime();
+
+	stopObserverClient();
+	m_observerClient = new LANObserverClient();
+
+	// Same fresh-install consideration as RequestObserve above.
+	if (TheFileSystem)
+		TheFileSystem->createDirectory(RecorderClass::getReplayDir());
+	AsciiString path = RecorderClass::getReplayDir();
+	path.concat("_live_observer");
+	path.concat(RecorderClass::getReplayExtention());
+
+	if (!m_observerClient->adoptFd(fd, path))
+	{
+		LANObsLog("RequestObserveAdoptedFd: adoptFd failed");
+		stopObserverClient();
+		return;
+	}
+	if (TheRecorder)
+		TheRecorder->setLiveObserverStreamOpen(TRUE);
+	m_observerClientPlaybackKicked = FALSE;
 }
 
 // Make sure the map referenced by the just-buffered live-observer snapshot
@@ -1622,7 +1952,38 @@ void LANAPI::updateObserver()
 		}
 	}
 
-	if (m_observerHost && m_observerHost->isRunning())
+	// Online-coordinator observer relay (host side): keep the adopted
+	// coordinator session alive during the match and service observe
+	// requests by dialing a relay connection per token and attaching it to
+	// the observer host exactly like an accepted LAN observer.
+	if (m_inGameCoord)
+	{
+		m_inGameCoord->update();
+		AsciiString token;
+		while (m_inGameCoord->consumeObserverRequestToken(&token))
+		{
+			LANObsLog("updateObserver: observer_request token=%s; opening relay", token.str());
+			if (!m_observerHost)
+				startObserverHost();
+			Int relayFd = m_inGameCoord->openObserverRelayFd(token, TRUE);
+			if (relayFd >= 0 && m_observerHost)
+			{
+				UnicodeString name = L"Online observer";
+				if (m_observerHost->adoptObserverFd(relayFd, name))
+				{
+					UnicodeString msg;
+					msg.format(L"%s connected through the online relay.", name.str());
+					OnChat(L"", 0, msg, LANCHAT_SYSTEM);
+				}
+			}
+			else if (relayFd >= 0)
+			{
+				LANAPI_CLOSE_SOCKET(relayFd);
+			}
+		}
+	}
+
+	if (m_observerHost)
 	{
 		// Capture up to a handful of names per tick for chat notification.
 		UnicodeString newNames[4];

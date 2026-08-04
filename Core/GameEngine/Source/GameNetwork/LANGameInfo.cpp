@@ -52,6 +52,7 @@ LANGameInfo *TheLANGameInfo = nullptr;
 LANGameSlot::LANGameSlot()
 {
 	m_lastHeard = 0;
+	m_lobbyPort = 0;
 }
 
 

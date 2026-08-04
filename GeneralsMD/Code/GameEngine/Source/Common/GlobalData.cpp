@@ -885,6 +885,13 @@ GlobalData::GlobalData()
 
 	m_netMinPlayers = 1; // allowing sandbox mode
 
+	m_coordHost.clear();
+	m_coordNick.clear();
+	m_coordAutoHostName.clear();
+	m_coordAutoJoinName.clear();
+	m_coordAutoStart = 0;
+	m_coordPunchTTL = 4;
+
 	m_defaultIP = 0;
 
 	m_BuildSpeed = 0.0f;

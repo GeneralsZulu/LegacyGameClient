@@ -132,6 +132,81 @@ Bool Transport::init( UnsignedInt ip, UnsignedShort port )
 		return false;
 	}
 
+	return finishInit(port);
+}
+
+// Takes ownership of fd: on failure the fd is closed here so the caller can
+// immediately re-bind the same port with init(). Failures go to ReleaseLog
+// for the same reason as the bind failure in init() above -- a dead in-game
+// transport is otherwise invisible in release builds.
+Bool Transport::initFromFD( Int fd, UnsignedInt ip, UnsignedShort port )
+{
+	if (!m_winsockInit)
+	{
+		WORD verReq = MAKEWORD(2, 2);
+		WSADATA wsadata;
+		Bool wsOk = (WSAStartup(verReq, &wsadata) == 0);
+		if (wsOk && ((LOBYTE(wsadata.wVersion) != 2) || (HIBYTE(wsadata.wVersion) != 2))) {
+			WSACleanup();
+			wsOk = false;
+		}
+		if (!wsOk)
+		{
+			ReleaseLog("Transport adopt FAILED on port %d: WSAStartup", port);
+			if (fd >= 0)
+			{
+#ifdef _WIN32
+				closesocket(fd);
+#else
+				close(fd);
+#endif
+			}
+			return false;
+		}
+		m_winsockInit = true;
+	}
+
+	delete m_udpsock;
+	m_udpsock = NEW UDP();
+	if (!m_udpsock || m_udpsock->AdoptFD(fd, ip, port) != 0)
+	{
+		// AdoptFD only rejects fd < 0, so there is nothing to close here.
+		ReleaseLog("Transport adopt FAILED on port %d: bad fd=%d", port, fd);
+		delete m_udpsock;
+		m_udpsock = nullptr;
+		return false;
+	}
+	DEBUG_LOG(("Transport::initFromFD - adopted fd=%d as 0x%08X:%u", fd, ip, port));
+	return finishInit(port);
+}
+
+// See setPunchTTL in OnlineCoordinatorAPI.cpp for why both winsock TTL
+// option values are set: which one the stack honors depends on which
+// winsock import library won at link time; the other is a harmless no-op.
+static void setSockTTL(Int fd, Int ttl)
+{
+	if (fd < 0) return;
+#ifdef _WIN32
+	setsockopt(fd, IPPROTO_IP, 4, (const char*)&ttl, sizeof(ttl));
+	setsockopt(fd, IPPROTO_IP, 7, (const char*)&ttl, sizeof(ttl));
+#else
+	setsockopt(fd, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl));
+#endif
+}
+
+Bool Transport::sendNATProbe( UnsignedInt ip, UnsignedShort port, Int ttl )
+{
+	if (!m_udpsock)
+		return false;
+	static const unsigned char probe[8] = { 'Z','P','R','O','B','E',0,0 };
+	setSockTTL(m_udpsock->GetFD(), ttl);
+	m_udpsock->Write(probe, sizeof(probe), ip, port);
+	setSockTTL(m_udpsock->GetFD(), 128);
+	return true;
+}
+
+Bool Transport::finishInit( UnsignedShort port )
+{
 	// ------- Clear buffers --------
 	int i=0;
 	for (; i<MAX_MESSAGES; ++i)
@@ -233,7 +308,6 @@ Bool Transport::doSend() {
 			// Send this message
 			if ((bytesSent = m_udpsock->Write((unsigned char *)(&m_outBuffer[i]), bytesToSend, m_outBuffer[i].addr, m_outBuffer[i].port)) > 0)
 			{
-				//DEBUG_LOG(("Sending %d bytes to %d.%d.%d.%d:%d", bytesToSend, PRINTF_IP_AS_4_INTS(m_outBuffer[i].addr), m_outBuffer[i].port));
 				m_outgoingPackets[m_statisticsSlot]++;
 				m_outgoingBytes[m_statisticsSlot] += m_outBuffer[i].length + sizeof(TransportMessageHeader);
 				m_outBuffer[i].length = 0;  // Remove from queue

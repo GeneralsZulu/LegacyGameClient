@@ -300,6 +300,14 @@ protected:
 	// snapshot at high FPS; cleared on first EOF when we drop back to
 	// m_liveObserverSavedFpsLimit and play in real-time.
 	Bool        m_liveObserverStreamOpen;
+	// TRUE only while playbackFileLiveObserver is inside its playbackFile
+	// call: makes the open-time first readNextFrame treat EOF as "wait for
+	// the host's first command" instead of stopPlayback. Needed when
+	// observing a game in its first seconds, where the streamed snapshot
+	// holds a header but no commands yet. Deliberately NOT reset in init()
+	// (which runs mid-playbackFile via clearGameData); constructor and
+	// playbackFileLiveObserver are its only writers.
+	Bool        m_liveObserverArming;
 	Bool        m_liveObserverWaitingForBytes;
 	Int         m_liveObserverRetryPos;
 	Bool        m_liveObserverFpsBoosted;

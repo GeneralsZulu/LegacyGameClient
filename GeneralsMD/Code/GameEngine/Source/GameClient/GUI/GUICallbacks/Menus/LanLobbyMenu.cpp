@@ -34,12 +34,14 @@
 #include "Lib/BaseType.h"
 #include "Common/crc.h"
 #include "Common/GameEngine.h"
+#include "Common/version.h"
 #include "Common/GlobalData.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/NameKeyGenerator.h"
 #include "Common/Player.h"
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
+#include "Common/ReleaseLog.h"
 #include "Common/OptionPreferences.h"
 #include "GameClient/AnimateWindowManager.h"
 #include "GameClient/ClientInstance.h"
@@ -61,6 +63,8 @@
 #include "GameNetwork/IPEnumeration.h"
 #include "GameNetwork/LANAPICallbacks.h"
 #include "GameNetwork/LANGameInfo.h"
+#include "GameNetwork/NetworkDefs.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 
 Bool LANisShuttingDown = false;
 Bool LANbuttonPushed = false;
@@ -69,6 +73,87 @@ char *LANnextScreen = nullptr;
 
 static Int	initialGadgetDelay = 2;
 static Bool justEntered = FALSE;
+
+// -- online-coordinator mode -------------------------------------------------
+// When TRUE, the LAN lobby is reused as a UI for the cncstats coordinator
+// instead of broadcasting on the LAN. The mode is set by MainMenu (the
+// "Online" button) before the menu is pushed, and cleared on shutdown.
+static Bool                     s_useCoordinator    = FALSE;
+static OnlineCoordinatorAPI*    s_coord             = nullptr;
+static UnsignedInt              s_coordLastListMs   = 0;
+static AsciiString              s_coordPendingHostName;  // game name to host once READY
+static AsciiString              s_coordPendingJoinID;    // game id to join once READY
+static AsciiString              s_coordCurrentNick;      // sent in HELLO at connect time
+static std::vector<AsciiString> s_coordListedIDs;        // parallel to listbox rows
+static Bool                     s_coordHandoffDone  = FALSE;
+// LAN-like join resilience: remember the last join target so a failed
+// attempt (usually a punch timeout) can transparently reconnect and retry
+// instead of parking the lobby on an error.
+static AsciiString              s_coordLastJoinID;
+static Int                      s_coordJoinRetries  = 0;
+static const Int                COORD_JOIN_MAX_RETRIES = 2;
+// Observe-in-progress: game id whose observe request should be sent once
+// the coordinator connection is READY (mirrors s_coordPendingJoinID).
+static AsciiString              s_coordPendingObserveID;
+
+static const char* COORD_HOST_DEFAULT = "cncstats.computersrfun.org";
+static const UnsignedShort COORD_TCP_PORT_DEFAULT = 27500;
+static const UnsignedInt   COORD_LIST_REFRESH_MS  = 5000;
+
+void LanLobbyMenuSetUseCoordinator( Bool enable )
+{
+	s_useCoordinator = enable;
+}
+
+// Cross-menu accessor: LanGameOptionsMenu calls this each frame so the host's
+// coordinator TCP signaling stays pumped after the handoff. Returns NULL
+// when no coord session is alive (regular LAN games, or after the host has
+// torn down the session).
+OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost()
+{
+	return s_coord;
+}
+
+// Cross-menu teardown: LanGameOptionsMenu calls this when the host backs
+// out of the lobby (game start now RELEASES the session into LANAPI
+// instead, see LanLobbyMenuReleaseCoordinator). Idempotent.
+void LanLobbyMenuShutdownHostCoordinator()
+{
+	if (s_coord)
+	{
+		ReleaseLog("Coordinator teardown: LanLobbyMenuShutdownHostCoordinator");
+		s_coord->disconnect();
+		delete s_coord;
+		s_coord = nullptr;
+	}
+	// Backing out abandons the game, so let go of the punched in-game
+	// socket too. Left behind it would keep holding NETWORK_BASE_PORT_NUMBER
+	// and, worse, ConnectionManager would happily adopt this dead session's
+	// socket for the NEXT game the player starts -- including a plain LAN
+	// or skirmish game that has nothing to do with the coordinator.
+	if (OnlineCoordinatorAPI::hasStashedGameSocket())
+	{
+		ReleaseLog("Coordinator: releasing stashed game socket (host abandoned the lobby)");
+		OnlineCoordinatorAPI::discardStashedGameSocket();
+	}
+}
+
+// Ownership transfer at game start: the host keeps its coordinator TCP
+// session alive through the match so viewers can request to observe the
+// in-progress game (relayed through the coordinator). The caller (game
+// start path) hands the returned instance to TheLAN->adoptCoordinator();
+// after this, no lobby teardown path touches it.
+OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator()
+{
+	OnlineCoordinatorAPI* c = s_coord;
+	s_coord = nullptr;
+	return c;
+}
+
+// Forward declarations for the coordinator helpers; the definitions live
+// just above LanLobbyMenuUpdate further down in this file.
+static void connectCoordinatorIfNeeded();
+static void pumpCoordinator();
 
 
 
@@ -176,13 +261,26 @@ Bool LANPreferences::usesSystemMapDir()
 	return FALSE;
 }
 
+// When no (valid) map preference exists, prefer the first OFFICIAL
+// multiplayer map. getDefaultMap(TRUE) returns the alphabetically first
+// multiplayer map of any kind, and with user maps installed that tends to be
+// something like "(3 Letter names required).map" (punctuation sorts before
+// letters), which is a terrible first impression for a fresh lobby.
+static AsciiString getDefaultLanMap()
+{
+	AsciiString ret = getDefaultOfficialMap();
+	if (ret.isEmpty())
+		ret = getDefaultMap(TRUE);
+	return ret;
+}
+
 AsciiString LANPreferences::getPreferredMap()
 {
 	AsciiString ret;
 	LANPreferences::const_iterator it = find("Map");
 	if (it == end())
 	{
-		ret = getDefaultMap(TRUE);
+		ret = getDefaultLanMap();
 		return ret;
 	}
 
@@ -190,7 +288,7 @@ AsciiString LANPreferences::getPreferredMap()
 	ret.trim();
 	if (ret.isEmpty() || !isValidMap(ret, TRUE))
 	{
-		ret = getDefaultMap(TRUE);
+		ret = getDefaultLanMap();
 		return ret;
 	}
 
@@ -345,6 +443,8 @@ static void playerTooltip(GameWindow *window,
 	}
 
 	UnsignedInt playerIP = (UnsignedInt)GadgetListBoxGetItemData( window, row, col );
+	if (!TheLAN)
+		return;
 	LANPlayer *player = TheLAN->LookupPlayer(playerIP);
 	if (!player)
 	{
@@ -403,8 +503,31 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	// Show Menu
 	layout->hide( FALSE );
 
-	// Init LAN API Singleton
-	if (!TheLAN)
+	// In coordinator mode we delay (and may skip) LANAPI bring-up: the
+	// coordinator wants UDP/8086 first for the STUN punch, and the LAN
+	// transport would steal it. TheLAN is created later, after PUNCH_OK,
+	// when we hand the punched peer address into the LAN direct-connect
+	// flow.
+	s_coordHandoffDone = FALSE;
+	s_coordPendingHostName.clear();
+	s_coordPendingJoinID.clear();
+	s_coordListedIDs.clear();
+	s_coordLastListMs = 0;
+	if (s_useCoordinator)
+	{
+		if (TheLAN)
+		{
+			delete TheLAN;
+			TheLAN = nullptr;
+		}
+		if (s_coord)
+		{
+			delete s_coord;
+		}
+		s_coord = new OnlineCoordinatorAPI();
+		useFpsLimit = TheGlobalData->m_useFpsLimit;
+	}
+	else if (!TheLAN)
 	{
 		TheLAN = NEW LANAPI();	/// @todo clh delete TheLAN and
 		useFpsLimit = TheGlobalData->m_useFpsLimit;
@@ -448,9 +571,12 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 #endif
 
 	// TheLAN->init() sets us to be in a LAN menu screen automatically.
-	TheLAN->init();
-	if (TheLAN->SetLocalIP(IP) == FALSE) {
-		LANSocketErrorDetected = TRUE;
+	if (!s_useCoordinator)
+	{
+		TheLAN->init();
+		if (TheLAN->SetLocalIP(IP) == FALSE) {
+			LANSocketErrorDetected = TRUE;
+		}
 	}
 
 	//Initialize the gadgets on the window
@@ -460,6 +586,15 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	defaultName = prefs.getUserName();
 	defaultName.truncateTo(g_lanPlayerNameLength);
 
+	// Test automation: -coordnick overrides the persisted player name so
+	// multiple lab clients sharing an install don't collide on the
+	// duplicate-name check.
+	if (!TheGlobalData->m_coordNick.isEmpty())
+	{
+		defaultName.translate(TheGlobalData->m_coordNick);
+		defaultName.truncateTo(g_lanPlayerNameLength);
+	}
+
 	GadgetTextEntrySetText( textEntryPlayerName, defaultName);
 	// Clear the text entry line
 	GadgetTextEntrySetText(textEntryChat, UnicodeString::TheEmptyString);
@@ -468,8 +603,11 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	GadgetListBoxReset(listboxGames);
 
 	defaultName.truncateTo(g_lanPlayerNameLength);
-	TheLAN->RequestSetName(defaultName);
-	TheLAN->RequestLocations();
+	if (!s_useCoordinator)
+	{
+		TheLAN->RequestSetName(defaultName);
+		TheLAN->RequestLocations();
+	}
 
 	/*
 	UnicodeString unicodeChat;
@@ -497,7 +635,16 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	TheShell->showShellMap(TRUE);
 
 	// check for MOTD
-	TheLAN->checkMOTD();
+	if (!s_useCoordinator)
+	{
+		TheLAN->checkMOTD();
+	}
+	else
+	{
+		// Kick off the coordinator handshake immediately so the games list
+		// populates without needing the user to click Host/Join first.
+		connectCoordinatorIfNeeded();
+	}
 	layout->hide(FALSE);
 	layout->bringForward();
 
@@ -554,7 +701,38 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 	// hide menu
 	//layout->hide( TRUE );
 
-	TheLAN->RequestLobbyLeave( true );
+	if (TheLAN)
+	{
+		TheLAN->RequestLobbyLeave( true );
+	}
+
+	if (s_coord)
+	{
+		// For a host that just handed off, leave s_coord alive so the
+		// LanGameOptionsMenu can pump it and accept additional joiners.
+		// LanLobbyMenuShutdownHostCoordinator() tears it down later.
+		const Bool hostKeepAlive = (s_coordHandoffDone && s_coord->amIHost());
+		if (!hostKeepAlive)
+		{
+			ReleaseLog("Coordinator teardown: LanLobbyMenuShutdown (handoffDone=%d amIHost=%d)",
+				(int)s_coordHandoffDone, (int)s_coord->amIHost());
+			s_coord->disconnect();
+			delete s_coord;
+			s_coord = nullptr;
+		}
+		else
+		{
+			ReleaseLog("Coordinator kept alive through lobby shutdown (host N-player path)");
+		}
+	}
+	// If the handoff to TheLAN already happened we keep s_useCoordinator
+	// set so the post-handoff lobby push still uses the coordinator-aware
+	// flow if it pushes us back here. The MainMenu callback resets the
+	// flag the next time Online vs Network is chosen.
+	if (!s_coordHandoffDone)
+	{
+		s_useCoordinator = FALSE;
+	}
 
 	// Reset the LAN singleton
 	//TheLAN->reset();
@@ -586,6 +764,572 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 
 
 //-------------------------------------------------------------------------------------------------
+// Helpers for coordinator-mode lobby.
+//-------------------------------------------------------------------------------------------------
+
+static AsciiString readPlayerNickAscii()
+{
+	UnicodeString u = GadgetTextEntryGetText( textEntryPlayerName );
+	AsciiString a;
+	a.translate(u);
+	a.trim();
+	if (a.isEmpty()) a = "anonymous";
+	return a;
+}
+
+static void connectCoordinatorIfNeeded()
+{
+	if (!s_coord) return;
+	if (s_coord->state() != OnlineCoordinatorAPI::STATE_IDLE &&
+	    s_coord->state() != OnlineCoordinatorAPI::STATE_ERROR)
+	{
+		return;
+	}
+	s_coordCurrentNick = readPlayerNickAscii();
+	AsciiString host = COORD_HOST_DEFAULT;
+	UnsignedShort tcpPort = COORD_TCP_PORT_DEFAULT;
+	// -coordhost "host[:port]" override for lab/testing.
+	if (!TheGlobalData->m_coordHost.isEmpty())
+	{
+		host = TheGlobalData->m_coordHost;
+		const char* colon = strchr(host.str(), ':');
+		if (colon)
+		{
+			tcpPort = (UnsignedShort)atoi(colon + 1);
+			AsciiString hostOnly;
+			for (const char* p = host.str(); p != colon; ++p)
+				hostOnly.concat(*p);
+			host = hostOnly;
+		}
+	}
+	// Bind UDP/8086 (lobby) so the punched NAT mapping is on the port the LAN
+	// code will rebind after PUNCH_OK, AND UDP/8088 (NETWORK_BASE_PORT_NUMBER,
+	// in-game data) so ConnectionManager's later socket inherits an already-
+	// punched mapping. The TCP signaling port is the listed coordinator port;
+	// UDP STUN is on the port reported in hello_ok.
+	// Send the real build version so the coordinator can refuse to match
+	// clients running different game versions (which would only meet again
+	// as an in-game desync). TheVersion is the same string the main menu
+	// shows (APPVERSION via the installer chain).
+	AsciiString buildVersion = "zulu/unknown";
+	if (TheVersion)
+		buildVersion = TheVersion->getAsciiVersion();
+	ReleaseLog("Coordinator connect: %s:%u nick=%s version=%s", host.str(), (unsigned)tcpPort,
+		s_coordCurrentNick.str(), buildVersion.str());
+	if (!s_coord->connect(host, tcpPort,
+		s_coordCurrentNick, buildVersion,
+		/*lobbyBindPort=*/8086, /*gameBindPort=*/NETWORK_BASE_PORT_NUMBER))
+	{
+		ReleaseLog("Coordinator connect FAILED: %s", s_coord->lastError().str());
+	}
+}
+
+static void rebuildGamesListbox()
+{
+	const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
+	GadgetListBoxReset(listboxGames);
+	s_coordListedIDs.clear();
+	Color textColor = GameMakeColor(255, 255, 255, 255);
+	for (size_t i = 0; i < games.size(); ++i)
+	{
+		const OnlineCoordinatorAPI::GameListEntry& g = games[i];
+		AsciiString row;
+		if (g.inProgress)
+		{
+			row.format("%s   [%s]   IN PROGRESS - double-click to watch",
+				g.name.str(), g.hostNick.str());
+		}
+		else
+		{
+			row.format("%s   [%s]   %d/%d   %s",
+				g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
+				g.map.str());
+		}
+		UnicodeString u;
+		u.translate(row);
+		GadgetListBoxAddEntryText(listboxGames, u,
+			g.inProgress ? GameMakeColor(200, 200, 160, 255) : textColor, -1, 0);
+		s_coordListedIDs.push_back(g.id);
+	}
+}
+
+static void coordinatorPostStatus(const char* msg)
+{
+	UnicodeString u;
+	u.translate(AsciiString(msg));
+	GadgetListBoxAddEntryText(listboxChatWindow, u, GameMakeColor(180, 180, 255, 255), -1, 0);
+}
+
+// Shared handler for "the user picked a game row": in-progress games get an
+// observe request (watch via the coordinator relay), waiting games get the
+// normal join flow. Both are queued and dispatched once the coordinator
+// connection reports READY.
+static void coordinatorJoinOrObserveRow(Int rowSelected)
+{
+	if (rowSelected < 0 || rowSelected >= (Int)s_coordListedIDs.size())
+		return;
+	connectCoordinatorIfNeeded();
+
+	Bool observe = FALSE;
+	const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
+	if (rowSelected < (Int)games.size() && games[rowSelected].inProgress)
+		observe = TRUE;
+
+	if (observe)
+	{
+		s_coordPendingObserveID = s_coordListedIDs[rowSelected];
+		s_coordPendingJoinID.clear();
+		s_coordPendingHostName.clear();
+		coordinatorPostStatus("Requesting to watch the game...");
+	}
+	else
+	{
+		s_coordPendingJoinID = s_coordListedIDs[rowSelected];
+		s_coordPendingObserveID.clear();
+		s_coordPendingHostName.clear();
+		coordinatorPostStatus("Joining game as soon as the connection is ready...");
+	}
+}
+
+static void doCoordinatorHandoffToLAN();
+static void doCoordinatorHostHandoffToLAN();
+
+// User-facing text for each coordinator state transition. Returns null for
+// states that are pure plumbing (the user doesn't need a line for them).
+static const char* coordStateStatusText(OnlineCoordinatorAPI::State state)
+{
+	switch (state)
+	{
+	case OnlineCoordinatorAPI::STATE_CONNECTING:  return "Connecting to the online service...";
+	case OnlineCoordinatorAPI::STATE_HANDSHAKING: return nullptr;
+	case OnlineCoordinatorAPI::STATE_DISCOVERING: return "Detecting your internet address...";
+	case OnlineCoordinatorAPI::STATE_READY:       return "Online. You can host or join a game.";
+	case OnlineCoordinatorAPI::STATE_HOSTING:     return "Game registered. Waiting for players to join...";
+	case OnlineCoordinatorAPI::STATE_JOINING:     return "Joining game...";
+	case OnlineCoordinatorAPI::STATE_PUNCHING:    return "Connecting to the other player...";
+	case OnlineCoordinatorAPI::STATE_PUNCH_OK:    return "Connected!";
+	default: return nullptr;
+	}
+}
+
+static void pumpCoordinator()
+{
+	OnlineCoordinatorAPI::State prevState = s_coord->state();
+	s_coord->update();
+	OnlineCoordinatorAPI::State state = s_coord->state();
+
+	if (state != prevState)
+	{
+		const char* stateText = coordStateStatusText(state);
+		if (stateText != nullptr)
+			coordinatorPostStatus(stateText);
+		ReleaseLog("Coordinator state %d -> %d%s%s", (Int)prevState, (Int)state,
+			(state == OnlineCoordinatorAPI::STATE_ERROR) ? " error: " : "",
+			(state == OnlineCoordinatorAPI::STATE_ERROR) ? s_coord->lastError().str() : "");
+		if (state == OnlineCoordinatorAPI::STATE_READY)
+		{
+			// The public address is diagnostic gold when players report punch
+			// failures, but it reads as noise to most users; keep it in the
+			// ReleaseLog only.
+			ReleaseLog("Coordinator public addr: %s", s_coord->publicAddr().str());
+			// Immediately fetch games on first READY transition.
+			s_coord->requestList();
+			s_coordLastListMs = timeGetTime();
+		}
+		if (state == OnlineCoordinatorAPI::STATE_ERROR)
+		{
+			// Definitive rejections must not be retried or paraphrased: a
+			// version mismatch reads the same on every attempt, and the
+			// server's message names both versions, which is exactly what
+			// the user needs to see.
+			Bool definitiveError = (strstr(s_coord->lastError().str(), "version mismatch") != NULL);
+			if (definitiveError)
+			{
+				coordinatorPostStatus(s_coord->lastError().str());
+				s_coordLastJoinID.clear();
+				s_coordJoinRetries = 0;
+				connectCoordinatorIfNeeded();
+			}
+			// A failed JOIN attempt (usually "punch: no inbound packet
+			// within timeout") retries automatically, like LAN where a
+			// dropped join request is invisible to the user. connect()
+			// tears down the failed attempt's sockets, and re-queueing the
+			// pending id re-dispatches the join once READY again.
+			else if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty()
+				&& s_coordJoinRetries < COORD_JOIN_MAX_RETRIES)
+			{
+				++s_coordJoinRetries;
+				ReleaseLog("Coordinator join retry %d/%d after error: %s",
+					s_coordJoinRetries, COORD_JOIN_MAX_RETRIES, s_coord->lastError().str());
+				coordinatorPostStatus("Connection attempt failed. Retrying...");
+				connectCoordinatorIfNeeded();
+				s_coordPendingJoinID = s_coordLastJoinID;
+			}
+			else if (!s_coord->amIHost() && !s_coordLastJoinID.isEmpty())
+			{
+				// Retries exhausted: give a human answer and put the lobby
+				// back into a usable browsing state.
+				coordinatorPostStatus("Could not connect to that game's host. Their network may be blocking the connection.");
+				s_coordLastJoinID.clear();
+				s_coordJoinRetries = 0;
+				connectCoordinatorIfNeeded();
+			}
+			else
+			{
+				AsciiString s;
+				s.format("Connection error: %s", s_coord->lastError().str());
+				coordinatorPostStatus(s.str());
+			}
+		}
+		if (state == OnlineCoordinatorAPI::STATE_PUNCH_OK && !s_coordHandoffDone)
+		{
+			s_coordLastJoinID.clear();
+			s_coordJoinRetries = 0;
+			doCoordinatorHandoffToLAN();
+			// Handoff triggers TheShell->push which synchronously runs
+			// LanLobbyMenuShutdown, which deletes s_coord. The rest of this
+			// function would null-deref on s_coord->games() below; bail.
+			return;
+		}
+	}
+
+	// Defensive: if anything else nulled s_coord between calls, do not touch
+	// it further in this tick.
+	if (!s_coord)
+		return;
+
+	// Host: as soon as the coordinator ACKS our listing (game_id in hand,
+	// so joiners can actually find us), hand off to the LAN lobby instead
+	// of waiting for a first joiner to punch. This is what makes hosting
+	// feel like LAN -- you sit in the real lobby, pick the map and chat --
+	// and it removes the first-joiner special case entirely: every joiner
+	// now arrives through the post-handoff path that joiners 2..N already
+	// used. Checked per tick (not on state change) because STATE_HOSTING
+	// is entered when the request is SENT; the ack lands a round trip later.
+	if (!s_coordHandoffDone
+	    && s_coord->amIHost()
+	    && s_coord->state() == OnlineCoordinatorAPI::STATE_HOSTING
+	    && !s_coord->hostedGameID().isEmpty())
+	{
+		doCoordinatorHostHandoffToLAN();
+		// The handoff pushed the game-options screen, which tore down this
+		// menu's gadgets; nothing below may touch them this tick.
+		return;
+	}
+
+	// When READY, periodically refresh the games list and dispatch any
+	// pending host/join action that was queued before the connection
+	// finished handshaking.
+	if (state == OnlineCoordinatorAPI::STATE_READY)
+	{
+		// Test automation: queue the host/join action once we're READY.
+		// Join waits until the games list contains the wanted name.
+		static Bool coordAutoDispatched = FALSE;
+		if (!coordAutoDispatched)
+		{
+			if (!TheGlobalData->m_coordAutoHostName.isEmpty())
+			{
+				s_coordPendingHostName = TheGlobalData->m_coordAutoHostName;
+				coordAutoDispatched = TRUE;
+				coordinatorPostStatus("auto: hosting");
+			}
+			else if (!TheGlobalData->m_coordAutoJoinName.isEmpty())
+			{
+				const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
+				for (size_t gi = 0; gi < games.size(); ++gi)
+				{
+					if (games[gi].name == TheGlobalData->m_coordAutoJoinName)
+					{
+						// Same decision a human double-click makes: watch
+						// in-progress games, join waiting ones.
+						if (games[gi].inProgress)
+						{
+							s_coordPendingObserveID = games[gi].id;
+							coordinatorPostStatus("auto: observing");
+						}
+						else
+						{
+							s_coordPendingJoinID = games[gi].id;
+							coordinatorPostStatus("auto: joining");
+						}
+						coordAutoDispatched = TRUE;
+						break;
+					}
+				}
+			}
+		}
+
+		UnsignedInt nowMs = timeGetTime();
+		if (nowMs - s_coordLastListMs > COORD_LIST_REFRESH_MS)
+		{
+			s_coord->requestList();
+			s_coordLastListMs = nowMs;
+		}
+		if (!s_coordPendingHostName.isEmpty())
+		{
+			UnicodeString u; u.translate(s_coordPendingHostName);
+			// Advertise the real map the lobby will open with (the same
+			// preference LanGameOptionsMenuInit applies) so the games list
+			// shows something meaningful instead of "unknown 0/2".
+			LANPreferences pref;
+			AsciiString mapPath = pref.getPreferredMap();
+			Int maxPlayers = 2;
+			AsciiString mapLeaf = mapPath;
+			if (TheMapCache)
+			{
+				const MapMetaData* md = TheMapCache->findMap(mapPath);
+				if (md && md->m_numPlayers > 0)
+					maxPlayers = md->m_numPlayers;
+			}
+			// Leaf name reads better than the full maps\...\... path.
+			{
+				const char* leaf = mapPath.reverseFind('\\');
+				if (leaf && leaf[1] != '\0')
+					mapLeaf = leaf + 1;
+			}
+			s_coord->requestHost(u, mapLeaf, maxPlayers);
+			s_coordPendingHostName.clear();
+		}
+		else if (!s_coordPendingJoinID.isEmpty())
+		{
+			s_coordLastJoinID = s_coordPendingJoinID;
+			s_coord->requestJoin(s_coordPendingJoinID);
+			s_coordPendingJoinID.clear();
+		}
+		else if (!s_coordPendingObserveID.isEmpty())
+		{
+			s_coord->requestObserve(s_coordPendingObserveID);
+			s_coordPendingObserveID.clear();
+		}
+	}
+
+	// Observe accepted: attach our end of the relay and hand the connected
+	// socket to the LAN observer client. From here the flow is identical to
+	// watching a LAN game (snapshot buffering, map fetch, live playback).
+	{
+		AsciiString observeToken;
+		if (s_coord->consumeObserveOkToken(&observeToken))
+		{
+			Int relayFd = s_coord->openObserverRelayFd(observeToken, FALSE);
+			if (relayFd >= 0)
+			{
+				// Coordinator mode enters the lobby WITHOUT a LANAPI (it is
+				// normally created during the join handoff, which an
+				// observer never runs). The observer machinery lives on
+				// TheLAN, so bring one up now; the relay socket replaces
+				// any direct host connection.
+				if (!TheLAN)
+				{
+					// Our coordinator session still holds UDP/8086;
+					// release it or TheLAN->init()'s bind fails and the
+					// socket-error path boots us to the main menu.
+					s_coord->closeLobbyUdpForHostHandoff();
+					TheLAN = NEW LANAPI();
+					TheLAN->init();
+					UnsignedInt localIP = TheGlobalData->m_defaultIP;
+					if (!localIP)
+					{
+						IPEnumeration IPs;
+						EnumeratedIP* list = IPs.getAddresses();
+						if (list) localIP = list->getIP();
+					}
+					TheLAN->SetLocalIP(localIP);
+					TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
+				}
+				coordinatorPostStatus("Connected. Buffering the game for playback...");
+				TheLAN->RequestObserveAdoptedFd(relayFd);
+			}
+			else
+			{
+				coordinatorPostStatus("Could not connect to the observer relay.");
+			}
+		}
+	}
+
+	// Listbox can lag the internal games vector by one tick; rebuild any
+	// time the model size disagrees with what we last rendered. Cheap and
+	// correct enough at lobby refresh rates.
+	if ((Int)s_coord->games().size() != (Int)s_coordListedIDs.size())
+	{
+		rebuildGamesListbox();
+	}
+}
+
+// Host-side handoff, run as soon as the coordinator confirms our game is
+// listed -- BEFORE any joiner shows up. The host lands in the real game
+// lobby immediately, exactly like LAN: pick the map, chat, wait.
+//
+// Every joiner (including the first) then arrives through the same
+// post-handoff path joiners 2..N already used: the coordinator delivers
+// peer_info to LanGameOptionsMenu, which plumbs the punched game port into
+// TheLAN and fires NAT-opening probes/keepalives at the joiner's lobby
+// address while the joiner does the active punching.
+static void doCoordinatorHostHandoffToLAN()
+{
+	if (!s_coord || s_coordHandoffDone) return;
+	DEBUG_LOG(("HOST HANDOFF: start (pre-joiner)"));
+
+	// Set BEFORE anything can push a screen: RequestGameCreate's
+	// OnGameCreate callback runs TheShell->push synchronously, which runs
+	// LanLobbyMenuShutdown mid-call; with the flag clear that would tear
+	// down the coordinator session every joiner still needs.
+	s_coordHandoffDone = TRUE;
+
+	// Park the punched game socket in the module-level stash (keepalives
+	// keep its NAT mapping alive through the lobby phase; ConnectionManager
+	// adopts the FD at game start), then release the lobby socket so
+	// TheLAN can rebind 8086. TCP signaling stays up for joiner delivery.
+	if (!s_coord->stashGameSocketForGameStart())
+	{
+		DEBUG_LOG(("HOST HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
+	}
+	// Hand the punched lobby socket to TheLAN by fd. Rebinding the port
+	// instead would lose the NAT mapping peers are told to talk to.
+	Int lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
+
+	if (!TheLAN)
+	{
+		TheLAN = NEW LANAPI();
+	}
+	TheLAN->init();
+	UnsignedInt localIP = TheGlobalData->m_defaultIP;
+	if (!localIP)
+	{
+		IPEnumeration IPs;
+		EnumeratedIP* list = IPs.getAddresses();
+		if (list) localIP = list->getIP();
+	}
+	Bool lanReady = (lobbyFd != -1)
+		? TheLAN->SetLocalIPAdoptingSocket(localIP, lobbyFd)
+		: TheLAN->SetLocalIP(localIP);
+	if (!lanReady)
+	{
+		coordinatorPostStatus("LAN: SetLocalIP failed after coordinator handoff");
+		DEBUG_LOG(("HOST HANDOFF: SetLocalIP returned FALSE"));
+	}
+	TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
+
+	UnicodeString gameName = GadgetTextEntryGetText(textEntryPlayerName);
+	gameName.concat(L"'s game");
+	TheLAN->RequestGameCreate(gameName, /*isDirectConnect=*/TRUE);
+	ReleaseLog("Coordinator host handoff to LAN done (pre-joiner)");
+	DEBUG_LOG(("HOST HANDOFF: done"));
+}
+
+static void doCoordinatorHandoffToLAN()
+{
+	if (!s_coord) return;
+	const OnlineCoordinatorAPI::PeerInfo& peer = s_coord->peerInfo();
+	UnsignedInt   peerIP   = peer.punchedIP;
+	UnsignedShort peerPort = peer.punchedPort;
+	// Use OUR local intent, not peer_info.role, to decide which side we
+	// are: m_amIHost is set inside requestHost/requestJoin so it cannot
+	// drift out of sync with what we actually asked the coordinator for.
+	Bool weAreHost = s_coord->amIHost();
+	Int  lobbyFd   = -1;   // punched lobby socket handed to TheLAN below
+	DEBUG_LOG(("HANDOFF: start weAreHost=%d peerIP=0x%08x peerPort=%u gamePeerIP=0x%08x gamePeerPort=%u",
+		(int)weAreHost, peerIP, peerPort, peer.gamePunchedIP, peer.gamePunchedPort));
+
+	// Mark the handoff BEFORE anything below can push a screen:
+	// RequestGameCreate's OnGameCreate callback runs TheShell->push
+	// SYNCHRONOUSLY, which runs LanLobbyMenuShutdown mid-call. If the flag
+	// isn't set yet, the host-keepalive check there sees handoffDone=FALSE
+	// and tears down the coordinator session that joiners 2..N still need.
+	s_coordHandoffDone = TRUE;
+
+	// Move the punched game UDP socket into the module-level stash so it
+	// outlives the coordinator (and this menu); a keepalive sender keeps
+	// the NAT mapping alive through the LAN lobby phase. ConnectionManager
+	// adopts the FD at game start.
+	if (!s_coord->stashGameSocketForGameStart())
+	{
+		DEBUG_LOG(("HANDOFF: WARNING: failed to stash game socket; in-game NAT traversal will fail"));
+	}
+
+	// Hand the punched lobby UDP socket to TheLAN by fd (NOT close+rebind:
+	// the NAT mapping belongs to the socket, and CGNATs give a replacement
+	// socket a different external port than the one peers were told).
+	if (weAreHost)
+	{
+		// N-player: keep TCP signaling alive so the coordinator can deliver
+		// peer_info for additional joiners while this host stays in the
+		// lobby. The s_coord instance survives LanLobbyMenuShutdown (see
+		// guard there) and is pumped by LanGameOptionsMenu.
+		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
+		DEBUG_LOG(("HANDOFF: coord lobby fd=%d handed over; TCP kept alive for additional joiners", lobbyFd));
+	}
+	else
+	{
+		// Joiners don't need to talk to the coordinator any more; their
+		// in-game connection goes through the host (packet router model).
+		// Take the punched lobby socket BEFORE disconnecting so disconnect()
+		// doesn't close it -- the host was told to reply to the external
+		// address that socket owns, and a rebound socket may not get it back.
+		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
+		s_coord->disconnect();
+		DEBUG_LOG(("HANDOFF: coord disconnected"));
+	}
+
+	if (!TheLAN)
+	{
+		TheLAN = NEW LANAPI();
+	}
+	TheLAN->init();
+	DEBUG_LOG(("HANDOFF: TheLAN->init() done"));
+	UnsignedInt localIP = TheGlobalData->m_defaultIP;
+	if (!localIP)
+	{
+		IPEnumeration IPs;
+		EnumeratedIP* list = IPs.getAddresses();
+		if (list) localIP = list->getIP();
+	}
+	DEBUG_LOG(("HANDOFF: localIP=0x%08x lobbyFd=%d", localIP, lobbyFd));
+	Bool lanReady = (lobbyFd != -1)
+		? TheLAN->SetLocalIPAdoptingSocket(localIP, lobbyFd)
+		: TheLAN->SetLocalIP(localIP);
+	if (!lanReady)
+	{
+		coordinatorPostStatus("LAN: SetLocalIP failed after coordinator handoff");
+		DEBUG_LOG(("HANDOFF: SetLocalIP returned FALSE"));
+	}
+	TheLAN->RequestSetName(GadgetTextEntryGetText(textEntryPlayerName));
+	DEBUG_LOG(("HANDOFF: RequestSetName done"));
+
+	// Plumb the peer's punched game-data port so direct-connect slot setup
+	// (both host's handleRequestJoin and joiner's handleJoinAccept) records
+	// it on the slot, which ConnectionManager then reads as the in-game
+	// destination port. Without this the slots default to 8088 and packets
+	// land on the peer's NAT with no mapping.
+	TheLAN->setDirectConnectRemoteGamePort(peer.gamePunchedPort);
+
+	if (weAreHost)
+	{
+		// Create a direct-connect LAN game and wait for the joiner's
+		// MSG_REQUEST_GAME_INFO to arrive through the punched mapping.
+		UnicodeString gameName = GadgetTextEntryGetText(textEntryPlayerName);
+		gameName.concat(L"'s game");
+		DEBUG_LOG(("HANDOFF: about to RequestGameCreate"));
+		TheLAN->RequestGameCreate(gameName, /*isDirectConnect=*/TRUE);
+		DEBUG_LOG(("HANDOFF: RequestGameCreate returned"));
+		coordinatorPostStatus("Setting up your game lobby...");
+	}
+	else
+	{
+		// We are the joiner. Tell LAN to direct-connect to the punched
+		// mapping.
+		TheLAN->setDirectConnectRemotePort(peerPort);
+		TheLAN->RequestGameJoinDirectConnect(peerIP);
+		DEBUG_LOG(("HANDOFF: RequestGameJoinDirectConnect returned"));
+		coordinatorPostStatus("Connected to host. Joining the game lobby...");
+	}
+	ReleaseLog("Coordinator handoff to LAN done (host=%d peer=%u.%u.%u.%u:%u)",
+		(int)weAreHost,
+		(peerIP >> 24) & 0xff, (peerIP >> 16) & 0xff,
+		(peerIP >> 8) & 0xff, peerIP & 0xff, peerPort);
+	DEBUG_LOG(("HANDOFF: done"));
+}
+
+//-------------------------------------------------------------------------------------------------
 /** Lan Lobby menu update method */
 //-------------------------------------------------------------------------------------------------
 void LanLobbyMenuUpdate( WindowLayout * layout, void *userData)
@@ -612,6 +1356,11 @@ void LanLobbyMenuUpdate( WindowLayout * layout, void *userData)
 
 	if (TheShell->isAnimFinished() && !LANbuttonPushed && TheLAN)
 		TheLAN->update();
+
+	if (s_useCoordinator && s_coord && !LANbuttonPushed && !s_coordHandoffDone)
+	{
+		pumpCoordinator();
+	}
 
 	if (LANSocketErrorDetected == TRUE) {
 		LANSocketErrorDetected = FALSE;
@@ -717,7 +1466,11 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 				{
 					int rowSelected = mData2;
 
-					if (rowSelected >= 0)
+					if (s_useCoordinator && s_coord)
+					{
+						coordinatorJoinOrObserveRow(rowSelected);
+					}
+					else if (rowSelected >= 0 && TheLAN)
 					{
 						LANGameInfo * theGame = TheLAN->LookupGameByListOffset(rowSelected);
 						if (theGame)
@@ -739,6 +1492,14 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 					int rowSelected = mData2;
 					if( rowSelected < 0 )
 					{
+						HideGameInfoWindow(TRUE);
+						break;
+					}
+					if (s_useCoordinator)
+					{
+						// Coordinator games don't have a populated LANGameInfo
+						// to render in the right-hand details panel; leave it
+						// hidden. The row text itself shows id/players/map.
 						HideGameInfoWindow(TRUE);
 						break;
 					}
@@ -771,8 +1532,20 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 				}
 				else if ( controlID == buttonHostID )
 				{
-					TheLAN->RequestGameCreate( L"", FALSE);
-
+					if (s_useCoordinator && s_coord)
+					{
+						connectCoordinatorIfNeeded();
+						AsciiString nick = readPlayerNickAscii();
+						AsciiString gameName;
+						gameName.format("%s's game", nick.str());
+						s_coordPendingHostName = gameName;
+						s_coordPendingJoinID.clear();
+						coordinatorPostStatus("Creating game as soon as the connection is ready...");
+					}
+					else
+					{
+						TheLAN->RequestGameCreate( L"", FALSE);
+					}
 				}
 				else if ( controlID == buttonClearID )
 				{
@@ -791,7 +1564,18 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 					int rowSelected = -1;
 					GadgetListBoxGetSelected( listboxGames, &rowSelected );
 
-					if (rowSelected >= 0)
+					if (s_useCoordinator && s_coord)
+					{
+						if (rowSelected < 0 || rowSelected >= (Int)s_coordListedIDs.size())
+						{
+							GadgetListBoxAddEntryText(listboxChatWindow, TheGameText->fetch("LAN:ErrorNoGameSelected") , chatSystemColor, -1, 0);
+						}
+						else
+						{
+							coordinatorJoinOrObserveRow(rowSelected);
+						}
+					}
+					else if (rowSelected >= 0)
 					{
 						LANGameInfo * theGame = TheLAN->LookupGameByListOffset(rowSelected);
 						if (theGame)
@@ -814,14 +1598,17 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 					// Clean up the text (remove leading/trailing chars, etc)
 					txtInput.trim();
 					// Echo the user's input to the chat window
-					if (!txtInput.isEmpty()) {
+					if (!txtInput.isEmpty() && TheLAN) {
 //						TheLAN->RequestChat(txtInput, LANAPIInterface::LANCHAT_EMOTE);
 						TheLAN->RequestChat(txtInput, LANAPIInterface::LANCHAT_NORMAL);
 					}
 				}
 				else if (controlID == buttonDirectConnectID)
 				{
-					TheLAN->RequestLobbyLeave( false );
+					if (TheLAN)
+					{
+						TheLAN->RequestLobbyLeave( false );
+					}
 					TheShell->push("Menus/NetworkDirectConnect.wnd");
 				}
 
@@ -861,13 +1648,15 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 					if (!txtInput.isEmpty() && txtInput.getCharAt(txtInput.getLength()-1) == L';')
 						txtInput.removeLastChar(); // we use ; for strtok's so we can't allow them in names.  :(
 
-					// send it over the network
-					if (!txtInput.isEmpty())
-						TheLAN->RequestSetName(txtInput);
-					else
-						{
+					// send it over the network (LAN only; coordinator picks up
+					// the name from the text entry at connect time)
+					if (TheLAN)
+					{
+						if (!txtInput.isEmpty())
+							TheLAN->RequestSetName(txtInput);
+						else
 							TheLAN->RequestSetName(defaultName);
-						}
+					}
 
 					// Put the whitespace-free version in the box
 					GadgetTextEntrySetText( textEntryPlayerName, txtInput );
@@ -896,7 +1685,7 @@ WindowMsgHandledType LanLobbyMenuSystem( GameWindow *window, UnsignedInt msg,
 						txtInput = UnicodeString(txtInput.str()+1);
 
 					// Echo the user's input to the chat window
-					if (!txtInput.isEmpty())
+					if (!txtInput.isEmpty() && TheLAN)
 						TheLAN->RequestChat(txtInput, LANAPIInterface::LANCHAT_NORMAL);
 
 				}

@@ -78,6 +78,14 @@ public:
 	// triggering chat notifications).
 	Int update(UnicodeString* outNewObserverNames = nullptr, Int outNamesCap = 0);
 
+	// Adopt an already-connected TCP socket as an observer (the online
+	// coordinator relay path: the host dials OUT to the relay, so the
+	// connection never arrives on the listen socket). The fd is owned by
+	// this object from here on; identical streaming treatment to an
+	// accepted LAN observer. Returns FALSE (and closes fd) if the replay
+	// path isn't wired or can't be opened.
+	Bool adoptObserverFd(Int fd, const UnicodeString& name);
+
 	Bool isRunning() const { return m_listenFd != -1; }
 	Int observerCount() const { return (Int)m_conns.size(); }
 
@@ -130,6 +138,11 @@ public:
 	// Open TCP connection to (ip,port) and prepare local file at localPath.
 	// Non-blocking; check state() to know progress.
 	Bool connect(UnsignedInt ipNetworkOrder, UnsignedShort port, const AsciiString& localPath);
+
+	// Adopt an already-connected TCP socket (online coordinator relay path)
+	// and go straight to STATE_BUFFERING. The fd is owned by this object
+	// from here on.
+	Bool adoptFd(Int fd, const AsciiString& localPath);
 
 	// Non-blocking poll: progress connect, recv bytes, write to file. Call
 	// every tick.

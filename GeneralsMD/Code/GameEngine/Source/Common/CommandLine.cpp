@@ -1082,6 +1082,49 @@ Int parseNetMinPlayers(char *args[], int num)
 	return 2;
 }
 
+// --- Online-coordinator test automation flags ---
+Int parseCoordHost(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordHost = args[1];
+	return 2;
+}
+
+Int parseCoordNick(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordNick = args[1];
+	return 2;
+}
+
+Int parseCoordAutoHost(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordAutoHostName = args[1];
+	return 2;
+}
+
+Int parseCoordAutoJoin(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordAutoJoinName = args[1];
+	return 2;
+}
+
+Int parseCoordAutoStart(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordAutoStart = atoi(args[1]);
+	return 2;
+}
+
+Int parseCoordPunchTTL(char *args[], int num)
+{
+	if (num > 1)
+		TheWritableGlobalData->m_coordPunchTTL = atoi(args[1]);
+	return 2;
+}
+
 Int parsePlayStats(char *args[], int num)
 {
 	if (num > 1)
@@ -1423,6 +1466,14 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-mod", parseMod },
 	{ "-noshaders", parseNoShaders },
 	{ "-quickstart", parseQuickStart },
+	// Online-coordinator overrides and test automation. Available in release
+	// builds: -coordhost/-coordpunchttl are useful for live diagnosis too.
+	{ "-coordhost", parseCoordHost },
+	{ "-coordnick", parseCoordNick },
+	{ "-coordautohost", parseCoordAutoHost },
+	{ "-coordautojoin", parseCoordAutoJoin },
+	{ "-coordautostart", parseCoordAutoStart },
+	{ "-coordpunchttl", parseCoordPunchTTL },
 	{ "-useWaveEditor", parseUseWaveEditor },
 
 	// TheSuperHackers @feature xezon 03/08/2025 Force full viewport for 'Control Bar Pro' Addons like GenTool did it.

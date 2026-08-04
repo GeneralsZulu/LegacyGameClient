@@ -28,12 +28,16 @@
 
 #pragma once
 
+#include <map>
+
 #include "GameNetwork/Transport.h"
 #include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/NetworkDefs.h"
 #include "GameNetwork/LANPlayer.h"
 #include "GameNetwork/LANGameInfo.h"
 #include "GameNetwork/LANObserverStream.h"
+
+class OnlineCoordinatorAPI;
 
 //static const Int g_lanPlayerNameLength = 20;
 static const Int g_lanPlayerNameLength = 12; // reduced length because of game option length
@@ -300,6 +304,78 @@ public:
 	virtual void RequestLocations() override;																				///< Request everybody to respond with where they are
 	virtual void RequestGameJoin( LANGameInfo *game, UnsignedInt ip = 0 ) override;				///< Request to join a game
 	virtual void RequestGameJoinDirectConnect( UnsignedInt ipaddress ) override;						///< Request to join a game at an IP address
+
+	/// Set the remote UDP port for the next RequestGameJoinDirectConnect target.
+	/// 0 (default) means use lobbyPort, which is the only behavior LAN cares
+	/// about. The online coordinator sets this to the peer's NAT-translated
+	/// port discovered during hole punch, since the peer's LAN code is bound
+	/// internally to lobbyPort but visible externally on a different port.
+	void setDirectConnectRemotePort( UnsignedShort port ) { m_directConnectRemotePort = port; }
+	UnsignedShort getDirectConnectRemotePort() const { return m_directConnectRemotePort; }
+
+	/// Set the peer's NAT-translated game-data port (NETWORK_BASE_PORT_NUMBER
+	/// equivalent visible externally). When non-zero and the current game is
+	/// direct-connect, slot setup uses this instead of the hardcoded
+	/// NETWORK_BASE_PORT_NUMBER so ConnectionManager sends to the punched
+	/// mapping rather than to an unrouted port that nobody is listening on.
+	/// Used for the single-joiner case (2-player coord). For N-player, see
+	/// setDirectConnectGamePortForPeer below which keeps a per-peer map.
+	void setDirectConnectRemoteGamePort( UnsignedShort port ) { m_directConnectRemoteGamePort = port; }
+	UnsignedShort getDirectConnectRemoteGamePort() const { return m_directConnectRemoteGamePort; }
+
+	/// Record a joiner's punched external game-data port. Keyed by BOTH the
+	/// external IP and the peer's external LOBBY port, because two players
+	/// behind one NAT share an IP: keying on IP alone let the second joiner
+	/// overwrite the first's game port, and the host would then send in-game
+	/// traffic for one of them to the other's port. Populated by the lobby UI
+	/// as the coordinator delivers peer_info for each new joiner;
+	/// handleRequestJoin looks the joiner up here (by the source port of the
+	/// join request) before falling back to the single-value setter above.
+	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort lobbyPort, UnsignedShort gamePort )
+	{
+		for (size_t i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
+			{
+				m_directConnectGamePorts[i].gamePort = gamePort;
+				return;
+			}
+		}
+		DirectConnectPeerPorts entry;
+		entry.ip        = ip;
+		entry.lobbyPort = lobbyPort;
+		entry.gamePort  = gamePort;
+		m_directConnectGamePorts.push_back(entry);
+	}
+	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip, UnsignedShort lobbyPort ) const
+	{
+		size_t i;
+		// Exact (ip, lobby port) match first.
+		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
+				return m_directConnectGamePorts[i].gamePort;
+		}
+		// Fall back to IP-only (peer whose lobby port we never learned).
+		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+		{
+			if (m_directConnectGamePorts[i].ip == ip)
+				return m_directConnectGamePorts[i].gamePort;
+		}
+		return (UnsignedShort)0;
+	}
+
+	/// Send a tiny fill-in-style LOBBY_ANNOUNCE packet directly to (ip:port)
+	/// to open the host's NAT mapping for that external addr. Used for
+	/// N-player coord: when the coordinator tells the host about a new
+	/// joiner, the host fires this so its NAT lets the joiner's subsequent
+	/// MSG_REQUEST_GAME_INFO through (for non-cone NATs).
+	void sendNATKeepalive( UnsignedInt destIPHost, UnsignedShort destPortHost );
+	// TTL-limited NAT-opening probe: creates our outbound lobby-socket
+	// mapping without reaching (and poisoning) the peer's NAT. Fire this
+	// the moment the coordinator reports a new joiner, then follow up with
+	// a full-TTL sendNATKeepalive once the joiner has started punching.
+	void sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortHost );
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
@@ -341,6 +417,16 @@ public:
 	virtual LANPlayer * LookupPlayer( UnsignedInt playerIP );													///< return a pointer to a player we know about
 	virtual Bool SetLocalIP( UnsignedInt localIP ) override;																		///< For multiple NIC machines
 	virtual void SetLocalIP( AsciiString localIP ) override;																		///< For multiple NIC machines
+	/// Online handoff: adopt the coordinator's already-punched lobby socket
+	/// by fd instead of rebinding the port. Preserves the NAT mapping the
+	/// peer was told to talk to (CGNATs give a rebound socket a new one).
+	/// Takes ownership of fd.
+	Bool SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd );
+
+	/// Slot index for the peer whose message is currently being dispatched.
+	/// Matches (IP, source port) first so two players sharing one public IP
+	/// (same household/NAT) are told apart; falls back to IP-only. -1 if none.
+	Int findSlotForSender( UnsignedInt senderIP ) const;
 	virtual Bool AmIHost() override;																											///< Am I hosting a game?
 	virtual UnicodeString GetMyName() override { return m_name; }                 ///< What's my name?
 	virtual LANGameInfo* GetMyGame() override { return m_currentGame; }					      ///< What's my Game?
@@ -371,7 +457,28 @@ protected:
 	PendingActionType		m_pendingAction;	///< What action are we performing?
 	UnsignedInt					m_expiration;						///< When should we give up on our action?
 	UnsignedInt					m_actionTimeout;
+	// Join-request retransmit: MSG_REQUEST_GAME_INFO / MSG_REQUEST_JOIN are
+	// single UDP packets; over punched NAT paths either can be lost (e.g.
+	// while the host is mid-handoff creating its game), which used to surface
+	// as "Connection timed out" on the joiner. While ACT_JOIN or
+	// ACT_JOINDIRECTCONNECT is pending, update() re-sends the stashed request
+	// once a second until it is answered or m_expiration hits. The host
+	// answers re-joins idempotently (see handleRequestJoin).
+	LANMessage					m_pendingResendMsg;   ///< Verbatim copy of the last join-flow request
+	UnsignedInt					m_pendingResendIP;    ///< Destination passed to sendMessage for it
+	UnsignedInt					m_nextResendMs;       ///< When to fire the next retry (0 = disarmed)
 	UnsignedInt					m_directConnectRemoteIP;///< The IP address of the game we are direct connecting to.
+	UnsignedShort				m_directConnectRemotePort;///< Optional non-default UDP port for direct-connect target. 0 = use lobbyPort. Set by online coordinator before RequestGameJoinDirectConnect.
+	UnsignedShort				m_directConnectRemoteGamePort;///< Peer's punched game-data port. Used to override slot.setPort in direct-connect mode so ConnectionManager talks to the NAT-translated port, not NETWORK_BASE_PORT_NUMBER. Single-value version for 2-player coord.
+	struct DirectConnectPeerPorts
+	{
+		UnsignedInt   ip;         ///< peer's external IP
+		UnsignedShort lobbyPort;  ///< peer's external lobby port (tells same-IP peers apart)
+		UnsignedShort gamePort;   ///< peer's punched external game-data port
+	};
+	std::vector<DirectConnectPeerPorts> m_directConnectGamePorts; ///< Per-peer punched game-data ports from coordinator peer_info (N-player coord).
+	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
+	UnsignedShort				m_dispatchSenderPort;///< Source port of the LAN message currently being dispatched. Lets reply-style handlers send back through NAT-translated mappings instead of hardcoded lobbyPort.
 
 	// Resend timer ---------------------------------------------------------------------------
 	UnsignedInt					m_lastResendTime; // in ms
@@ -399,6 +506,7 @@ protected:
 	// stream eventually closes.
 	LANObserverHost*			m_observerHost;
 	LANObserverClient*		m_observerClient;
+	OnlineCoordinatorAPI*	m_inGameCoord;                  // host: coordinator session adopted at game start (observer relay)
 	Bool									m_observerClientPlaybackKicked; // we called playbackFileLiveObserver already
 	UnsignedInt						m_observerProgressLastMs;       // last time we posted a download-progress chat line
 	UnsignedInt						m_observerProgressLastBytes;    // bytes reported at the last progress post
@@ -418,9 +526,22 @@ public:
 	// the host and starts buffering bytes into a scratch .rep file.
 	void RequestObserve(UnsignedInt hostIP, UnsignedShort observerPort);
 
+	// Online (coordinator) variant: the stream socket was spliced through
+	// the coordinator relay and is already connected; adopt it instead of
+	// dialing the host directly (which NAT would block).
+	void RequestObserveAdoptedFd(Int fd);
+
 	// Host accessors used by chat notifications etc.
 	Int   getObserverCount() const { return m_observerHost ? m_observerHost->observerCount() : 0; }
 	Bool  isObservingClient() const { return m_observerClient != nullptr; }
+
+	// Online-coordinator session carried into the game. The host adopts the
+	// lobby's OnlineCoordinatorAPI at game start (instead of tearing it
+	// down) so viewers can request to observe the in-progress game; the
+	// updateObserver pump keeps it alive and services observer_request
+	// tokens by attaching relay connections to m_observerHost. Ownership
+	// transfers here; reset() deletes it.
+	void adoptCoordinator(OnlineCoordinatorAPI* coord);
 
 public:
 	// Observer state-machine pump. Normally invoked from update() at the LAN

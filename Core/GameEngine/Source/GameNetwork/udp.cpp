@@ -32,6 +32,7 @@
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
 #include "Common/GameEngine.h"
+#include "Common/ReleaseLog.h"
 //#include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/udp.h"
 
@@ -188,6 +189,52 @@ Int UDP::Bind(UnsignedInt IP,UnsignedShort Port)
     fprintf(stderr,"Couldn't set nonblocking mode!\n");
 
   return(OK);
+}
+
+Int UDP::AdoptFD(Int fdIn, UnsignedInt IP, UnsignedShort Port)
+{
+  if (fdIn < 0)
+    return UNKNOWN;
+  // Close any existing socket we were holding so we don't leak FDs.
+  if (fd)
+  {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+  }
+  fd = fdIn;
+
+  // Re-derive the actual bound address from the kernel; the caller may have
+  // passed a guess. Falling back to the supplied IP/port keeps behavior sane
+  // if getsockname fails for some reason.
+  int namelen = sizeof(addr);
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  if (getsockname(fd, (struct sockaddr *)&addr, &namelen) == 0)
+  {
+    myIP   = ntohl(addr.sin_addr.s_addr);
+    myPort = ntohs(addr.sin_port);
+  }
+  else
+  {
+    // Suspicious: a healthy bound socket answers getsockname. The socket may
+    // still work (send/recv only need the fd), so keep going with the
+    // caller's values, but leave evidence in the uploadable log in case this
+    // match ends up with a dead transport.
+    ReleaseLog("UDP AdoptFD: getsockname failed on fd=%d, trusting caller %d.%d.%d.%d:%d",
+      fdIn, (IP>>24)&0xff, (IP>>16)&0xff, (IP>>8)&0xff, IP&0xff, Port);
+    myIP   = IP;
+    myPort = Port;
+    addr.sin_addr.s_addr = htonl(IP);
+    addr.sin_port        = htons(Port);
+  }
+
+  // Make sure we're non-blocking even if the donor socket already was --
+  // the cost is one syscall and it removes a category of subtle bug.
+  SetBlocking(FALSE);
+  return OK;
 }
 
 Int UDP::getLocalAddr(UnsignedInt &ip, UnsignedShort &port)

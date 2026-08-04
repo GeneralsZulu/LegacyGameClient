@@ -34,8 +34,10 @@
 #include "Common/GameEngine.h"
 #include "Common/UserPreferences.h"
 #include "Common/QuotedPrintable.h"
+#include "Common/ReleaseLog.h"
 #include "GameClient/AnimateWindowManager.h"
 #include "GameClient/WindowLayout.h"
+#include "GameLogic/GameLogic.h"
 #include "GameClient/Gadget.h"
 #include "GameClient/Shell.h"
 #include "GameClient/KeyDefs.h"
@@ -56,6 +58,7 @@
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/IPEnumeration.h"
 #include "GameNetwork/LANAPICallbacks.h"
+#include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/Recorder.h"
 #include "Common/StatsUploader.h"
@@ -71,6 +74,11 @@ extern Bool LANisShuttingDown;
 extern Bool LANbuttonPushed;
 extern void MapSelectorTooltip(GameWindow *window, WinInstanceData *instData,	UnsignedInt mouse);
 extern void gameAcceptTooltip(GameWindow *window, WinInstanceData *instData, UnsignedInt mouse);
+
+// Defined in LanLobbyMenu.cpp; used here to pump the host's coord TCP session
+// after the lobby->options handoff so additional joiners can show up.
+extern OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost();
+extern void LanLobbyMenuShutdownHostCoordinator();
 Color white = GameMakeColor( 255, 255, 255, 255 );
 static bool s_isIniting = FALSE;
 
@@ -618,6 +626,21 @@ void StartPressed()
 				GadgetComboBoxSetSelectedPos(comboBoxPlayer[i], SLOT_CLOSED);
 			}
 		}
+		// Slots are locked; no more joiners can arrive through the coord.
+		// Instead of tearing the session down, hand it to TheLAN: it stays
+		// alive through the match (marked in-progress on the server) so
+		// viewers can request to observe via the coordinator relay.
+		{
+			extern OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator();
+			OnlineCoordinatorAPI* inGameCoord = LanLobbyMenuReleaseCoordinator();
+			if (inGameCoord && TheLAN)
+				TheLAN->adoptCoordinator(inGameCoord);
+			else if (inGameCoord)
+			{
+				inGameCoord->disconnect();
+				delete inGameCoord;
+			}
+		}
 		Int seconds = TheMultiplayerSettings->getStartCountdownTimerSeconds();
 		if (seconds)
 			TheLAN->RequestGameStartTimer(seconds);
@@ -1147,6 +1170,7 @@ void DeinitLanGameGadgets()
 //-------------------------------------------------------------------------------------------------
 void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 {
+	DEBUG_LOG(("LanGameOptionsMenuInit: entry, TheLAN=%p", (void*)TheLAN));
 	if (TheLAN->GetMyGame() && TheLAN->GetMyGame()->isGameInProgress())
 	{
 		// If we init while the game is in progress, we are really returning to the menu
@@ -1155,6 +1179,8 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 		TheShell->popImmediate();
 		return;
 	}
+	DEBUG_LOG(("LanGameOptionsMenuInit: not in progress; GetMyGame=%p amIHost=%d",
+		(void*)TheLAN->GetMyGame(), (int)TheLAN->AmIHost()));
 	s_isIniting = TRUE;
 
 	LANbuttonPushed = false;
@@ -1168,7 +1194,9 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 
 	//initialize the gadgets
 	EnableSlotListUpdates(FALSE);
+	DEBUG_LOG(("LanGameOptionsMenuInit: pre InitLanGameGadgets"));
 	InitLanGameGadgets();
+	DEBUG_LOG(("LanGameOptionsMenuInit: post InitLanGameGadgets"));
 	EnableSlotListUpdates(TRUE);
 	Int start = 0;
 
@@ -1177,16 +1205,20 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 	GadgetTextEntrySetText(textEntryChat, UnicodeString::TheEmptyString);
 
 	//The dialog needs to react differently depending on whether it's the host or not.
+	DEBUG_LOG(("LanGameOptionsMenuInit: pre TheMapCache->updateCache"));
 	TheMapCache->updateCache();
+	DEBUG_LOG(("LanGameOptionsMenuInit: post TheMapCache->updateCache"));
 	if (TheLAN->AmIHost())
 	{
 		// read in some prefs
 		LANGameInfo *game = TheLAN->GetMyGame();
 		LANGameSlot *slot = game->getLANSlot(0);
+		DEBUG_LOG(("LanGameOptionsMenuInit: host branch game=%p slot=%p", (void*)game, (void*)slot));
 		LANPreferences pref;
 		slot->setColor( pref.getPreferredColor() );
 		slot->setPlayerTemplate( pref.getPreferredFaction() );
 		slot->setNATBehavior(FirewallHelperClass::FIREWALL_TYPE_SIMPLE);
+		DEBUG_LOG(("LanGameOptionsMenuInit: about to setMap '%s'", pref.getPreferredMap().str()));
 		game->setMap( pref.getPreferredMap() );
     game->setStartingCash( pref.getStartingCash() );
     game->setSuperweaponRestriction( pref.getSuperweaponRestricted() ? 1 : 0 );
@@ -1203,8 +1235,11 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 		}
 
 		//GadgetTextEntrySetText(comboBoxPlayer[0], TheLAN->GetMyName());
+		DEBUG_LOG(("LanGameOptionsMenuInit: pre lanUpdateSlotList (host)"));
 		lanUpdateSlotList();
+		DEBUG_LOG(("LanGameOptionsMenuInit: pre updateGameOptions (host)"));
 		updateGameOptions();
+		DEBUG_LOG(("LanGameOptionsMenuInit: post updateGameOptions (host)"));
 		start = 1; // leave my combo boxes usable
 
 		// TheSuperHackers @tweak disable the combo box for the host's player name
@@ -1218,11 +1253,18 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 		buttonSelectMap->winEnable( FALSE );
 		if (buttonMapVote)
 			buttonMapVote->winEnable( FALSE );
-		buttonRandomize->winEnable( FALSE );
-    checkboxLimitSuperweapons->winEnable( FALSE ); // Can look but only host can touch
+		// Gadgets added after retail may be absent when the exe runs against
+		// older game data (stale Window .big/.wnd): guard every one of them,
+		// or a joiner crashes right here while the host (which never touches
+		// this branch) appears fine.
+		if (buttonRandomize)
+			buttonRandomize->winEnable( FALSE );
+    if (checkboxLimitSuperweapons)
+      checkboxLimitSuperweapons->winEnable( FALSE ); // Can look but only host can touch
     if (checkboxEnforceRandom)
       checkboxEnforceRandom->winEnable( FALSE );   // Ditto
-    comboBoxStartingCash->winEnable( FALSE );      // Ditto
+    if (comboBoxStartingCash)
+      comboBoxStartingCash->winEnable( FALSE );      // Ditto
 		TheLAN->GetMyGame()->setMapCRC( TheLAN->GetMyGame()->getMapCRC() );		// force a recheck
 		TheLAN->GetMyGame()->setMapSize( TheLAN->GetMyGame()->getMapSize() ); // of if we have the map
 		TheLAN->RequestHasMap();
@@ -1417,6 +1459,68 @@ void LanGameOptionsMenuShutdown( WindowLayout *layout, void *userData )
 //-------------------------------------------------------------------------------------------------
 /** Lan Game Options menu update method */
 //-------------------------------------------------------------------------------------------------
+// Full-TTL lobby keepalives scheduled after the immediate low-TTL probe to a
+// new coordinator joiner (see the drain loop below).
+struct PendingLobbyKeepalive { UnsignedInt ipHost; UnsignedShort portHost; UnsignedInt dueMs; };
+static std::vector<PendingLobbyKeepalive> s_pendingLobbyKeepalives;
+
+// Test automation: -coordautostart N. Joiners auto-accept; the host presses
+// Start once N human players are present and everyone has accepted.
+static void updateCoordAutoStart(void)
+{
+	if (TheGlobalData->m_coordAutoStart <= 0) return;
+	if (!TheLAN) return;
+	LANGameInfo *myGame = TheLAN->GetMyGame();
+	if (!myGame) return;
+	// Once the match is launching/launched, stop entirely: pressing Start
+	// into a live game throws inside GameEngine::update (observed as a
+	// "Technical Difficulties" crash seconds after load).
+	if (myGame->isGameInProgress() || TheGameLogic->isInGame()) return;
+
+	static UnsignedInt nextActionMs = 0;
+	UnsignedInt nowMs = timeGetTime();
+	if (nowMs < nextActionMs) return;
+	nextActionMs = nowMs + 1000;
+
+	if (!TheLAN->AmIHost())
+	{
+		const GameSlot* slot = myGame->getConstSlot(myGame->getLocalSlotNum());
+		if (slot && slot->isHuman() && !slot->isAccepted())
+		{
+			DEBUG_LOG(("updateCoordAutoStart: joiner auto-accepting"));
+			TheLAN->RequestAccept();
+		}
+		return;
+	}
+
+	Int humans = 0;
+	Bool allAccepted = TRUE;
+	Int i;
+	for (i = 0; i < MAX_SLOTS; ++i)
+	{
+		const GameSlot* slot = myGame->getConstSlot(i);
+		if (slot && slot->isHuman())
+		{
+			++humans;
+			if (i != 0 && !slot->isAccepted())
+				allAccepted = FALSE;
+		}
+	}
+	if (humans >= TheGlobalData->m_coordAutoStart && allAccepted)
+	{
+		// Press Start at most once per 10s: every press restarts the 5-second
+		// launch countdown, so pressing on the 1s cadence above resets it
+		// forever and the game never actually starts. The 10s spacing still
+		// self-heals if a press is lost (e.g. a player un-accepts mid-count).
+		static UnsignedInt s_lastStartPressMs = 0;
+		if (nowMs - s_lastStartPressMs < 10000)
+			return;
+		s_lastStartPressMs = nowMs;
+		ReleaseLog("Coord auto-start: %d players present and accepted; pressing Start", humans);
+		StartPressed();
+	}
+}
+
 void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 {
 	if(LANisShuttingDown && TheShell->isAnimFinished() && TheTransitionHandler->isFinished())
@@ -1427,6 +1531,77 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 	// pick once the bytes are in.
 	updateMapVoteDownload();
 	//TheLAN->update(); // this is handled in the lobby
+
+	// Host-side N-player coord: keep the coordinator TCP signaling alive so
+	// joiners 2..N can find this game while we wait in the options screen.
+	// Each peer_info the coord delivers gets plumbed into TheLAN so the
+	// joiner's eventual MSG_REQUEST_JOIN finds the right game-port mapping,
+	// and we send a NAT-opening probe to their lobby addr so port-restricted
+	// host NATs let the joiner through.
+	OnlineCoordinatorAPI* coord = LanLobbyMenuGetCoordinatorForHost();
+	if (coord)
+	{
+		coord->update();
+		OnlineCoordinatorAPI::PeerInfo p;
+		while (coord->consumeNewPeer(&p))
+		{
+			ReleaseLog("Options pump: new joiner %s lobby=%d.%d.%d.%d:%u game=%d.%d.%d.%d:%u",
+				p.nick.str(),
+				PRINTF_IP_AS_4_INTS(p.punchedIP), p.punchedPort,
+				PRINTF_IP_AS_4_INTS(p.gamePunchedIP), p.gamePunchedPort);
+			DEBUG_LOG(("LanGameOptionsMenu: new joiner %s lobby=0x%08x:%u game=0x%08x:%u",
+				p.nick.str(),
+				p.punchedIP, p.punchedPort,
+				p.gamePunchedIP, p.gamePunchedPort));
+			if (TheLAN && p.punchedIP != 0)
+			{
+				if (p.gamePunchedPort != 0)
+				{
+					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.punchedPort, p.gamePunchedPort);
+				}
+				// TTL-limited probe NOW (opens our lobby mapping before the
+				// joiner's first blast can poison it, without reaching the
+				// joiner's NAT)...
+				TheLAN->sendNATProbeLowTTL(p.punchedIP, p.punchedPort);
+				// ...and a real full-TTL keepalive once the joiner is
+				// definitely punching (it starts punch_in_ms=750 after its
+				// peer_info; 1500ms is comfortably inside its 8s window).
+				PendingLobbyKeepalive ka;
+				ka.ipHost   = p.punchedIP;
+				ka.portHost = p.punchedPort;
+				ka.dueMs    = timeGetTime() + 1500;
+				s_pendingLobbyKeepalives.push_back(ka);
+			}
+			// Register the joiner's game-data endpoint with the stashed-FD
+			// keepalive sender so the host's NAT mapping on UDP/8088 opens
+			// outbound to that peer before ConnectionManager adopts the FD.
+			if (p.gamePunchedIP != 0 && p.gamePunchedPort != 0)
+			{
+				OnlineCoordinatorAPI::addStashedGamePeer(p.gamePunchedIP, p.gamePunchedPort);
+			}
+		}
+	}
+
+	// Fire any due full-TTL lobby keepalives queued above.
+	if (!s_pendingLobbyKeepalives.empty() && TheLAN)
+	{
+		UnsignedInt nowMs = timeGetTime();
+		for (size_t ki = 0; ki < s_pendingLobbyKeepalives.size(); )
+		{
+			if (nowMs >= s_pendingLobbyKeepalives[ki].dueMs)
+			{
+				TheLAN->sendNATKeepalive(s_pendingLobbyKeepalives[ki].ipHost,
+					s_pendingLobbyKeepalives[ki].portHost);
+				s_pendingLobbyKeepalives.erase(s_pendingLobbyKeepalives.begin() + ki);
+			}
+			else
+			{
+				++ki;
+			}
+		}
+	}
+
+	updateCoordAutoStart();
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2024,6 +2199,9 @@ WindowMsgHandledType LanGameOptionsMenuSystem( GameWindow *window, UnsignedInt m
 					// Explicit lobby exit — disarm any resume-from-replay selection
 					// so it doesn't carry into a later lobby session.
 					ClearResumeFromReplayArm();
+					// If the host kept the coord TCP alive for N-player, tear
+					// it down now -- backing out means abandoning the game.
+					LanLobbyMenuShutdownHostCoordinator();
 					TheLAN->RequestGameLeave();
 					//TheShell->pop();
 
