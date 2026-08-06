@@ -75,12 +75,52 @@ extern Bool LANbuttonPushed;
 extern void MapSelectorTooltip(GameWindow *window, WinInstanceData *instData,	UnsignedInt mouse);
 extern void gameAcceptTooltip(GameWindow *window, WinInstanceData *instData, UnsignedInt mouse);
 
-// Defined in LanLobbyMenu.cpp; used here to pump the host's coord TCP session
-// after the lobby->options handoff so additional joiners can show up.
-extern OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost();
-extern void LanLobbyMenuShutdownHostCoordinator();
+// Defined in LanLobbyMenu.cpp; used here to pump the coord TCP session after
+// the lobby->options handoff. The host receives peer_info for additional
+// joiners through it; joiners receive "peer" role mesh notifications about
+// the game's other guests (guest<->guest NAT punch).
+extern OnlineCoordinatorAPI* LanLobbyMenuGetCoordinator();
+extern void LanLobbyMenuShutdownCoordinator();
+extern void LanLobbyMenuShutdownCoordinatorKeepStash();
+
+// Full-TTL lobby keepalives scheduled after the immediate low-TTL probe to a
+// new coordinator peer (see the drain loop in LanGameOptionsMenuUpdate).
+// intervalMs 0 is a one-shot (host to a new joiner, which does its own
+// active punching); non-zero repeats until the menu goes away (guest<->guest
+// mesh, where neither side punches, so both must keep the pair's NAT
+// mappings warm through the whole lobby wait).
+struct PendingLobbyKeepalive { UnsignedInt ipHost; UnsignedShort portHost; UnsignedInt dueMs; UnsignedInt intervalMs; };
+static std::vector<PendingLobbyKeepalive> s_pendingLobbyKeepalives;
+
+static void schedulePendingLobbyKeepalive(UnsignedInt ipHost, UnsignedShort portHost,
+	UnsignedInt firstDelayMs, UnsignedInt intervalMs)
+{
+	// One entry per (ip, port): a re-delivered peer_info (join retry) must
+	// not stack duplicate senders for the same addr.
+	for (size_t ki = 0; ki < s_pendingLobbyKeepalives.size(); ++ki)
+	{
+		if (s_pendingLobbyKeepalives[ki].ipHost == ipHost &&
+		    s_pendingLobbyKeepalives[ki].portHost == portHost)
+			return;
+	}
+	PendingLobbyKeepalive ka;
+	ka.ipHost     = ipHost;
+	ka.portHost   = portHost;
+	ka.dueMs      = timeGetTime() + firstDelayMs;
+	ka.intervalMs = intervalMs;
+	s_pendingLobbyKeepalives.push_back(ka);
+}
 Color white = GameMakeColor( 255, 255, 255, 255 );
 static bool s_isIniting = FALSE;
+
+// TRUE while updateGameOptions() pushes game state into the gadgets.
+// GadgetCheckBoxSetChecked/GadgetComboBoxSetSelectedPos re-fire the same
+// GBM_SELECTED/combo messages a user click does, so without this guard every
+// received options string made joiners re-run the click handlers against
+// their own copy of the game (2026-08-05: the enforce-random handler snapped
+// the host's Randomize assignments back to Random on every joiner, and the
+// game started with host and joiners holding different factions).
+static bool s_isSyncingUI = FALSE;
 
 // Resume-from-replay host-local arming state. Set by TryArmResumeFromReplay
 // when the host picks a valid replay from the ReplayMenu; consumed by
@@ -878,6 +918,9 @@ static void handleTeamSelection(int index)
 
 static void handleStartingCashSelection()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
   if (myGame)
@@ -904,6 +947,9 @@ static void handleStartingCashSelection()
 
 static void handleLimitSuperweaponsClick()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
   if (myGame)
@@ -934,9 +980,16 @@ static void handleLimitSuperweaponsClick()
 
 static void handleEnforceRandomClick()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
-  if (myGame)
+  // Only the host owns this option; a joiner's copy of the flag and the
+  // slot list comes from the host's options strings. The checkbox is
+  // disabled for joiners, so any invocation here without host status is a
+  // stray gadget message and must not touch the game.
+  if (myGame && myGame->amIHost())
   {
     Bool checked = GadgetCheckBoxIsChecked( checkboxEnforceRandom );
     myGame->setEnforceRandom( checked );
@@ -1192,6 +1245,10 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 	// the arm the user just set. Disarming happens on Back (explicit
 	// lobby exit) instead.
 
+	// Stale NAT keepalive senders from a previous lobby session must not
+	// keep pinging old peers.
+	s_pendingLobbyKeepalives.clear();
+
 	//initialize the gadgets
 	EnableSlotListUpdates(FALSE);
 	DEBUG_LOG(("LanGameOptionsMenuInit: pre InitLanGameGadgets"));
@@ -1351,6 +1408,9 @@ void updateGameOptions()
 			LanPositionStartSpots();
 		GadgetStaticTextSetText(textEntryMapDisplay, mapDisplayName);
 
+    // These setters re-fire the gadgets' click messages; the guard keeps the
+    // click handlers from mutating the game state we are displaying.
+    s_isSyncingUI = TRUE;
     GadgetCheckBoxSetChecked( checkboxLimitSuperweapons, theGame->getSuperweaponRestriction() != 0 );
     if (checkboxEnforceRandom)
       GadgetCheckBoxSetChecked( checkboxEnforceRandom, theGame->getEnforceRandom() );
@@ -1365,6 +1425,7 @@ void updateGameOptions()
         break;
       }
     }
+    s_isSyncingUI = FALSE;
 
     DEBUG_ASSERTCRASH( index < itemCount, ("Could not find new starting cash amount %d in list", theGame->getStartingCash().countMoney() ) );
 	}
@@ -1429,6 +1490,26 @@ void LanGameOptionsMenuShutdown( WindowLayout *layout, void *userData )
 	EnableSlotListUpdates(FALSE);
 	LANisShuttingDown = true;
 
+	// Stop the mesh/joiner NAT keepalive senders with the menu.
+	s_pendingLobbyKeepalives.clear();
+
+	// A joiner's coordinator session (kept alive for guest<->guest mesh
+	// notifications) must not outlive the lobby. Two cases:
+	// - The match is starting: only the TCP session goes; the stashed game
+	//   socket is about to be adopted by ConnectionManager and must survive.
+	// - Any other exit (host left, error pop): full teardown, including the
+	//   stashed socket, because the attempt is abandoned. The back button
+	//   already did this explicitly before RequestGameLeave.
+	// The host at game start released its session into LANAPI in the Start
+	// press path, so both calls are no-ops for it.
+	{
+		LANGameInfo *shutdownGame = TheLAN ? TheLAN->GetMyGame() : nullptr;
+		if (shutdownGame && shutdownGame->isGameInProgress())
+			LanLobbyMenuShutdownCoordinatorKeepStash();
+		else
+			LanLobbyMenuShutdownCoordinator();
+	}
+
 	// if we are shutting down for an immediate pop, skip the animations
 	Bool popImmediate = *(Bool *)userData;
 	if( popImmediate )
@@ -1459,11 +1540,6 @@ void LanGameOptionsMenuShutdown( WindowLayout *layout, void *userData )
 //-------------------------------------------------------------------------------------------------
 /** Lan Game Options menu update method */
 //-------------------------------------------------------------------------------------------------
-// Full-TTL lobby keepalives scheduled after the immediate low-TTL probe to a
-// new coordinator joiner (see the drain loop below).
-struct PendingLobbyKeepalive { UnsignedInt ipHost; UnsignedShort portHost; UnsignedInt dueMs; };
-static std::vector<PendingLobbyKeepalive> s_pendingLobbyKeepalives;
-
 // Test automation: -coordautostart N. Joiners auto-accept; the host presses
 // Start once N human players are present and everyone has accepted.
 static void updateCoordAutoStart(void)
@@ -1532,27 +1608,28 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 	updateMapVoteDownload();
 	//TheLAN->update(); // this is handled in the lobby
 
-	// Host-side N-player coord: keep the coordinator TCP signaling alive so
-	// joiners 2..N can find this game while we wait in the options screen.
-	// Each peer_info the coord delivers gets plumbed into TheLAN so the
-	// joiner's eventual MSG_REQUEST_JOIN finds the right game-port mapping,
-	// and we send a NAT-opening probe to their lobby addr so port-restricted
-	// host NATs let the joiner through.
-	OnlineCoordinatorAPI* coord = LanLobbyMenuGetCoordinatorForHost();
+	// Keep the coordinator TCP signaling alive while we wait in the options
+	// screen. Host: joiners 2..N find this game through it; each peer_info
+	// gets plumbed into TheLAN so the joiner's eventual MSG_REQUEST_JOIN
+	// finds the right game-port mapping, plus a NAT-opening probe to their
+	// lobby addr so port-restricted host NATs let the joiner through.
+	// Joiners: the coordinator delivers "peer" role mesh notifications for
+	// every OTHER guest, and both sides open and keep warm mutual NAT
+	// mappings (lobby + game socket) so guest<->guest keepalive and
+	// file-transfer traffic works from the first frame of the match.
+	OnlineCoordinatorAPI* coord = LanLobbyMenuGetCoordinator();
 	if (coord)
 	{
 		coord->update();
 		OnlineCoordinatorAPI::PeerInfo p;
 		while (coord->consumeNewPeer(&p))
 		{
-			ReleaseLog("Options pump: new joiner %s lobby=%d.%d.%d.%d:%u game=%d.%d.%d.%d:%u",
+			const Bool isMeshPeer = (p.role.compare("peer") == 0);
+			ReleaseLog("Options pump: %s %s lobby=%d.%d.%d.%d:%u game=%d.%d.%d.%d:%u",
+				isMeshPeer ? "mesh peer" : "new joiner",
 				p.nick.str(),
 				PRINTF_IP_AS_4_INTS(p.punchedIP), p.punchedPort,
 				PRINTF_IP_AS_4_INTS(p.gamePunchedIP), p.gamePunchedPort);
-			DEBUG_LOG(("LanGameOptionsMenu: new joiner %s lobby=0x%08x:%u game=0x%08x:%u",
-				p.nick.str(),
-				p.punchedIP, p.punchedPort,
-				p.gamePunchedIP, p.gamePunchedPort));
 			if (TheLAN && p.punchedIP != 0)
 			{
 				if (p.gamePunchedPort != 0)
@@ -1560,20 +1637,22 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.punchedPort, p.gamePunchedPort);
 				}
 				// TTL-limited probe NOW (opens our lobby mapping before the
-				// joiner's first blast can poison it, without reaching the
-				// joiner's NAT)...
+				// peer's first packet can poison it, without reaching the
+				// peer's NAT)...
 				TheLAN->sendNATProbeLowTTL(p.punchedIP, p.punchedPort);
-				// ...and a real full-TTL keepalive once the joiner is
-				// definitely punching (it starts punch_in_ms=750 after its
-				// peer_info; 1500ms is comfortably inside its 8s window).
-				PendingLobbyKeepalive ka;
-				ka.ipHost   = p.punchedIP;
-				ka.portHost = p.punchedPort;
-				ka.dueMs    = timeGetTime() + 1500;
-				s_pendingLobbyKeepalives.push_back(ka);
+				// ...followed by full-TTL keepalives. A new joiner does its
+				// own active punching (starts punch_in_ms=750 after its
+				// peer_info), so one keepalive at 1500ms lands inside its 8s
+				// window. A mesh peer never punches us: give it a longer
+				// first delay (its own low-TTL probes must claim its NAT
+				// tuples first) and repeat until the match starts.
+				if (isMeshPeer)
+					schedulePendingLobbyKeepalive(p.punchedIP, p.punchedPort, 3000, 2000);
+				else
+					schedulePendingLobbyKeepalive(p.punchedIP, p.punchedPort, 1500, 0);
 			}
-			// Register the joiner's game-data endpoint with the stashed-FD
-			// keepalive sender so the host's NAT mapping on UDP/8088 opens
+			// Register the peer's game-data endpoint with the stashed-FD
+			// keepalive sender so our NAT mapping on UDP/8088 opens
 			// outbound to that peer before ConnectionManager adopts the FD.
 			if (p.gamePunchedIP != 0 && p.gamePunchedPort != 0)
 			{
@@ -1592,7 +1671,15 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 			{
 				TheLAN->sendNATKeepalive(s_pendingLobbyKeepalives[ki].ipHost,
 					s_pendingLobbyKeepalives[ki].portHost);
-				s_pendingLobbyKeepalives.erase(s_pendingLobbyKeepalives.begin() + ki);
+				if (s_pendingLobbyKeepalives[ki].intervalMs != 0)
+				{
+					s_pendingLobbyKeepalives[ki].dueMs = nowMs + s_pendingLobbyKeepalives[ki].intervalMs;
+					++ki;
+				}
+				else
+				{
+					s_pendingLobbyKeepalives.erase(s_pendingLobbyKeepalives.begin() + ki);
+				}
 			}
 			else
 			{
@@ -2199,9 +2286,10 @@ WindowMsgHandledType LanGameOptionsMenuSystem( GameWindow *window, UnsignedInt m
 					// Explicit lobby exit — disarm any resume-from-replay selection
 					// so it doesn't carry into a later lobby session.
 					ClearResumeFromReplayArm();
-					// If the host kept the coord TCP alive for N-player, tear
-					// it down now -- backing out means abandoning the game.
-					LanLobbyMenuShutdownHostCoordinator();
+					// If the coord TCP session is still alive (host N-player,
+					// joiner mesh), tear it down now -- backing out means
+					// abandoning the game.
+					LanLobbyMenuShutdownCoordinator();
 					TheLAN->RequestGameLeave();
 					//TheShell->pop();
 

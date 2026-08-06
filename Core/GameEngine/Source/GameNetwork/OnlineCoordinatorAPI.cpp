@@ -37,6 +37,7 @@
 #endif
 
 #include "GameNetwork/networkutil.h"   // ResolveIP
+#include "GameNetwork/LANAPICallbacks.h"	// TheLAN (mesh probes after the lobby socket handoff)
 #include "Common/GlobalData.h"         // m_coordPunchTTL override
 #include "Common/ReleaseLog.h"
 
@@ -624,6 +625,57 @@ Bool OnlineCoordinatorAPI::consumeNewPeer(PeerInfo* out)
 	if (out) *out = m_newPeers.front();
 	m_newPeers.erase(m_newPeers.begin());
 	return TRUE;
+}
+
+// One low-TTL datagram from fd to (ipHost:portHost). The payload is junk the
+// receiver drops; the packet exists to make our NAT install the outbound
+// SNAT tuple for this (socket, peer) pair before the peer's own traffic can
+// arrive unsolicited and claim it (the conntrack steal that remaps our
+// later sends to a random external port).
+static void sendLowTtlProbeFromFd(Int fd, UnsignedInt ipHost, UnsignedShort portHost)
+{
+	if (fd == -1 || ipHost == 0 || portHost == 0) return;
+	struct sockaddr_in dst;
+	memset(&dst, 0, sizeof(dst));
+	dst.sin_family      = AF_INET;
+	dst.sin_addr.s_addr = htonl(ipHost);
+	dst.sin_port        = htons(portHost);
+	const char probe[] = "ZMESH";
+	setPunchTTL(fd, punchLowTTL());
+	sendto(fd, probe, sizeof(probe) - 1, 0, (struct sockaddr*)&dst, sizeof(dst));
+	setPunchTTL(fd, PUNCH_FULL_TTL);
+}
+
+void OnlineCoordinatorAPI::sendMeshProbes(const PeerInfo& p)
+{
+	// Lobby socket: ours until takeLobbyUdpFdForHandoff, TheLAN's after.
+	if (m_udpFdLobby != -1)
+	{
+		sendLowTtlProbeFromFd(m_udpFdLobby, p.punchedIP, p.punchedPort);
+		m_punchTtl = 0;   // pumpPunch re-applies its phase TTL on the next blast
+	}
+	else if (TheLAN != nullptr)
+	{
+		TheLAN->sendNATProbeLowTTL(p.punchedIP, p.punchedPort);
+	}
+
+	// Game socket: ours until stashGameSocketForGameStart, stashed after.
+	// Registering with the stash also gets the peer recurring full-TTL
+	// keepalives (low-TTL first) from pumpStashedKeepalive.
+	if (m_udpFdGame != -1)
+	{
+		sendLowTtlProbeFromFd(m_udpFdGame, p.gamePunchedIP, p.gamePunchedPort);
+		m_punchTtl = 0;
+	}
+	else
+	{
+		addStashedGamePeer(p.gamePunchedIP, p.gamePunchedPort);
+	}
+	ReleaseLog("Coordinator: mesh probes to %s lobby=%d.%d.%d.%d:%u game=%d.%d.%d.%d:%u (lobbyFd=%d gameFd=%d)",
+		p.nick.str(),
+		PRINTF_IP_AS_4_INTS(p.punchedIP), p.punchedPort,
+		PRINTF_IP_AS_4_INTS(p.gamePunchedIP), p.gamePunchedPort,
+		m_udpFdLobby, m_udpFdGame);
 }
 
 Bool OnlineCoordinatorAPI::openUdpOnPort(UnsignedShort bindPort, Int& outFd, UnsignedShort& outBoundPort)
@@ -1485,6 +1537,19 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		// any more so these are the values the lobby UI plumbs into TheLAN.
 		parseHostOrderIpPort(p.publicAddr,     &p.punchedIP,     &p.punchedPort);
 		parseHostOrderIpPort(p.gamePublicAddr, &p.gamePunchedIP, &p.gamePunchedPort);
+
+		// Guest<->guest mesh notification: another guest in the game we
+		// joined. This NEVER arms the synchronized punch machinery (that is
+		// reserved for the host pair): probe the peer's addrs right now so
+		// our NAT's tuples toward it exist before its traffic reaches us,
+		// then queue for the game-options pump, which keeps the pair warm
+		// with recurring keepalives until the match starts.
+		if (p.role.compare("peer") == 0)
+		{
+			sendMeshProbes(p);
+			m_newPeers.push_back(p);
+			return;
+		}
 
 		if (m_postHandoff || m_peerInfoArmed)
 		{

@@ -71,6 +71,14 @@ void EnableAcceptControls(Bool Enabled, GameInfo *myGame, GameWindow *comboPlaye
 	if(slotNum == -1 || slotNum >= MAX_SLOTS )
 		slotNum = myGame->getLocalSlotNum();
 
+	// A direct-connect options parse can leave us temporarily unmatched in
+	// the slot list (slot IPs briefly hold the host's NAT-external view), so
+	// getLocalSlotNum() can be -1 here; getConstSlot(-1) returns null and the
+	// dereference below crashed the client. Skip the refresh; the next
+	// update after the slot is restored redraws everything.
+	if (slotNum < 0 || myGame->getConstSlot(slotNum) == nullptr)
+		return;
+
 	Bool isObserver = myGame->getConstSlot(slotNum)->getPlayerTemplate() == PLAYERTEMPLATE_OBSERVER;
 
 	if( !myGame->amIHost() && (buttonStart != nullptr) )

@@ -687,6 +687,14 @@ void LANAPI::update()
 				RequestGameOptions( text, true );
 #endif
 				RequestGameOptions( "HELLO", false );
+
+				// Direct-connect lobbies ride single UDP datagrams with no
+				// acks: if our one MSG_MAP_AVAILABILITY was lost, the host
+				// keeps its default hasMap=TRUE for us and will start a game
+				// we cannot load. Repeat the report on the HELLO cadence; the
+				// host ignores repeats that don't change anything.
+				if (m_currentGame->getIsDirectConnect())
+					RequestHasMap();
 			}
 		}
 		else if (m_currentGame)
@@ -1046,6 +1054,12 @@ void LANAPI::RequestHasMap()
 	if (m_inLobby || !m_currentGame)
 		return;
 
+	// Direct-connect parses can leave us temporarily unmatched in the slot
+	// list (our slot carries the NAT-external IP until restored); reporting
+	// from getSlot(-1) would read garbage.
+	if (m_currentGame->getLocalSlotNum() < 0)
+		return;
+
 	LANMessage msg;
 	fillInLANMessage( &msg );
 	msg.messageType = LANMessage::MSG_MAP_AVAILABILITY;
@@ -1104,8 +1118,20 @@ void LANAPI::RequestGameStart()
 	LANMessage msg;
 	msg.messageType = LANMessage::MSG_GAME_START;
 	fillInLANMessage( &msg );
+	// Ship the final options with the start order so every joiner loads from
+	// this exact slot state (see LANMessage::StartGame).
+	AsciiString finalOptions = GenerateGameOptionsString();
+	strlcpy(msg.StartGame.options, finalOptions.str(), ARRAY_SIZE(msg.StartGame.options));
+	// The start order is a single UDP datagram per peer on the direct-connect
+	// path; a peer that misses it is left behind in the lobby while everyone
+	// else loads. Receivers ignore repeats (isGameInProgress guard), so send
+	// it a few times.
 	sendMessage(&msg);
 	m_transport->update(); // force a send
+	sendMessage(&msg);
+	m_transport->update();
+	sendMessage(&msg);
+	m_transport->update();
 
 	OnGameStart();
 }

@@ -34,6 +34,7 @@
 #include "GameClient/Shell.h"
 #include "GameNetwork/FileTransfer.h"
 #include "GameNetwork/networkutil.h"
+#include "GameNetwork/LANAPICallbacks.h"	// for TheLAN (direct-connect check)
 
 //-------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------
@@ -77,6 +78,19 @@ static Bool doFileTransfer( AsciiString filename, MapTransferLoadScreen *ls, Int
 				sentFile = TRUE;
 			}
 
+			// Online (direct-connect) games: a non-host client can only
+			// reliably observe its own progress. Another receiver's progress
+			// reports travel joiner-to-joiner, a leg that may have no route
+			// yet on the punched path, so gating on them deadlocks this loop
+			// into the timeout and aborts a transfer whose bytes already
+			// landed. The host still waits on every receiver before starting,
+			// which is the barrier that matters; an early-exiting joiner just
+			// waits at frame 0 like any faster-loading player. Pure LAN keeps
+			// the retail everyone-watches-everyone loadscreen.
+			Bool skipUnobservablePeers = FALSE;
+			if (!TheGameInfo->amIHost() && TheLAN != nullptr && TheLAN->GetMyGame() != nullptr)
+				skipUnobservablePeers = TheLAN->GetMyGame()->getIsDirectConnect();
+
 			// get the progress for each player, and take the min for our overall progress
 			fileTransferDone = TRUE;
 			fileTransferPercent = 100;
@@ -84,6 +98,8 @@ static Bool doFileTransfer( AsciiString filename, MapTransferLoadScreen *ls, Int
 			{
 				if (TheGameInfo->getConstSlot(i)->isHuman() && !TheGameInfo->getConstSlot(i)->hasMap())
 				{
+					if (skipUnobservablePeers && i != TheGameInfo->getLocalSlotNum())
+						continue;
 					Int slotTransferPercent = TheNetwork->getFileTransferProgress(i, filename);
 					fileTransferPercent = min(fileTransferPercent, slotTransferPercent);
 

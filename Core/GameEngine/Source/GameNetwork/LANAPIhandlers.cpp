@@ -458,6 +458,15 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					newSlot.setLobbyPort(m_dispatchSenderPort);
 					newSlot.setLastHeard(timeGetTime());
 					newSlot.setSerial(msg->GameToJoin.serial);
+					// Over the coordinator path the joiner's has-map report is a
+					// lossy UDP datagram, so don't assume they have the map (the
+					// GameSlot default) until they say so -- starting on that
+					// assumption skips the launch-time transfer and hangs the
+					// game at frame 0 for everyone. Pure LAN keeps the retail
+					// default. The joiner re-reports on the HELLO cadence, so a
+					// player who does have the map flips back within a second.
+					if (m_currentGame->getIsDirectConnect())
+						newSlot.setMapAvailability(false);
 					m_currentGame->setSlot(player,newSlot);
 					DEBUG_LOG(("LANAPI::handleRequestJoin - added player %ls at ip 0x%08x to the game", msg->name, senderIP));
 
@@ -784,6 +793,21 @@ void LANAPI::handleGameStart( LANMessage *msg, UnsignedInt senderIP )
 {
 	if (!m_inLobby && m_currentGame && m_currentGame->getIP(0) == senderIP && !m_currentGame->isGameInProgress())
 	{
+		// Apply the authoritative options the host packed into the start
+		// order before loading. Without this, a joiner whose last
+		// MSG_GAME_OPTIONS was lost (or whose local copy drifted) loads a
+		// different game than the host and desyncs on the first CRC check.
+		// OnGameOptions runs the full parse including the direct-connect
+		// IP/port restore, so slot identity survives the update.
+		if (!AmIHost())
+		{
+			msg->StartGame.options[m_lanMaxOptionsLength] = 0;
+			AsciiString finalOptions(msg->StartGame.options);
+			if (!finalOptions.isEmpty())
+			{
+				OnGameOptions(senderIP, 0, finalOptions);
+			}
+		}
 		OnGameStart();
 	}
 }
