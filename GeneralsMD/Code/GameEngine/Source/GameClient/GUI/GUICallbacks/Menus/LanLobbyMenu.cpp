@@ -105,23 +105,24 @@ void LanLobbyMenuSetUseCoordinator( Bool enable )
 	s_useCoordinator = enable;
 }
 
-// Cross-menu accessor: LanGameOptionsMenu calls this each frame so the host's
-// coordinator TCP signaling stays pumped after the handoff. Returns NULL
-// when no coord session is alive (regular LAN games, or after the host has
-// torn down the session).
-OnlineCoordinatorAPI* LanLobbyMenuGetCoordinatorForHost()
+// Cross-menu accessor: LanGameOptionsMenu calls this each frame so the
+// coordinator TCP signaling stays pumped after the handoff. The host uses it
+// to receive additional joiners; joiners use it to receive "peer" role mesh
+// notifications about the game's other guests. Returns NULL when no coord
+// session is alive (regular LAN games, or after teardown).
+OnlineCoordinatorAPI* LanLobbyMenuGetCoordinator()
 {
 	return s_coord;
 }
 
-// Cross-menu teardown: LanGameOptionsMenu calls this when the host backs
-// out of the lobby (game start now RELEASES the session into LANAPI
-// instead, see LanLobbyMenuReleaseCoordinator). Idempotent.
-void LanLobbyMenuShutdownHostCoordinator()
+// Cross-menu teardown: LanGameOptionsMenu calls this when a player backs out
+// of the lobby (a host's game start instead RELEASES the session into
+// LANAPI, see LanLobbyMenuReleaseCoordinator). Idempotent.
+void LanLobbyMenuShutdownCoordinator()
 {
 	if (s_coord)
 	{
-		ReleaseLog("Coordinator teardown: LanLobbyMenuShutdownHostCoordinator");
+		ReleaseLog("Coordinator teardown: LanLobbyMenuShutdownCoordinator");
 		s_coord->disconnect();
 		delete s_coord;
 		s_coord = nullptr;
@@ -133,8 +134,24 @@ void LanLobbyMenuShutdownHostCoordinator()
 	// or skirmish game that has nothing to do with the coordinator.
 	if (OnlineCoordinatorAPI::hasStashedGameSocket())
 	{
-		ReleaseLog("Coordinator: releasing stashed game socket (host abandoned the lobby)");
+		ReleaseLog("Coordinator: releasing stashed game socket (abandoned the lobby)");
 		OnlineCoordinatorAPI::discardStashedGameSocket();
+	}
+}
+
+// Joiner-side teardown at game start: the TCP signaling session is done (the
+// match is starting, no more mesh notifications matter), but the stashed
+// game socket is about to be adopted by ConnectionManager, so it must NOT be
+// discarded here. Hosts never hit this: their session was already released
+// into LANAPI by the Start-press path.
+void LanLobbyMenuShutdownCoordinatorKeepStash()
+{
+	if (s_coord)
+	{
+		ReleaseLog("Coordinator teardown: LanLobbyMenuShutdownCoordinatorKeepStash (game starting)");
+		s_coord->disconnect();
+		delete s_coord;
+		s_coord = nullptr;
 	}
 }
 
@@ -708,21 +725,22 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 
 	if (s_coord)
 	{
-		// For a host that just handed off, leave s_coord alive so the
-		// LanGameOptionsMenu can pump it and accept additional joiners.
-		// LanLobbyMenuShutdownHostCoordinator() tears it down later.
-		const Bool hostKeepAlive = (s_coordHandoffDone && s_coord->amIHost());
-		if (!hostKeepAlive)
+		// After a handoff, leave s_coord alive so LanGameOptionsMenu can
+		// pump it: the host accepts additional joiners through it, joiners
+		// receive guest<->guest mesh notifications. Torn down later by
+		// LanLobbyMenuShutdownCoordinator[KeepStash]().
+		if (!s_coordHandoffDone)
 		{
-			ReleaseLog("Coordinator teardown: LanLobbyMenuShutdown (handoffDone=%d amIHost=%d)",
-				(int)s_coordHandoffDone, (int)s_coord->amIHost());
+			ReleaseLog("Coordinator teardown: LanLobbyMenuShutdown (no handoff; amIHost=%d)",
+				(int)s_coord->amIHost());
 			s_coord->disconnect();
 			delete s_coord;
 			s_coord = nullptr;
 		}
 		else
 		{
-			ReleaseLog("Coordinator kept alive through lobby shutdown (host N-player path)");
+			ReleaseLog("Coordinator kept alive through lobby shutdown (amIHost=%d)",
+				(int)s_coord->amIHost());
 		}
 	}
 	// If the handoff to TheLAN already happened we keep s_useCoordinator
@@ -1249,26 +1267,18 @@ static void doCoordinatorHandoffToLAN()
 	// Hand the punched lobby UDP socket to TheLAN by fd (NOT close+rebind:
 	// the NAT mapping belongs to the socket, and CGNATs give a replacement
 	// socket a different external port than the one peers were told).
-	if (weAreHost)
-	{
-		// N-player: keep TCP signaling alive so the coordinator can deliver
-		// peer_info for additional joiners while this host stays in the
-		// lobby. The s_coord instance survives LanLobbyMenuShutdown (see
-		// guard there) and is pumped by LanGameOptionsMenu.
-		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
-		DEBUG_LOG(("HANDOFF: coord lobby fd=%d handed over; TCP kept alive for additional joiners", lobbyFd));
-	}
-	else
-	{
-		// Joiners don't need to talk to the coordinator any more; their
-		// in-game connection goes through the host (packet router model).
-		// Take the punched lobby socket BEFORE disconnecting so disconnect()
-		// doesn't close it -- the host was told to reply to the external
-		// address that socket owns, and a rebound socket may not get it back.
-		lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
-		s_coord->disconnect();
-		DEBUG_LOG(("HANDOFF: coord disconnected"));
-	}
+	//
+	// BOTH roles keep the TCP signaling session alive past the handoff. The
+	// host needs it so the coordinator can deliver peer_info for additional
+	// joiners; joiners need it for "peer" role mesh notifications about the
+	// game's other guests, so every guest pair punches mutual NAT mappings
+	// while still in the lobby (the coordinator only orchestrates the
+	// host<->guest punch; without the mesh, guest<->guest keepalive and
+	// file-transfer traffic stalls at game start behind restricted NATs).
+	// The s_coord instance survives LanLobbyMenuShutdown (see guard there)
+	// and is pumped by LanGameOptionsMenu.
+	lobbyFd = s_coord->takeLobbyUdpFdForHandoff();
+	DEBUG_LOG(("HANDOFF: coord lobby fd=%d handed over; TCP kept alive (host=%d)", lobbyFd, (int)weAreHost));
 
 	if (!TheLAN)
 	{

@@ -279,6 +279,12 @@ private:
 
 	// purpose: 0 = lobby, 1 = game (matches STUNPurpose* in protocol.go).
 	void  sendStunProbe(Int fd, unsigned char purpose);
+	// Guest-to-guest mesh: fire immediate low-TTL probes at a "peer" role
+	// peer_info's lobby/game addrs from whichever sockets we still own (or
+	// via TheLAN / the game-socket stash after handoff). Outbound-first
+	// claims our NAT's SNAT tuple toward the peer before the peer's own
+	// full-TTL traffic can arrive and poison it.
+	void  sendMeshProbes(const PeerInfo& p);
 	void  pumpUdpRecv();
 	void  pumpUdpRecvOne(Int fd, Bool isGame);
 	void  pumpStunDiscovery(UnsignedInt nowMs);
