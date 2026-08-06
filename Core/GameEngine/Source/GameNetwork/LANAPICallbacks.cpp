@@ -153,6 +153,13 @@ void LANAPI::OnHasMap( UnsignedInt playerIP, Bool status )
 		{
 			i = MAX_SLOTS;
 		}
+		else if (m_currentGame->getLANSlot(i)->hasMap() == status)
+		{
+			// Joiners repeat their availability on the HELLO cadence in
+			// direct-connect games; an unchanged report needs no UI refresh
+			// and, more importantly, no repeated "player has no map" chat.
+			return;
+		}
 		else
 		{
 			m_currentGame->getLANSlot(i)->setMapAvailability( status );
@@ -475,6 +482,42 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 				if (preParseLocalSlotNum > 0)
 				{
 					m_currentGame->getLANSlot(preParseLocalSlotNum)->setIP(m_localIP);
+				}
+				else
+				{
+					// We didn't know our own slot before the parse (a prior
+					// parse already clobbered it, or this is the first options
+					// string after joining). IP matching can't recover -- the
+					// host's string carries our NAT-external address -- so fall
+					// back to our unique lobby name to reclaim the slot.
+					for (Int slotIdx = 1; slotIdx < MAX_SLOTS; ++slotIdx)
+					{
+						LANGameSlot *namedSlot = m_currentGame->getLANSlot(slotIdx);
+						if (namedSlot && namedSlot->isHuman() && namedSlot->getName().compare(m_name) == 0)
+						{
+							namedSlot->setIP(m_localIP);
+							break;
+						}
+					}
+				}
+
+				// The parse ran while every slot still held the host's view of
+				// the addresses, so getLocalSlotNum() was -1 inside it and both
+				// the local map-availability recheck (GameInfo::setMapCRC) and
+				// the changed-map report (ParseGameOptionsString ->
+				// RequestHasMap) silently skipped. Redo them against the
+				// restored slot; otherwise the host keeps its default
+				// hasMap=TRUE for us, never runs the launch-time transfer, and
+				// starts a game we cannot load (2026-08-05 Whispering Woods).
+				Int restoredSlot = m_currentGame->getLocalSlotNum();
+				if (restoredSlot >= 0)
+				{
+					Bool reportedHasMap = m_currentGame->getConstSlot(restoredSlot)->hasMap();
+					m_currentGame->setMapCRC(m_currentGame->getMapCRC()); // recompute availability
+					if (m_currentGame->getConstSlot(restoredSlot)->hasMap() != reportedHasMap)
+					{
+						RequestHasMap();
+					}
 				}
 			}
 

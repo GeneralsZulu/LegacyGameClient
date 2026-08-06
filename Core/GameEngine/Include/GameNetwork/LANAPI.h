@@ -185,7 +185,7 @@ struct LANMessage
 	char hostName[g_lanHostNameLength+1];		///< machine name, for convenience
 
 	// No additional data is required for REQUEST_LOCATIONS, LOBBY_ANNOUNCE,
-	// REQUEST_LOBBY_LEAVE, GAME_START.
+	// REQUEST_LOBBY_LEAVE.
 	union
 	{
 		// StartTimer is sent with GAME_START_TIMER
@@ -193,6 +193,15 @@ struct LANMessage
 		{
 			Int seconds;
 		} StartTimer;
+
+		// StartGame is sent with GAME_START. The host embeds its final options
+		// string so joiners load from the authoritative slot state even if the
+		// last MSG_GAME_OPTIONS never arrived or was clobbered locally; a game
+		// that starts from divergent options desyncs on the first CRC check.
+		struct
+		{
+			char options[m_lanMaxOptionsLength+1];
+		} StartGame;
 
 		// GameJoined is sent with REQUEST_GAME_LEAVE
 		struct

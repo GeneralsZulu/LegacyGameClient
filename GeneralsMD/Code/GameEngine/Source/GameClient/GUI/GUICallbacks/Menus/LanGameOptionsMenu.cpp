@@ -82,6 +82,15 @@ extern void LanLobbyMenuShutdownHostCoordinator();
 Color white = GameMakeColor( 255, 255, 255, 255 );
 static bool s_isIniting = FALSE;
 
+// TRUE while updateGameOptions() pushes game state into the gadgets.
+// GadgetCheckBoxSetChecked/GadgetComboBoxSetSelectedPos re-fire the same
+// GBM_SELECTED/combo messages a user click does, so without this guard every
+// received options string made joiners re-run the click handlers against
+// their own copy of the game (2026-08-05: the enforce-random handler snapped
+// the host's Randomize assignments back to Random on every joiner, and the
+// game started with host and joiners holding different factions).
+static bool s_isSyncingUI = FALSE;
+
 // Resume-from-replay host-local arming state. Set by TryArmResumeFromReplay
 // when the host picks a valid replay from the ReplayMenu; consumed by
 // StartPressed. Stored as a fixed char array rather than AsciiString so
@@ -878,6 +887,9 @@ static void handleTeamSelection(int index)
 
 static void handleStartingCashSelection()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
   if (myGame)
@@ -904,6 +916,9 @@ static void handleStartingCashSelection()
 
 static void handleLimitSuperweaponsClick()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
   if (myGame)
@@ -934,9 +949,16 @@ static void handleLimitSuperweaponsClick()
 
 static void handleEnforceRandomClick()
 {
+  if (s_isSyncingUI)
+    return;
+
   LANGameInfo *myGame = TheLAN->GetMyGame();
 
-  if (myGame)
+  // Only the host owns this option; a joiner's copy of the flag and the
+  // slot list comes from the host's options strings. The checkbox is
+  // disabled for joiners, so any invocation here without host status is a
+  // stray gadget message and must not touch the game.
+  if (myGame && myGame->amIHost())
   {
     Bool checked = GadgetCheckBoxIsChecked( checkboxEnforceRandom );
     myGame->setEnforceRandom( checked );
@@ -1351,6 +1373,9 @@ void updateGameOptions()
 			LanPositionStartSpots();
 		GadgetStaticTextSetText(textEntryMapDisplay, mapDisplayName);
 
+    // These setters re-fire the gadgets' click messages; the guard keeps the
+    // click handlers from mutating the game state we are displaying.
+    s_isSyncingUI = TRUE;
     GadgetCheckBoxSetChecked( checkboxLimitSuperweapons, theGame->getSuperweaponRestriction() != 0 );
     if (checkboxEnforceRandom)
       GadgetCheckBoxSetChecked( checkboxEnforceRandom, theGame->getEnforceRandom() );
@@ -1365,6 +1390,7 @@ void updateGameOptions()
         break;
       }
     }
+    s_isSyncingUI = FALSE;
 
     DEBUG_ASSERTCRASH( index < itemCount, ("Could not find new starting cash amount %d in list", theGame->getStartingCash().countMoney() ) );
 	}
