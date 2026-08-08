@@ -243,6 +243,20 @@ public:
 	const UpgradeTemplate *findUpgrade( const char* name ) const; ///< find and return upgrade by name
 	const UpgradeTemplate *findVeterancyUpgrade(VeterancyLevel level) const; ///< find and return upgrade by veterancy level
 
+	//
+	// Stable upgrade ids for replay/network commands. A NameKeyType is assigned at
+	// runtime in first-use order, so it is NOT stable across builds: one added early
+	// registration renumbers every upgrade and silently breaks every recorded upgrade
+	// purchase (the v1.5.2 replay regression). The upgrade's mask bit IS stable: it
+	// is dealt in template-creation order, which only Upgrade.ini content controls --
+	// the same property that lets m_objectUpgradesCompleted masks CRC-match across
+	// builds. Replay/network upgrade commands therefore carry the mask bit index.
+	//
+	Int getStableUpgradeId( const UpgradeTemplate *upgrade ) const; ///< mask bit index of this upgrade
+	const UpgradeTemplate *findUpgradeByStableId( Int id ) const; ///< inverse of getStableUpgradeId
+	/// Resolve an upgrade recorded by a pre-V154 build as a raw namekey; see Recorder::getReplayLegacyUpgradeKeyDelta()
+	const UpgradeTemplate *findUpgradeByLegacyReplayKey( Int key, Int keyDelta ) const;
+
 	UpgradeTemplate *newUpgrade( const AsciiString& name );				///< allocate, link, and return new upgrade
 
 	/// does this player have all the necessary things to make this upgrade

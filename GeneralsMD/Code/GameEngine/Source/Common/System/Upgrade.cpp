@@ -345,6 +345,59 @@ const UpgradeTemplate *UpgradeCenter::findUpgradeByKey( NameKeyType key ) const
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Mask bit index of this upgrade: the stable, cross-build upgrade identifier used in
+	* replay/network upgrade commands. Dealt in template-creation order by newUpgrade(),
+	* so only Upgrade.ini content controls it (unlike namekeys, whose numbering shifts
+	* with any early nameToKey registration -- the v1.5.2 replay regression). */
+//-------------------------------------------------------------------------------------------------
+Int UpgradeCenter::getStableUpgradeId( const UpgradeTemplate *upgrade ) const
+{
+	if( upgrade == nullptr )
+		return -1;
+
+	const UpgradeMaskType& mask = upgrade->getUpgradeMask();
+	Int bit;
+	for( bit = 0; bit < UPGRADE_MAX_COUNT; ++bit )
+		if( mask.test( bit ) )
+			return bit;
+
+	return -1;
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Inverse of getStableUpgradeId */
+//-------------------------------------------------------------------------------------------------
+const UpgradeTemplate *UpgradeCenter::findUpgradeByStableId( Int id ) const
+{
+	if( id < 0 || id >= UPGRADE_MAX_COUNT )
+		return nullptr;
+
+	const UpgradeTemplate *upgrade;
+	for( upgrade = m_upgradeList; upgrade; upgrade = upgrade->friend_getNext() )
+		if( upgrade->getUpgradeMask().test( id ) )
+			return upgrade;
+
+	return nullptr;
+}
+
+//-------------------------------------------------------------------------------------------------
+/** Resolve an upgrade recorded by a pre-V154 build, which wrote the upgrade's raw
+	* NameKeyType into the replay. Namekeys are dealt in first-use order, so the
+	* recorded value belongs to the RECORDING environment's numbering: binary
+	* registrations plus every name registered by data parsed before Upgrade.ini
+	* (mod packages shift it too). Playback always loads the recording's data
+	* package, so the data-driven registrations shift both sides equally and the
+	* only asymmetry left is the binary's own early registrations. keyDelta is
+	* that binary difference (ours minus the recording build's), derived from the
+	* recorded version by RecorderClass; the recorded key plus the delta is the
+	* same upgrade under OUR numbering. */
+//-------------------------------------------------------------------------------------------------
+const UpgradeTemplate *UpgradeCenter::findUpgradeByLegacyReplayKey( Int key, Int keyDelta ) const
+{
+	return findUpgradeByKey( (NameKeyType)(key + keyDelta) );
+}
+
+//-------------------------------------------------------------------------------------------------
 /** Find upgrade by name */
 //-------------------------------------------------------------------------------------------------
 const UpgradeTemplate *UpgradeCenter::findUpgrade( const AsciiString& name ) const

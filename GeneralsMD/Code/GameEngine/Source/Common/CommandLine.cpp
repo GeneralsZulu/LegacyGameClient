@@ -489,6 +489,7 @@ Int parseReplayEpoch(char *args[], int num)
 		else if (a.compareNoCase("v121") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V121;
 		else if (a.compareNoCase("v128") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V128;
 		else if (a.compareNoCase("v130") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V130;
+		else if (a.compareNoCase("v154") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V154;
 		else if (a.compareNoCase("current") == 0) epoch = RecorderClass::REPLAY_EPOCH_CURRENT;
 		else                                      epoch = atoi(a.str());
 		RecorderClass::setReplayEpochOverride(epoch);
