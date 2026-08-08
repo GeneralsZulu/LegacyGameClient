@@ -478,8 +478,10 @@ protected:
 	// actually deal out the damage.
 	void dealDamageInternal(ObjectID sourceID, ObjectID victimID, const Coord3D *pos, const WeaponBonus& bonus, Bool isProjectileDetonation) const;
 	void trimOldHistoricDamage() const;
+	void trimOldHistoricDamageRetail() const;
 	void trimTriggeredHistoricDamage() const;
 	void processHistoricDamage(const Object* source, const Coord3D* pos) const;
+	void processHistoricDamageRetail(const Object* source, const Coord3D* pos) const;
 
 private:
 

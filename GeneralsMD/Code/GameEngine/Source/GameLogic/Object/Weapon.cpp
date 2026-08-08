@@ -45,6 +45,7 @@
 #include "Common/INI.h"
 #include "Common/PerfTimer.h"
 #include "Common/Player.h"
+#include "Common/Recorder.h"
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
 #include "Common/Xfer.h"
@@ -73,6 +74,7 @@
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/AssistedTargetingUpdate.h"
 #include "GameLogic/Module/ProjectileStreamUpdate.h"
+#include "GameLogic/Module/SpawnBehavior.h"
 #include "GameLogic/Module/PhysicsUpdate.h"
 #include "GameLogic/TerrainLogic.h"
 
@@ -599,7 +601,19 @@ Real WeaponTemplate::estimateWeaponTemplateDamage(
   // hmm.. must be shooting a firebase or such, if there is noone home to take the bullet, return 0!
   if ( victimObj->isKindOf( KINDOF_STRUCTURE) && damageType == DAMAGE_SNIPER )
   {
-    if ( victimObj->getContain() )
+    if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+    {
+      // Snipers may only target structures holding occupants or live slaves,
+      // so empty Stinger Sites are no longer snipeable (community patch).
+      // Introduced in 1.5.4; older replays only checked garrison containers,
+      // so gate on the epoch to keep those replays deterministic.
+      const Bool hasOccupants = victimObj->getContain() && victimObj->getContain()->getContainCount() > 0;
+      const Bool hasSlaves = victimObj->getSpawnBehaviorInterface() && victimObj->getSpawnBehaviorInterface()->getSlaveCount() > 0;
+
+      if (!hasOccupants && !hasSlaves)
+        return 0.0f;
+    }
+    else if ( victimObj->getContain() )
     {
       if ( victimObj->getContain()->getContainCount() == 0 )
         return 0.0f;
@@ -1171,8 +1185,8 @@ UnsignedInt WeaponTemplate::fireWeaponTemplate
 }
 
 //-------------------------------------------------------------------------------------------------
-#if RETAIL_COMPATIBLE_CRC || PRESERVE_RETAIL_BEHAVIOR
-void WeaponTemplate::trimOldHistoricDamage() const
+// Retail firestorm accounting, kept for pre-1.5.4 replay epochs.
+void WeaponTemplate::trimOldHistoricDamageRetail() const
 {
 	UnsignedInt expirationDate = TheGameLogic->getFrame() - TheGlobalData->m_historicDamageLimit;
 	while (!m_historicDamage.empty())
@@ -1191,7 +1205,8 @@ void WeaponTemplate::trimOldHistoricDamage() const
 		}
 	}
 }
-#else
+
+//-------------------------------------------------------------------------------------------------
 void WeaponTemplate::trimOldHistoricDamage() const
 {
 	if (m_historicDamage.empty())
@@ -1210,7 +1225,6 @@ void WeaponTemplate::trimOldHistoricDamage() const
 			break;
 	}
 }
-#endif
 
 //-------------------------------------------------------------------------------------------------
 void WeaponTemplate::trimTriggeredHistoricDamage() const
@@ -1234,8 +1248,8 @@ static Bool is2DDistSquaredLessThan(const Coord3D& a, const Coord3D& b, Real dis
 }
 
 //-------------------------------------------------------------------------------------------------
-#if RETAIL_COMPATIBLE_CRC || PRESERVE_RETAIL_BEHAVIOR
-void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* pos) const
+// Retail firestorm triggering, kept for pre-1.5.4 replay epochs.
+void WeaponTemplate::processHistoricDamageRetail(const Object* source, const Coord3D* pos) const
 {
 	//
 	/** @todo We need to rewrite the historic stuff ... if you fire 5 missiles, and the 5th,
@@ -1246,7 +1260,7 @@ void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* 
 
 	if( m_historicBonusCount > 0 && m_historicBonusWeapon != this )
 	{
-		trimOldHistoricDamage();
+		trimOldHistoricDamageRetail();
 
 		Real radSqr = m_historicBonusRadius * m_historicBonusRadius;
 		Int count = 0;
@@ -1283,9 +1297,18 @@ void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* 
 
 	}
 }
-#else
+
+//-------------------------------------------------------------------------------------------------
 void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* pos) const
 {
+	// Reliable firestorm triggering (community patch) shipped in 1.5.4; older
+	// replays keep the retail accounting so they stay deterministic.
+	if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+	{
+		processHistoricDamageRetail(source, pos);
+		return;
+	}
+
 	if (m_historicBonusCount > 0 && m_historicBonusWeapon != this)
 	{
 		trimOldHistoricDamage();
@@ -1320,7 +1343,6 @@ void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* 
 		m_historicDamage.push_back(HistoricWeaponDamageInfo(TheGameLogic->getFrame(), *pos));
 	}
 }
-#endif
 
 //-------------------------------------------------------------------------------------------------
 void WeaponTemplate::dealDamageInternal(ObjectID sourceID, ObjectID victimID, const Coord3D *pos, const WeaponBonus& bonus, Bool isProjectileDetonation) const

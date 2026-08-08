@@ -116,19 +116,16 @@ zulu-exe-log: $(TMP_EXE_LOG)
 
 zulu-launcher: $(TMP_LAUNCHER)
 
-# Stage the BIG by seeding an empty archive then adding every file in
-# assets/, mapping each relative path to a backslash-separated archive path
-# (Data/INI/Foo.ini -> Data\INI\Foo.ini). We rebuild from scratch each time
-# so removed assets do not linger inside the archive.
+# Stage the BIG by packing every file in assets/ in one pass, mapping each
+# relative path to a backslash-separated archive path (Data/INI/Foo.ini ->
+# Data\INI\Foo.ini). Rebuilt from scratch each time so removed assets do not
+# linger inside the archive. The old per-file `big add` loop rewrote the
+# archive once per file, which took ~12 minutes once the community patch INI
+# tree (2000+ files) moved into assets/ (and its expanded command line
+# overflowed ARG_MAX).
 $(TMP_BIG): $(ASSET_FILES) | $(TMP_DIR)
 	@rm -f $@
-	@printf $(EMPTY_BIG_BYTES) > $@
-	@for f in $(ASSET_FILES); do \
-		rel=$${f#$(ASSETS_DIR)/}; \
-		archive_path=$$(printf '%s' "$$rel" | tr '/' '\\'); \
-		echo "  big add $$archive_path"; \
-		$(BIG) add $@ "$$f" "$$archive_path" || exit $$?; \
-	done
+	@python3 scripts/pack_big.py $(ASSETS_DIR) $@
 
 # Drive the docker build for the Zero Hour exe and copy the result into the
 # tmp dir under its installer name. We always invoke docker-build.sh so the

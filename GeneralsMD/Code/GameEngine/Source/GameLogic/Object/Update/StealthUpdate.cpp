@@ -38,6 +38,7 @@
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/Radar.h"
+#include "Common/Recorder.h"
 #include "Common/Team.h"
 #include "Common/ThingTemplate.h"
 #include "Common/ThingFactory.h"
@@ -312,10 +313,11 @@ Bool StealthUpdate::allowedToStealth( Object *stealthOwner ) const
 
 	if( flags & STEALTH_NOT_WHILE_TAKING_DAMAGE && self->getBodyModule()->getLastDamageTimestamp() >= now - 1 )
 	{
-#if PRESERVE_RETAIL_BEHAVIOR
-		//Only if it's not healing damage.
-		if( self->getBodyModule()->getLastDamageInfo()->in.m_damageType != DAMAGE_HEALING )
-#endif
+		// Since 1.5.4 healing no longer stamps the damage timestamp (community
+		// patch, paired with the ActiveBody::attemptHealing change), so the
+		// healing exemption here is only kept for older replay epochs.
+		if( (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+				|| self->getBodyModule()->getLastDamageInfo()->in.m_damageType != DAMAGE_HEALING )
 		{
 			//Can't stealth if we just took damage in the last frame or two.
 			if( self->getBodyModule()->getLastDamageTimestamp() != 0xffffffff )
