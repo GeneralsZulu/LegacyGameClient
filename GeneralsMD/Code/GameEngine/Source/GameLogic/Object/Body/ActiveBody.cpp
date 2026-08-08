@@ -37,6 +37,7 @@
 #include "Common/GlobalData.h"
 #include "Common/PlayerList.h"
 #include "Common/Team.h"
+#include "Common/Recorder.h"
 #include "Common/Thing.h"
 #include "Common/ThingTemplate.h"
 #include "Common/Xfer.h"
@@ -842,9 +843,12 @@ void ActiveBody::attemptHealing( DamageInfo *damageInfo )
 		//(object pointer loses scope as soon as atteptdamage's caller ends)
 		m_lastDamageInfo = *damageInfo;
 		m_lastDamageCleared = false;
-#if PRESERVE_RETAIL_BEHAVIOR
-		m_lastDamageTimestamp = TheGameLogic->getFrame();
-#endif
+		// Healing no longer stamps the damage timestamp, so structures can
+		// stealth while being repaired (community patch, paired with the
+		// StealthUpdate::allowedToStealth change). Introduced in 1.5.4; gate on
+		// the epoch to keep older replays deterministic.
+		if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+			m_lastDamageTimestamp = TheGameLogic->getFrame();
 		m_lastHealingTimestamp = TheGameLogic->getFrame();
 
 		// if our health has gone UP then do run the damage module callback

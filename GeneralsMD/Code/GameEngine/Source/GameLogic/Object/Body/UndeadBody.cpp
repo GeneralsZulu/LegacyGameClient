@@ -30,6 +30,7 @@
 // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 #include "Common/Xfer.h"
+#include "Common/Recorder.h"
 #include "GameLogic/Module/UndeadBody.h"
 
 #include "GameLogic/Object.h"
@@ -79,14 +80,19 @@ void UndeadBody::attemptDamage( DamageInfo *damageInfo )
 	// remaining, then go ahead and take it.
 	Bool shouldStartSecondLife = FALSE;
 
+	// Apply damage modifiers when calculating lethal damage, so the second life
+	// triggers at the right time (community patch). Introduced in 1.5.4; older
+	// replays compared the raw damage amount, so gate on the epoch to keep those
+	// replays deterministic.
+	Real lethalAmount;
+	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+		lethalAmount = estimateDamage(damageInfo->in);
+	else
+		lethalAmount = damageInfo->in.m_amount;
+
 	if( damageInfo->in.m_damageType != DAMAGE_UNRESISTABLE
 			&& !m_isSecondLife
-#if RETAIL_COMPATIBLE_CRC || PRESERVE_RETAIL_BEHAVIOR
-			&& damageInfo->in.m_amount >= getHealth()
-#else
-			// TheSuperHackers @bugfix Stubbjax 20/09/2025 Battle Buses now correctly apply damage modifiers when calculating lethal damage
-			&& estimateDamage(damageInfo->in) >= getHealth()
-#endif
+			&& lethalAmount >= getHealth()
 			&& IsHealthDamagingDamage(damageInfo->in.m_damageType)
 			)
 	{
