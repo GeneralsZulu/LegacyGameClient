@@ -31,6 +31,12 @@
 #define PRESERVE_RETAIL_SCRIPTED_CAMERA (1) // Retain scripted camera behavior present in retail Generals 1.08 and Zero Hour 1.04
 #endif
 
+// Community patch (client-side only, does not affect replay determinism):
+// drag-selection no longer reveals whether an enemy transport has occupants.
+#ifndef PRESERVE_OCCUPANT_DETECTION_VIA_DRAG_SELECTION
+#define PRESERVE_OCCUPANT_DETECTION_VIA_DRAG_SELECTION (0)
+#endif
+
 #ifndef RETAIL_COMPATIBLE_CRC
 #define RETAIL_COMPATIBLE_CRC (1) // Game is expected to be CRC compatible with retail Generals 1.08, Zero Hour 1.04
 #endif
