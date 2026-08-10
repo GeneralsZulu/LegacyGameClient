@@ -81,11 +81,11 @@ void UndeadBody::attemptDamage( DamageInfo *damageInfo )
 	Bool shouldStartSecondLife = FALSE;
 
 	// Apply damage modifiers when calculating lethal damage, so the second life
-	// triggers at the right time (community patch). Introduced in 1.5.4; older
+	// triggers at the right time (community patch). Introduced in 1.5.5; older
 	// replays compared the raw damage amount, so gate on the epoch to keep those
 	// replays deterministic.
 	Real lethalAmount;
-	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+	if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V155))
 		lethalAmount = estimateDamage(damageInfo->in);
 	else
 		lethalAmount = damageInfo->in.m_amount;

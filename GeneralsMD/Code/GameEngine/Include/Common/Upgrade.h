@@ -254,7 +254,7 @@ public:
 	//
 	Int getStableUpgradeId( const UpgradeTemplate *upgrade ) const; ///< mask bit index of this upgrade
 	const UpgradeTemplate *findUpgradeByStableId( Int id ) const; ///< inverse of getStableUpgradeId
-	/// Resolve an upgrade recorded by a pre-V154 build as a raw namekey; see Recorder::getReplayLegacyUpgradeKeyDelta()
+	/// Resolve an upgrade recorded by a pre-V155 build as a raw namekey; see Recorder::getReplayLegacyUpgradeKeyDelta()
 	const UpgradeTemplate *findUpgradeByLegacyReplayKey( Int key, Int keyDelta ) const;
 
 	UpgradeTemplate *newUpgrade( const AsciiString& name );				///< allocate, link, and return new upgrade

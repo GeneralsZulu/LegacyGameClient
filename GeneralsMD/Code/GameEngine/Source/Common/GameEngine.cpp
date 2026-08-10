@@ -782,6 +782,15 @@ void GameEngine::init()
 			}
 		}
 
+		// Replay Theater's -watchReplay is deliberately NOT started here. This
+		// function ends with resetSubsystems(), which would tear the game
+		// straight back down: the map survives but the player list does not,
+		// leaving an empty map with nobody on it. Playback is kicked off from
+		// Shell::showShell() instead, on the first frame of the main loop --
+		// the same moment the replay menu would have started it. (The .map
+		// case above sidesteps the same trap by posting MSG_NEW_GAME rather
+		// than starting a game inline.)
+
 		//
 		if (TheMapCache && TheGlobalData->m_shellMapOn)
 		{

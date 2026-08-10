@@ -400,12 +400,17 @@ static RecorderClass::ReplayEpoch epochFromSemanticVersion(Int major, Int minor,
 		if (patch <= 7) return RecorderClass::REPLAY_EPOCH_V121;    // 1.2.1 - 1.2.7
 		return RecorderClass::REPLAY_EPOCH_V128;                    // 1.2.8, 1.2.9
 	}
-	if (minor < 5 || (minor == 5 && patch <= 3))
-		return RecorderClass::REPLAY_EPOCH_V130;      // 1.3.0 - 1.5.3
-	return RecorderClass::REPLAY_EPOCH_V154;          // 1.5.4+
+	// 1.5.4 was cut at 9e68b663e (Aug 4 2026) and carries none of the
+	// stable-upgrade-id / community-patch sim changes -- those landed after it
+	// and first shipped in 1.5.5. (The commit that introduced them bumped
+	// APPVERSION 1.5.2 -> 1.5.4 and named the epoch V154, which is why 1.5.4
+	// replays mismatched in 1.5.5; corrected in 1.5.6. There was never a 1.5.3.)
+	if (minor < 5 || (minor == 5 && patch <= 4))
+		return RecorderClass::REPLAY_EPOCH_V130;      // 1.3.0 - 1.5.4
+	return RecorderClass::REPLAY_EPOCH_V155;          // 1.5.5+
 }
 
-// Pre-V154 replays carry upgrade purchases as raw NameKeyType values. The
+// Pre-V155 replays carry upgrade purchases as raw NameKeyType values. The
 // numbering belongs to the RECORDING environment (binary registrations + all
 // names registered by data parsed before Upgrade.ini). Playback loads the
 // recording's data package, so the data half cancels out; what remains is the
@@ -725,6 +730,21 @@ void RecorderClass::stopPlayback() {
 	if (!m_doingAnalysis)
 	{
 		TheGameLogic->exitGame();
+	}
+
+	// A Replay Theater process is booted with some older release's data
+	// mounted purely to watch one replay, so there is nowhere sensible for it
+	// to go afterwards: dropping to the shell would let the player start a
+	// live game on rules nobody else has. Quit instead and let ZuluLauncher
+	// bring the picker back up.
+	//
+	// This covers the ways playback ends inside the recorder: the last frame,
+	// a short read, the upload trailer. Quitting out from the in-game menu
+	// never reaches here -- it returns to the shell instead, which is why
+	// Shell::showShell carries the same guard.
+	if (TheGlobalData->m_replayTheater && TheGameEngine != nullptr)
+	{
+		TheGameEngine->setQuitting(TRUE);
 	}
 }
 

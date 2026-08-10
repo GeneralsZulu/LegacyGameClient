@@ -313,10 +313,10 @@ Bool StealthUpdate::allowedToStealth( Object *stealthOwner ) const
 
 	if( flags & STEALTH_NOT_WHILE_TAKING_DAMAGE && self->getBodyModule()->getLastDamageTimestamp() >= now - 1 )
 	{
-		// Since 1.5.4 healing no longer stamps the damage timestamp (community
+		// Since 1.5.5 healing no longer stamps the damage timestamp (community
 		// patch, paired with the ActiveBody::attemptHealing change), so the
 		// healing exemption here is only kept for older replay epochs.
-		if( (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+		if( (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V155))
 				|| self->getBodyModule()->getLastDamageInfo()->in.m_damageType != DAMAGE_HEALING )
 		{
 			//Can't stealth if we just took damage in the last frame or two.

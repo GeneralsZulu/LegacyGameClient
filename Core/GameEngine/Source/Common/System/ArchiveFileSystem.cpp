@@ -245,6 +245,30 @@ void ArchiveFileSystem::loadZuluBigsFrom(const AsciiString& dir)
 	}
 }
 
+// Hand-rolled component search: AsciiString::find only takes a single
+// character, and VC6 has no case-insensitive strstr.
+Bool isInReplayDataFolder(const AsciiString& path)
+{
+	const char *const needle = ARCHIVE_REPLAY_DATA_FOLDER;
+	const Int needleLen = (Int)strlen(needle);
+	const char *const start = path.str();
+	const char *p;
+
+	for (p = start; *p != '\0'; ++p)
+	{
+		// Must begin a path component...
+		if (p != start && *(p - 1) != '\\' && *(p - 1) != '/')
+			continue;
+		if (strnicmp(p, needle, needleLen) != 0)
+			continue;
+		// ...and be the whole component, not a prefix of a longer name.
+		const char after = *(p + needleLen);
+		if (after == '\\' || after == '/')
+			return TRUE;
+	}
+	return FALSE;
+}
+
 void ArchiveFileSystem::loadMods()
 {
 	// The fork's own data must override retail archives even when the game

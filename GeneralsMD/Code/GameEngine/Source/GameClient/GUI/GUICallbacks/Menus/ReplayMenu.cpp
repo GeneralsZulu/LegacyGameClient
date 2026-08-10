@@ -36,6 +36,7 @@
 #include "Common/GameEngine.h"
 #include "Common/GameState.h"
 #include "Common/Recorder.h"
+#include "Common/ReplayDataVersions.h"
 #include "Common/version.h"
 #include "GameClient/WindowLayout.h"
 #include "GameClient/Gadget.h"
@@ -572,6 +573,25 @@ void reallyLoadReplay()
 	}
 }
 
+// True when this replay wants game data other than what this process has
+// mounted. An unrecognised version is not treated as a mismatch: we cannot
+// prove it needs different data, and refusing to open replays we simply have
+// no row for would be worse than letting the player try.
+static Bool needsOtherReplayData(const RecorderClass::ReplayHeader& header)
+{
+	AsciiString versionString;
+	versionString.translate(header.versionString);
+
+	AsciiString archive;
+	ReplayDataVersions::Resolution resolution =
+		ReplayDataVersions::resolve(versionString, header.iniCRC, archive);
+
+	if (resolution == ReplayDataVersions::RESOLVED_UNKNOWN)
+		return FALSE;
+
+	return !ReplayDataVersions::isCurrentlyMounted(resolution, archive);
+}
+
 static void loadReplay(UnicodeString filename)
 {
 	AsciiString asciiFilename;
@@ -598,6 +618,28 @@ static void loadReplay(UnicodeString filename)
 		UnicodeString body = TheGameText->FETCH_OR_SUBSTITUTE("GUI:ReplayMapNotFound", L"This replay cannot be loaded because the map was not found on this device.");
 
 		MessageBoxOk(title, body, nullptr);
+	}
+	else if(needsOtherReplayData(header))
+	{
+		// TheSuperHackers @feature This replay was recorded against a release
+		// whose data differs from ours, so re-simulating it here will desync
+		// no matter how faithfully the engine behaves. The right data can only
+		// be mounted at process start (see ReplayDataVersions.h), so point the
+		// player at Replay Theater, which relaunches with it.
+		//
+		// Still offer to play it here: watching an old replay approximately is
+		// what this menu did before, it is often all someone wants, and the
+		// warning is what was actually missing. Pressing OK loads it anyway.
+
+		UnicodeString title = TheGameText->FETCH_OR_SUBSTITUTE("GUI:ReplayNeedsTheaterTitle", L"OLDER REPLAY");
+		UnicodeString body = TheGameText->FETCH_OR_SUBSTITUTE("GUI:ReplayNeedsTheater",
+			L"This replay was recorded on an earlier version of Zulu, which used different game data. "
+			L"Played here it will go out of sync and stop matching what actually happened.\n\n"
+			L"To watch it properly, use the \"Zulu Replay Theater\" shortcut, which starts the game "
+			L"with that version's data loaded.\n\n"
+			L"Play it here anyway?");
+
+		MessageBoxOkCancel(title, body, reallyLoadReplay, nullptr);
 	}
 	else if(!TheRecorder->replayMatchesGameVersion(header))
 	{

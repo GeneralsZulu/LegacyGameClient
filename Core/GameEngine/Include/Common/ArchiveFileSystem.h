@@ -81,6 +81,17 @@ class ArchivedDirectoryInfo;
 class DetailedArchivedDirectoryInfo;
 class ArchivedFileInfo;
 
+// TheSuperHackers @feature Folder holding one data archive per past release,
+// so old replays can be re-simulated against the data they were recorded on
+// (see GeneralsMD Common/ReplayDataVersions.h for the full story). Exactly one
+// of them is ever mounted, named explicitly via -mod, so the automatic *.big
+// sweeps -- which recurse -- have to leave the whole folder alone.
+#define ARCHIVE_REPLAY_DATA_FOLDER "ReplayData"
+
+// True if 'path' has ARCHIVE_REPLAY_DATA_FOLDER as one of its directory
+// components.
+Bool isInReplayDataFolder(const AsciiString& path);
+
 typedef std::map<AsciiString, DetailedArchivedDirectoryInfo> DetailedArchivedDirectoryInfoMap; // Archived directory name to detailed archived directory info
 typedef std::map<AsciiString, ArchivedDirectoryInfo> ArchivedDirectoryInfoMap; // Archived directory name to archived directory info
 typedef std::map<AsciiString, ArchivedFileInfo> ArchivedFileInfoMap; // Archived file name to archived file info

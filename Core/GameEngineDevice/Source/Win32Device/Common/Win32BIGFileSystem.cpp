@@ -226,6 +226,17 @@ Bool Win32BIGFileSystem::loadBigFilesFromDirectory(AsciiString dir, AsciiString 
 		}
 #endif
 
+		// TheSuperHackers @bugfix The ReplayData folder holds one archive per
+		// past release so old replays can be played back against the data they
+		// were recorded on (see GeneralsMD Common/ReplayDataVersions.h).
+		// Exactly one is ever mounted, named explicitly via -mod. This sweep
+		// is recursive, so without the skip it would mount all of them at once
+		// wherever that folder happens to sit under a scanned directory.
+		if (isInReplayDataFolder(*it)) {
+			it++;
+			continue;
+		}
+
 		ArchiveFile *archiveFile = openArchiveFile((*it).str());
 
 		if (archiveFile != nullptr) {

@@ -635,6 +635,17 @@ public:
 	AsciiString m_modDir;
 	AsciiString m_modBIG;
 
+	// Replay Theater (-watchReplay / -replaytheater). Watching a replay from
+	// an older release means booting with that release's data mounted, which
+	// can only be decided before startup, so ZuluLauncher relaunches us with
+	// the right -mod plus these. m_watchReplayFile is a path relative to the
+	// user's Replays folder; m_replayTheater says this process exists solely
+	// to play it, and must exit rather than fall through to the shell (where
+	// the player could start a live game on data that does not match anyone
+	// else's). See installer/replay_data_versions.csv.
+	AsciiString m_watchReplayFile;
+	Bool        m_replayTheater;
+
 	// Zulu-side debug toggle, flipped on by passing -zulu_debug on the
 	// command line (the launcher forwards its own argv to the game exe
 	// verbatim, so this works whether you launch the exe directly or
