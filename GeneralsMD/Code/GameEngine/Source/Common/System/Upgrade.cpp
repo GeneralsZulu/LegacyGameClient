@@ -381,7 +381,7 @@ const UpgradeTemplate *UpgradeCenter::findUpgradeByStableId( Int id ) const
 }
 
 //-------------------------------------------------------------------------------------------------
-/** Resolve an upgrade recorded by a pre-V154 build, which wrote the upgrade's raw
+/** Resolve an upgrade recorded by a pre-V155 build, which wrote the upgrade's raw
 	* NameKeyType into the replay. Namekeys are dealt in first-use order, so the
 	* recorded value belongs to the RECORDING environment's numbering: binary
 	* registrations plus every name registered by data parsed before Upgrade.ini

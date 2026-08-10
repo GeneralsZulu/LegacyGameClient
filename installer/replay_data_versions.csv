@@ -1,0 +1,77 @@
+# Zulu replay data map: which game data a recorded replay needs in order to
+# re-simulate bit-exactly.
+#
+# Why this file exists
+# --------------------
+# A replay is a command log, not a recording of what happened. Playing it back
+# re-runs the simulation, so the sim must see the same rules it saw when the
+# game was played: same engine behavior (handled by the replay determinism
+# epochs in Recorder.h) AND the same data. Zulu's own data ships inside
+# Zulu.big and has changed across releases -- most drastically in 1.5.5, which
+# folded in the community balance patch and, with it, a wholesale restructure
+# of the object INI tree. Data from the wrong release desyncs the playback.
+#
+# So we ship every historical Zulu.big alongside the current one and mount the
+# matching one when watching an old replay. Data is chosen once at startup
+# (ArchiveFileSystem::loadMods runs before any INI is parsed), which is why
+# this is a relaunch -- see ZuluLauncher's Replay Theater mode.
+#
+# Columns
+# -------
+#   match_kind   'version' matches the replay header's version string exactly.
+#                'inicrc' matches its iniCRC (hex, no 0x) and is only consulted
+#                when no version row matched -- it is how dev/prerelease builds
+#                are identified, since they all report a non-semantic version
+#                string like "Version 1.04".
+#   match_value  The version string or iniCRC to match.
+#   big_file     Leaf name under the ReplayData folder, or one of:
+#                  @default  this release's own Zulu.big; no relaunch needed
+#                  @none     retail base data only; run with no -mod at all
+#   git_ref      Build-time only: the tree-ish whose assets/ tree produces
+#                big_file. Consumed by scripts/build_replay_bigs.py; ignored
+#                at runtime. Empty for @default / @none.
+#   note         Free text.
+#
+# Verifying a row: build the big from git_ref and compare it against the one
+# inside that release's shipped installer. The archives are not byte-identical
+# (entry order differs from the retired per-file `big add` loop) but the file
+# set and every file's contents must match; entry order is inert because the
+# engine enumerates archive contents through sorted std::map/std::set.
+# Confirmed this way for 1.4.0 and 1.5.2 against Zulu_Setup_v1.4.0.exe and
+# Zulu_Setup_v1.5.2.exe.
+#
+# The 1.0.0-1.3.3 git_refs are the assets tree oids recorded in
+# tools/replay-reparse/VERSION_MAP.csv, which were identified by matching the
+# loaded iniCRC against the iniCRC in real replays from that release. Prefer
+# that empirical evidence over "the commit that bumped APPVERSION": the two
+# disagree for some releases, because a release was not always built from the
+# bump commit itself.
+#
+match_kind,match_value,big_file,git_ref,note
+version,1.0.0,Zulu_v1.0.0.big,a01f63337dd0da963c38b04e988de95df4fe4137,
+version,1.1.0,Zulu_v1.1.0.big,1cf50c255a6804d04301256bd587f03f45ca8db0,
+version,1.1.1,Zulu_v1.2.0.big,6730d4324b45b657f159a5f32af461fdea6d2d06,same assets as 1.2.0/1.2.1
+version,1.2.0,Zulu_v1.2.0.big,6730d4324b45b657f159a5f32af461fdea6d2d06,
+version,1.2.1,Zulu_v1.2.0.big,6730d4324b45b657f159a5f32af461fdea6d2d06,same assets as 1.2.0
+version,1.2.2,Zulu_v1.2.2.big,286b980d4d0e628542d2797ad8d7804d815bd97d,
+version,1.2.3,Zulu_v1.2.3.big,06449858104f74211d97639b405bd70d2f1d92c7,
+version,1.2.4,Zulu_v1.2.4.big,d6d1c7555e679d84b707d2b2f515d96a35f66bbf,
+version,1.2.6,Zulu_v1.2.6.big,6ad0f30a2c4735b9ae476eb4bf4bee17a3c2e377,
+version,1.2.7,Zulu_v1.2.7.big,8429540fa8ac56b73f56f468789017d741695e31,
+version,1.2.8,Zulu_v1.2.7.big,8429540fa8ac56b73f56f468789017d741695e31,same assets as 1.2.7
+version,1.2.9,Zulu_v1.2.9.big,e8156993ad776602f3e3d372a51bd19fcfab00ab,
+version,1.3.0,Zulu_v1.3.0.big,615fd005a78e224e8819fb6c57a6e89d5a8a90ca,
+version,1.3.1,Zulu_v1.3.1.big,9d95e12f5de5468cf32e744bb34dc0badfb8bc40,
+version,1.3.2,Zulu_v1.3.2.big,739707e56ad05381de1b416130cb2a5d966672bd,
+version,1.3.3,Zulu_v1.3.3.big,ce74567f83b43d56aa94c79bdc82e4543aa27697,
+version,1.4.0,Zulu_v1.4.0.big,f7c4d3f7e,verified against Zulu_Setup_v1.4.0.exe
+version,1.5.0,Zulu_v1.5.0.big,a47d59d63,
+version,1.5.1,Zulu_v1.5.0.big,a47d59d63,same assets as 1.5.0
+version,1.5.2,Zulu_v1.5.2.big,00be2a558,verified against Zulu_Setup_v1.5.2.exe
+version,1.5.4,Zulu_v1.5.2.big,00be2a558,1.5.4 was cut at 9e68b663e; assets unchanged since 1.5.2. No 1.5.3 was ever released.
+version,1.5.5,@default,,community balance patch data; same assets as 1.5.6
+version,1.5.6,@default,,
+inicrc,FEAAE3F3,@none,,retail 1.04 base data
+inicrc,20D46EAB,@none,,retail "1.06" client base data
+inicrc,D78B2801,Zulu_v1.1.0.big,1cf50c255a6804d04301256bd587f03f45ca8db0,dev build with v1.1.0 assets (verified)
+inicrc,C65B21AB,Zulu_v1.2.0.big,6730d4324b45b657f159a5f32af461fdea6d2d06,dev build with v1.2.0 assets (verified)

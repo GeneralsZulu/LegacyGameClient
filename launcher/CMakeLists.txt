@@ -56,11 +56,16 @@ endif()
 
 # wininet: HTTPS GET for latest.json and the installer download.
 # version: GetFileVersionInfo / VerQueryValue for the installed-version read.
-# shell32: ShellExecuteEx for handing off to the elevation-requesting installer.
+# shell32: ShellExecuteEx for handing off to the elevation-requesting installer,
+#          plus SHGetKnownFolderPath (resolved at runtime) for the user data dir.
+# comdlg32: GetOpenFileName for the Replay Theater replay picker.
+# ole32: CoTaskMemFree, for the SHGetKnownFolderPath result.
 target_link_libraries(z_launcher PRIVATE
     wininet
     version
     shell32
+    comdlg32
+    ole32
     advapi32
     user32
     kernel32

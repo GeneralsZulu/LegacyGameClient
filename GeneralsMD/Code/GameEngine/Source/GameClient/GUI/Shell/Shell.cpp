@@ -30,7 +30,9 @@
 // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
+#include "Common/GameEngine.h"
 #include "Common/RandomValue.h"
+#include "Common/Recorder.h"
 #include "GameClient/Shell.h"
 #include "GameClient/WindowLayout.h"
 #include "GameClient/GameWindowManager.h"
@@ -468,6 +470,49 @@ void Shell::showShell( Bool runInit )
 {
 	DEBUG_LOG(("Shell:showShell() - %s (%s)", TheGlobalData->m_initialFile.str(), (top())?top()->getFilename().str():"no top screen"));
 
+	// TheSuperHackers @feature Replay Theater (-watchReplay / -replaytheater).
+	//
+	// This is where the replay named on the command line actually starts.
+	// GameClient::update calls us on the first frame of the main loop via the
+	// post-intro path (m_afterIntro is set by -watchReplay), which is the same
+	// moment the replay menu would have called playbackFile. It deliberately
+	// does NOT happen in GameEngine::init: that function ends with
+	// resetSubsystems(), which wipes the player list out from under a game
+	// started inline and leaves an empty map with nobody on it.
+	//
+	// Any later call means the replay is over. In theater mode our data is
+	// some older release's, so there is nowhere safe to go -- the main menu
+	// would let the player start a live game on rules nobody else has. Quit
+	// and let ZuluLauncher bring its picker back up. This also catches the
+	// exits RecorderClass::stopPlayback does not see, notably quitting from
+	// the in-game menu.
+	if(TheGlobalData->m_watchReplayFile.isNotEmpty())
+	{
+		static Bool theaterPlaybackStarted = FALSE;
+		if(!theaterPlaybackStarted)
+		{
+			theaterPlaybackStarted = TRUE;
+			if(!TheRecorder->playbackFile(TheGlobalData->m_watchReplayFile)
+				&& TheGlobalData->m_replayTheater)
+			{
+				ReleaseFatalError("Zulu - Replay Could Not Be Opened",
+					"That replay could not be opened.\n\n"
+					"It may have been moved or deleted, or the file may be damaged.");
+				// does not return
+			}
+			return;
+		}
+
+		if(TheGlobalData->m_replayTheater)
+		{
+			if(TheGameEngine != nullptr)
+				TheGameEngine->setQuitting(TRUE);
+			return;
+		}
+		// Without -replaytheater the data is this release's own, so falling
+		// through to the normal shell is safe.
+	}
+
 	if(!TheGlobalData->m_initialFile.isEmpty() || !TheGlobalData->m_simulateReplays.empty())
 	{
 		return;
@@ -530,7 +575,8 @@ void Shell::showShell( Bool runInit )
 void Shell::showShellMap(Bool useShellMap )
 {
 	// we don't want any of this to show if we're loading straight into a file
-	if (TheGlobalData->m_initialFile.isNotEmpty() || !TheGameLogic || !TheGlobalData->m_simulateReplays.empty())
+	if (TheGlobalData->m_initialFile.isNotEmpty() || !TheGameLogic || !TheGlobalData->m_simulateReplays.empty()
+		|| TheGlobalData->m_watchReplayFile.isNotEmpty())
 		return;
 	if(useShellMap && TheGlobalData->m_shellMapOn)
 	{

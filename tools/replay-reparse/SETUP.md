@@ -55,7 +55,21 @@ Then with upload:
 | retail / ≤1.2.0 | retail | all below + pre-1.2.1 team timing (see note) |
 | 1.2.1–1.2.7 | v121 | poison/flame/crate/scaffold (pre-1.2.8), surrender off |
 | 1.2.8–1.2.9 | v128 | surrender off |
-| 1.3.0+ | v130 | none (= current) |
+| 1.3.0–1.5.4 | v130 | legacy upgrade namekeys, community patch sim fixes off |
+| 1.5.5+ | v155 | none (= current) |
+
+Note on 1.5.4: the community patch and the stable-upgrade-id change landed
+after 1.5.4 was cut and first shipped in **1.5.5**, but the commit that added
+them named the epoch `V154` and gated it at 1.5.4+, so 1.5.4 replays were
+re-simulated with the new behavior and desynced. Corrected in 1.5.6; the
+epoch is now `v155`. There was never a 1.5.3. See
+`docs/replay-data-versions.md`.
+
+**Data matters as much as the epoch.** From 1.5.5 the shipped `Zulu.big`
+carries the community balance patch, which also restructures the whole object
+INI tree, so a pre-1.5.5 replay cannot re-simulate against it. Keep using the
+per-version bigs below; the shipped client now does the same thing through
+`ReplayData\` + Replay Theater.
 
 Note: pre-1.2.1 team-create timing is not reverted (retail predates the change;
 ≤1.2.0 zulu builds with it aren't cleanly reproducible anyway — not in the corpus).

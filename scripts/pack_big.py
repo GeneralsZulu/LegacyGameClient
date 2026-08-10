@@ -5,9 +5,15 @@ Replaces the per-file `big add` loop in the Makefile's zulu-big rule: that
 tool rewrites the whole archive per added file, which is O(n^2) and took ~12
 minutes once the community patch INI tree (2000+ files) moved into assets/.
 
-Layout matches an archive built by sequential `big add` calls: header entries
-and data blobs in the same order as the input list, data packed contiguously
-after the header. Paths inside the archive use backslashes.
+Header entries and data blobs are written in sorted-path order, data packed
+contiguously after the header. Paths inside the archive use backslashes.
+
+That entry order differs from what the retired `big add` loop produced, so an
+archive rebuilt here is not byte-identical to one built by the old pipeline.
+It is equivalent, though: the engine reads archive contents through sorted
+std::map / std::set containers (ArchiveFileSystem.h, FilenameList), so nothing
+observes the order in the file. Verified against the shipped 1.4.0 and 1.5.2
+archives -- same file set, every file byte-identical.
 
 Usage: pack_big.py <assets-dir> <out.big>
 """
@@ -17,11 +23,7 @@ import struct
 import sys
 
 
-def main():
-    if len(sys.argv) != 3:
-        sys.exit(__doc__)
-    assets_dir, out_path = sys.argv[1], sys.argv[2]
-
+def pack(assets_dir, out_path):
     files = []
     for root, _dirs, names in os.walk(assets_dir):
         for name in names:
@@ -56,6 +58,12 @@ def main():
                 out.write(f.read())
 
     print("  packed %d files into %s (%d bytes)" % (len(entries), out_path, total_size))
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    pack(sys.argv[1], sys.argv[2])
 
 
 if __name__ == '__main__':

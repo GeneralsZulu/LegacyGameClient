@@ -22,12 +22,14 @@
 ;   one UAC click and no extra shortcut clicks.
 
 !define APPNAME       "Zulu"
-!define APPVERSION    "1.5.4"
+!define APPVERSION    "1.5.6"
 !define EXENAME       "generalszh_zulu.exe"
 !define LAUNCHERNAME  "ZuluLauncher.exe"
 !define BIGNAME       "Zulu.big"
 !define USERDATALEAF  "Command and Conquer Generals Zero Hour Data"
 !define LAUNCHARGS    "-mod Zulu.big"
+!define REPLAYDATALEAF "ReplayData"
+!define THEATERARGS   "-replaytheater"
 !define UNINSTREGKEY  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
 ; Source paths for the files that get packed into the installer. The
@@ -42,11 +44,19 @@
 !ifndef BIG_SOURCE
     !define BIG_SOURCE "..\${BIGNAME}"
 !endif
+!ifndef REPLAYDATA_SOURCE
+    !define REPLAYDATA_SOURCE "..\build\installer-tmp\${REPLAYDATALEAF}"
+!endif
 
 Name        "${APPNAME}"
 OutFile     "Zulu_Setup.exe"
 Unicode     true
 SetCompressor /SOLID lzma
+; The ReplayData archives are ~95% identical to one another and to Zulu.big,
+; but LZMA can only dedupe what fits in its window at once, and at the 8 MB
+; default they do not all fit. At 64 MB the 16 of them (71 MB on disk) add
+; ~470 KB to the installer. Costs compression-time memory only.
+SetCompressorDictSize 64
 
 ; Default install dir: prefer the location our own uninstaller wrote (so
 ; silent update-installs from the launcher land in the right place), then
@@ -99,13 +109,59 @@ Section "Install ${APPNAME}" SecInstall
     SetOutPath "$DOCUMENTS\${USERDATALEAF}"
     File "/oname=${BIGNAME}" "${BIG_SOURCE}"
 
+    ; --- Per-release data for old replays -------------------------------
+    ; A replay re-runs the simulation, so it needs the data its release
+    ; shipped; ours has changed across versions. These are the historical
+    ; Zulu.bigs plus the version map that says which one a given replay
+    ; needs. Replay Theater mounts the right one via -mod.
+    ;
+    ; Next to the exe, not under Documents: this is program data, one set per
+    ; machine. Under a user's Documents it was invisible to every other
+    ; account on the box, so Replay Theater came up empty for anyone who
+    ; hadn't personally run the installer.
+    ;
+    ; It has to stay in its own subfolder: the engine's install-dir "*.big"
+    ; sweep recurses, so without the ReplayData skip in ArchiveFileSystem it
+    ; would mount all 16 archives at once.
+    SetOutPath "$INSTDIR\${REPLAYDATALEAF}"
+    File /r "${REPLAYDATA_SOURCE}\*.*"
+
+    ; Reclaim the per-user copy written by 1.5.6 dev builds before the move.
+    RMDir /r "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
+
     ; --- Shortcuts -------------------------------------------------------
     ; Targets the launcher, not the game directly, so every cold start
     ; gets an update check. The launcher forwards the same args to the
     ; game when no update is pending.
+    ;
+    ; All-users context, so $DESKTOP is the Public desktop and $SMPROGRAMS the
+    ; common Start Menu: the install is machine-wide (Program Files + a
+    ; machine-wide ReplayData), so every account on the box should see it, not
+    ; just whoever happened to run the installer. Switched back to the current
+    ; user afterwards because $DOCUMENTS above must stay per-user.
+    SetShellVarContext all
+
+    ; Drop the per-user copies an older installer left on the installing
+    ; account's desktop, otherwise they sit alongside the all-users ones.
+    SetShellVarContext current
+    Delete "$DESKTOP\${APPNAME}.lnk"
+    Delete "$DESKTOP\${APPNAME} Replay Theater.lnk"
+    RMDir /r "$SMPROGRAMS\${APPNAME}"
+    SetShellVarContext all
+
     CreateShortcut "$DESKTOP\${APPNAME}.lnk" \
         "$INSTDIR\${LAUNCHERNAME}" \
         "${LAUNCHARGS}" \
+        "$INSTDIR\${LAUNCHERNAME}" 0
+
+    ; Replay Theater: same launcher, different mode. It asks which replay to
+    ; watch, works out which release's data that replay needs, and starts the
+    ; game with that data mounted. Separate shortcut rather than a button in
+    ; the game because data is chosen once at startup, before any INI is
+    ; parsed, so it cannot be swapped from inside a running game.
+    CreateShortcut "$DESKTOP\${APPNAME} Replay Theater.lnk" \
+        "$INSTDIR\${LAUNCHERNAME}" \
+        "${THEATERARGS}" \
         "$INSTDIR\${LAUNCHERNAME}" 0
 
     CreateDirectory "$SMPROGRAMS\${APPNAME}"
@@ -113,8 +169,14 @@ Section "Install ${APPNAME}" SecInstall
         "$INSTDIR\${LAUNCHERNAME}" \
         "${LAUNCHARGS}" \
         "$INSTDIR\${LAUNCHERNAME}" 0
+    CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME} Replay Theater.lnk" \
+        "$INSTDIR\${LAUNCHERNAME}" \
+        "${THEATERARGS}" \
+        "$INSTDIR\${LAUNCHERNAME}" 0
     CreateShortcut "$SMPROGRAMS\${APPNAME}\Uninstall ${APPNAME}.lnk" \
         "$INSTDIR\Uninstall_Zulu.exe"
+
+    SetShellVarContext current
 
     ; --- Uninstaller + Add/Remove Programs registration ------------------
     WriteUninstaller "$INSTDIR\Uninstall_Zulu.exe"
@@ -156,10 +218,23 @@ Section "Uninstall"
     Delete "$INSTDIR\Uninstall_Zulu.exe"
     Delete "$DOCUMENTS\${USERDATALEAF}\${BIGNAME}"
 
+    ; Everything in here is ours and regenerable, so clear it wholesale.
+    ; RMDir /r is scoped to our own subfolder, never $INSTDIR itself (which
+    ; is the user's Zero Hour install) nor the user data dir (their replays,
+    ; maps and saves). The $DOCUMENTS line clears the pre-move location.
+    RMDir /r "$INSTDIR\${REPLAYDATALEAF}"
+    RMDir /r "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
+
+    ; Shortcuts are created all-users; clear that context, then sweep the
+    ; per-user location too for anything an older installer left behind.
+    SetShellVarContext all
     Delete "$DESKTOP\${APPNAME}.lnk"
-    Delete "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk"
-    Delete "$SMPROGRAMS\${APPNAME}\Uninstall ${APPNAME}.lnk"
-    RMDir  "$SMPROGRAMS\${APPNAME}"
+    Delete "$DESKTOP\${APPNAME} Replay Theater.lnk"
+    RMDir /r "$SMPROGRAMS\${APPNAME}"
+    SetShellVarContext current
+    Delete "$DESKTOP\${APPNAME}.lnk"
+    Delete "$DESKTOP\${APPNAME} Replay Theater.lnk"
+    RMDir /r "$SMPROGRAMS\${APPNAME}"
 
     DeleteRegKey HKLM "${UNINSTREGKEY}"
 

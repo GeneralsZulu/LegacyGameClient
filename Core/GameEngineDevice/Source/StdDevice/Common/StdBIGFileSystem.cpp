@@ -225,6 +225,13 @@ Bool StdBIGFileSystem::loadBigFilesFromDirectory(AsciiString dir, AsciiString fi
 		}
 #endif
 
+		// Never sweep in the per-release replay data archives; exactly one of
+		// them is mounted by name via -mod. See ARCHIVE_REPLAY_DATA_FOLDER.
+		if (isInReplayDataFolder(*it)) {
+			it++;
+			continue;
+		}
+
 		ArchiveFile *archiveFile = openArchiveFile((*it).str());
 
 		if (archiveFile != nullptr) {

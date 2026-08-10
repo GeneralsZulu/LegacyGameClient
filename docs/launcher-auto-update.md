@@ -18,6 +18,34 @@ target. On every cold start it:
 4. If versions match or the user declines, hands off directly to
    `generalszh.exe` with the launcher's argv.
 
+## Dev builds gate on a hash, not a version
+
+Dev builds don't bump semver between rebuilds, so step 3's `>`
+comparison would never fire for them. Dev launchers (`latest-dev.json`)
+instead compare hashes: the manifest's **`exe_sha256`** against the
+SHA-256 of the installed `generalszh_zulu.exe`.
+
+It has to be `exe_sha256`, not `sha256`. Those are two different
+things and mixing them up is a bug we have already shipped once:
+
+| field | hash of |
+|---|---|
+| `sha256` | the installer, `Zulu-Installer-Dev.exe` |
+| `exe_sha256` | the game exe that installer lays down |
+
+The gate originally compared the installed game exe against `sha256`
+— the installer's hash. Two different files, so it never matched and
+every single dev launch announced a new build. `make installer-dev`
+now publishes both, taking `exe_sha256` from the staged exe before
+the staging directory is cleaned.
+
+A manifest with no `exe_sha256` (published before the field existed)
+leaves the gate closed rather than prompting forever; the next
+`make installer-dev` republishes it and updates resume. Note that a
+launcher installed *before* this fix still reads the old field, so it
+will prompt one last time — accepting that update replaces the
+launcher and stops the loop.
+
 ## Why
 
 Zulu ships often. Without auto-update, every player needs to

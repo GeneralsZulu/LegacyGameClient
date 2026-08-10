@@ -476,7 +476,7 @@ Int parseResultLog(char *args[], int num)
 
 // TheSuperHackers @feature Force the replay determinism epoch for playback so a
 // modern binary re-simulates an older replay bit-exactly. Accepts a name
-// (retail / v121 / v128 / v130 / current) or the numeric enum value. Without
+// (retail / v121 / v128 / v130 / v155 / current) or the numeric enum value. Without
 // this, the epoch is auto-detected from the replay's recorded version string
 // (which fails for retail "Version 1.04" and dev builds, so pass it for those).
 Int parseReplayEpoch(char *args[], int num)
@@ -489,7 +489,7 @@ Int parseReplayEpoch(char *args[], int num)
 		else if (a.compareNoCase("v121") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V121;
 		else if (a.compareNoCase("v128") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V128;
 		else if (a.compareNoCase("v130") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V130;
-		else if (a.compareNoCase("v154") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V154;
+		else if (a.compareNoCase("v155") == 0)    epoch = RecorderClass::REPLAY_EPOCH_V155;
 		else if (a.compareNoCase("current") == 0) epoch = RecorderClass::REPLAY_EPOCH_CURRENT;
 		else                                      epoch = atoi(a.str());
 		RecorderClass::setReplayEpochOverride(epoch);
@@ -631,6 +631,53 @@ Int parseReplay(char *args[], int num)
 
 		return 2;
 	}
+	return 1;
+}
+
+// TheSuperHackers @feature Watch a replay in the normal game window, as
+// opposed to -replay, which runs the headless batch re-simulation and exits.
+// ZuluLauncher's Replay Theater passes this together with the -mod that
+// mounts the data the replay was recorded against; see
+// installer/replay_data_versions.csv. The path is relative to the user's
+// Replays folder, the same as the in-game replay list uses.
+Int parseWatchReplay(char *args[], int num)
+{
+	if (num > 1)
+	{
+		AsciiString filename = args[1];
+		if (!filename.endsWithNoCase(RecorderClass::getReplayExtention()))
+		{
+			printf("Invalid replay name \"%s\"\n", filename.str());
+			exit(1);
+		}
+		TheWritableGlobalData->m_watchReplayFile = filename;
+
+		// Straight into the replay: no intro, no sizzle, no shell map behind it.
+		TheWritableGlobalData->m_playIntro = FALSE;
+		TheWritableGlobalData->m_afterIntro = TRUE;
+		TheWritableGlobalData->m_playSizzle = FALSE;
+		TheWritableGlobalData->m_shellMapOn = FALSE;
+
+		// Allow running alongside another client, but do NOT skip the primary
+		// instance the way -replay does. Instance ids above 1 read
+		// Options_Instance<NN>.ini instead of Options.ini (OptionPreferences),
+		// so forcing a secondary id here would ignore the player's own display
+		// settings and open the replay at the default 800x600. Left alone, the
+		// index starts at 0 (= instance 1, the player's real Options.ini) and
+		// still steps up automatically if a game is already running.
+		rts::ClientInstance::setMultiInstance(TRUE);
+
+		return 2;
+	}
+	return 1;
+}
+
+// This process exists only to play the -watchReplay file. Its data very
+// likely is not this release's, so it must never reach the shell, where the
+// player could start a live game whose rules match no one else's.
+Int parseReplayTheater(char *args[], int num)
+{
+	TheWritableGlobalData->m_replayTheater = TRUE;
 	return 1;
 }
 
@@ -1376,6 +1423,11 @@ static CommandLineParam paramsForStartup[] =
 	// You can pass this multiple times to play back multiple replays.
 	// You can also include wildcards. The file must be in the replay folder or in a subfolder.
 	{ "-replay", parseReplay },
+
+	// Watch a single replay in the normal game window and quit when it ends.
+	// Paired with -replaytheater and a -mod by ZuluLauncher's Replay Theater.
+	{ "-watchReplay", parseWatchReplay },
+	{ "-replaytheater", parseReplayTheater },
 
 	// TheSuperHackers @feature helmutbuhler 23/05/2025
 	// Simulate each replay in a separate process and use 1..N processes at the same time.

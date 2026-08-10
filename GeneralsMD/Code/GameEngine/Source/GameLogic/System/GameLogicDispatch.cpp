@@ -1405,7 +1405,7 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 		case GameMessage::MSG_QUEUE_UPGRADE:
 		{
 			//
-			// Live clients (and V154+ recordings) carry the upgrade's stable id (mask
+			// Live clients (and V155+ recordings) carry the upgrade's stable id (mask
 			// bit). Older replays recorded the raw NameKeyType, whose numbering belongs
 			// to the recording build and must be translated, not looked up against our
 			// own namekeys -- resolving it directly is what silently queued the wrong
@@ -1415,7 +1415,7 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 			const Int upgradeId = msg->getArgument( 1 )->integer;
 			const UpgradeTemplate *upgradeT;
 			const Bool legacyUpgradeId =
-				(TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V154 ));
+				(TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V155 ));
 			if (legacyUpgradeId)
 				upgradeT = TheUpgradeCenter->findUpgradeByLegacyReplayKey( upgradeId, TheRecorder->getReplayLegacyUpgradeKeyDelta() );
 			else
@@ -1452,10 +1452,10 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 #else
 			Object *producer = getSingleObjectFromSelection(currentlySelectedGroup.Peek());
 #endif
-			// stable id live / V154+; translated legacy namekey for older replays (see MSG_QUEUE_UPGRADE)
+			// stable id live / V155+; translated legacy namekey for older replays (see MSG_QUEUE_UPGRADE)
 			const Int cancelUpgradeId = msg->getArgument( 0 )->integer;
 			const UpgradeTemplate *upgradeT;
-			if (TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V154 ))
+			if (TheRecorder && !TheRecorder->isReplayEpochAtLeast( RecorderClass::REPLAY_EPOCH_V155 ))
 				upgradeT = TheUpgradeCenter->findUpgradeByLegacyReplayKey( cancelUpgradeId, TheRecorder->getReplayLegacyUpgradeKeyDelta() );
 			else
 				upgradeT = TheUpgradeCenter->findUpgradeByStableId( cancelUpgradeId );

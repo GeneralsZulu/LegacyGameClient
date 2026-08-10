@@ -601,11 +601,11 @@ Real WeaponTemplate::estimateWeaponTemplateDamage(
   // hmm.. must be shooting a firebase or such, if there is noone home to take the bullet, return 0!
   if ( victimObj->isKindOf( KINDOF_STRUCTURE) && damageType == DAMAGE_SNIPER )
   {
-    if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+    if (!TheRecorder || TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V155))
     {
       // Snipers may only target structures holding occupants or live slaves,
       // so empty Stinger Sites are no longer snipeable (community patch).
-      // Introduced in 1.5.4; older replays only checked garrison containers,
+      // Introduced in 1.5.5; older replays only checked garrison containers,
       // so gate on the epoch to keep those replays deterministic.
       const Bool hasOccupants = victimObj->getContain() && victimObj->getContain()->getContainCount() > 0;
       const Bool hasSlaves = victimObj->getSpawnBehaviorInterface() && victimObj->getSpawnBehaviorInterface()->getSlaveCount() > 0;
@@ -1185,7 +1185,7 @@ UnsignedInt WeaponTemplate::fireWeaponTemplate
 }
 
 //-------------------------------------------------------------------------------------------------
-// Retail firestorm accounting, kept for pre-1.5.4 replay epochs.
+// Retail firestorm accounting, kept for pre-1.5.5 replay epochs.
 void WeaponTemplate::trimOldHistoricDamageRetail() const
 {
 	UnsignedInt expirationDate = TheGameLogic->getFrame() - TheGlobalData->m_historicDamageLimit;
@@ -1248,7 +1248,7 @@ static Bool is2DDistSquaredLessThan(const Coord3D& a, const Coord3D& b, Real dis
 }
 
 //-------------------------------------------------------------------------------------------------
-// Retail firestorm triggering, kept for pre-1.5.4 replay epochs.
+// Retail firestorm triggering, kept for pre-1.5.5 replay epochs.
 void WeaponTemplate::processHistoricDamageRetail(const Object* source, const Coord3D* pos) const
 {
 	//
@@ -1301,9 +1301,9 @@ void WeaponTemplate::processHistoricDamageRetail(const Object* source, const Coo
 //-------------------------------------------------------------------------------------------------
 void WeaponTemplate::processHistoricDamage(const Object* source, const Coord3D* pos) const
 {
-	// Reliable firestorm triggering (community patch) shipped in 1.5.4; older
+	// Reliable firestorm triggering (community patch) shipped in 1.5.5; older
 	// replays keep the retail accounting so they stay deterministic.
-	if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+	if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V155))
 	{
 		processHistoricDamageRetail(source, pos);
 		return;

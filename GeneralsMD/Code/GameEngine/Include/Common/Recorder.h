@@ -205,8 +205,8 @@ public:
 		REPLAY_EPOCH_V121   = 1, ///< 1.2.1+: create-team processed at network frame for all players
 		REPLAY_EPOCH_V128   = 2, ///< 1.2.8+: poison/flame XP source, crate multi-pickup guard, scaffold-resume-on-dead-builder
 		REPLAY_EPOCH_V130   = 3, ///< 1.3.0+: AISkirmishPlayer surrender directive
-		REPLAY_EPOCH_V154   = 4, ///< 1.5.4+: upgrade commands carry the stable upgrade id (mask bit) instead of a raw namekey; community patch sim fixes (battle bus lethal damage, empty stinger snipe, stealth during repair, reliable firestorms)
-		REPLAY_EPOCH_CURRENT = REPLAY_EPOCH_V154
+		REPLAY_EPOCH_V155   = 4, ///< 1.5.5+: upgrade commands carry the stable upgrade id (mask bit) instead of a raw namekey; community patch sim fixes (battle bus lethal damage, empty stinger snipe, stealth during repair, reliable firestorms)
+		REPLAY_EPOCH_CURRENT = REPLAY_EPOCH_V155
 	};
 	// The epoch to simulate. CURRENT during live play/recording; during playback
 	// it is the recorded version's epoch (override or auto-detected).
@@ -217,7 +217,7 @@ public:
 	static void setReplayEpochOverride(Int epoch) { s_replayEpochOverride = epoch; }
 	static Int getReplayEpochOverride() { return s_replayEpochOverride; }
 
-	// Pre-V154 replays recorded upgrade purchases as raw NameKeyType values.
+	// Pre-V155 replays recorded upgrade purchases as raw NameKeyType values.
 	// Those are dealt at runtime in first-use order, so the numbering belongs to
 	// the RECORDING environment: the binary's early registrations plus every name
 	// registered by data parsed before Upgrade.ini (mods shift it too). Playback
@@ -225,7 +225,7 @@ public:
 	// out and the only asymmetry is the binary's own: 92674b28d (first shipped in
 	// 1.5.2) registered one extra FunctionLexicon name at init, which is how
 	// 1.5.2 came to misresolve every upgrade in every older replay (the v1.5.2
-	// staleRefs regression). During playback of a pre-V154 replay this returns
+	// staleRefs regression). During playback of a pre-V155 replay this returns
 	// (our binary's early registrations - the recording binary's): add it to a
 	// recorded upgrade key to get the same upgrade under our numbering.
 	Int getReplayLegacyUpgradeKeyDelta() const;

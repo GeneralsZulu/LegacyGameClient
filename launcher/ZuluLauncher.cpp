@@ -22,6 +22,8 @@
 #include <windows.h>
 #include <wininet.h>
 #include <shellapi.h>
+#include <commdlg.h>
+#include <objbase.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -332,7 +334,9 @@ static const char *extractArgsAfterExe(const char *cmdLine) {
     return p;
 }
 
-static bool launchGame(const char *gameExe, const char *extraArgs) {
+// Start the game. When waitHandle is non-NULL the caller gets the process
+// handle and owns closing it; otherwise we fire and forget.
+static bool launchGameEx(const char *gameExe, const char *extraArgs, HANDLE *waitHandle) {
     char cmd[4096];
     if (extraArgs && *extraArgs) {
         _snprintf(cmd, sizeof(cmd) - 1, "\"%s\" %s", gameExe, extraArgs);
@@ -355,8 +359,395 @@ static bool launchGame(const char *gameExe, const char *extraArgs) {
         workDir, &si, &pi);
     if (!ok) return false;
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    if (waitHandle) {
+        *waitHandle = pi.hProcess;
+    } else {
+        CloseHandle(pi.hProcess);
+    }
     return true;
+}
+
+static bool launchGame(const char *gameExe, const char *extraArgs) {
+    return launchGameEx(gameExe, extraArgs, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// Replay Theater
+//
+// Watching a replay recorded by an older release means running with that
+// release's data mounted, and the game picks its data once at startup, before
+// any INI is parsed -- so it cannot be swapped from inside a running game.
+// This mode does the swapping from outside: ask which replay, work out which
+// archive it needs from ReplayData\versions.csv, and start the game with that
+// archive as its -mod. See installer/replay_data_versions.csv.
+//
+// It deliberately parses the replay header and the version map itself rather
+// than sharing the engine's code: the launcher links none of the engine, which
+// is what keeps it small and quick to start.
+// ---------------------------------------------------------------------------
+
+static const char *kUserDataLeafDefault = "Command and Conquer Generals Zero Hour Data";
+static const char *kZHRegistryPath =
+    "SOFTWARE\\Electronic Arts\\EA Games\\Command and Conquer Generals Zero Hour";
+static const char *kReplayDataFolder = "ReplayData";
+
+static bool readRegistryString(HKEY root, const char *path, const char *key,
+                               char *out, DWORD outSize) {
+    HKEY handle;
+    if (RegOpenKeyExA(root, path, 0, KEY_READ, &handle) != ERROR_SUCCESS) return false;
+    DWORD type = 0;
+    DWORD size = outSize;
+    LONG rc = RegQueryValueExA(handle, key, NULL, &type, (LPBYTE)out, &size);
+    RegCloseKey(handle);
+    if (rc != ERROR_SUCCESS || type != REG_SZ) return false;
+    out[outSize - 1] = 0;
+    return true;
+}
+
+// Mirrors GlobalData::BuildUserDataPathFromRegistry so the launcher and the
+// game agree on where the data lives, including OneDrive/Group Policy folder
+// redirection (SHGetKnownFolderPath where available, as the game does).
+// Returns a path with a trailing backslash.
+static bool getUserDataDir(char *out, DWORD outSize) {
+    typedef HRESULT (WINAPI *PFN_SHGetKnownFolderPath)(const GUID&, DWORD, HANDLE, PWSTR*);
+    static const GUID kFolderIdDocuments =
+        { 0xFDD39AD0, 0x238F, 0x46AF, { 0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7 } };
+
+    char documents[MAX_PATH];
+    documents[0] = 0;
+
+    HMODULE shell32 = GetModuleHandleA("shell32.dll");
+    if (!shell32) shell32 = LoadLibraryA("shell32.dll");
+    PFN_SHGetKnownFolderPath pSHGetKnownFolderPath = NULL;
+    if (shell32) {
+        pSHGetKnownFolderPath =
+            (PFN_SHGetKnownFolderPath)GetProcAddress(shell32, "SHGetKnownFolderPath");
+    }
+
+    if (pSHGetKnownFolderPath) {
+        PWSTR wide = NULL;
+        if (SUCCEEDED(pSHGetKnownFolderPath(kFolderIdDocuments, 0, NULL, &wide)) && wide) {
+            WideCharToMultiByte(CP_ACP, 0, wide, -1, documents, sizeof(documents), NULL, NULL);
+            documents[sizeof(documents) - 1] = 0;
+            CoTaskMemFree(wide);
+        }
+    }
+    if (documents[0] == 0) {
+        // Pre-Vista, and the same fallback the game uses.
+        readRegistryString(HKEY_CURRENT_USER,
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
+            "Personal", documents, sizeof(documents));
+    }
+    if (documents[0] == 0) return false;
+
+    char leaf[MAX_PATH];
+    if (!readRegistryString(HKEY_CURRENT_USER, kZHRegistryPath, "UserDataLeafName",
+                            leaf, sizeof(leaf))
+        && !readRegistryString(HKEY_LOCAL_MACHINE, kZHRegistryPath, "UserDataLeafName",
+                               leaf, sizeof(leaf))) {
+        strncpy(leaf, kUserDataLeafDefault, sizeof(leaf));
+        leaf[sizeof(leaf) - 1] = 0;
+    }
+
+    const size_t len = strlen(documents);
+    const char *sep = (len > 0 && documents[len - 1] == '\\') ? "" : "\\";
+    _snprintf(out, outSize - 1, "%s%s%s\\", documents, sep, leaf);
+    out[outSize - 1] = 0;
+    return true;
+}
+
+// Read a NUL-terminated UTF-16LE string at *offset, narrowing to ASCII.
+// Advances *offset past the terminator. 'out' may be NULL to just skip.
+static bool readWideStringField(const unsigned char *buf, DWORD size, DWORD *offset,
+                                char *out, DWORD outSize) {
+    DWORD wrote = 0;
+    for (;;) {
+        if (*offset + 2 > size) return false;
+        const unsigned short ch =
+            (unsigned short)(buf[*offset] | (buf[*offset + 1] << 8));
+        *offset += 2;
+        if (ch == 0) break;
+        if (out && wrote + 1 < outSize) out[wrote++] = (ch < 0x80) ? (char)ch : '?';
+    }
+    if (out && outSize > 0) out[wrote < outSize ? wrote : outSize - 1] = 0;
+    return true;
+}
+
+// Pull the version string and iniCRC out of a .rep header. Layout mirrors
+// RecorderClass::readReplayHeader: "GENREP", two int32 times, uint32 frame
+// count, two bools, MAX_SLOTS(8) discon bools, the replay name, a 16-byte
+// SYSTEMTIME, then the version string, version time string, version number,
+// exe CRC and ini CRC.
+static bool readReplayHeaderInfo(const char *path, char *versionOut, DWORD versionSize,
+                                 DWORD *iniCrcOut) {
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    unsigned char buf[4096];
+    DWORD size = 0;
+    const BOOL read = ReadFile(file, buf, sizeof(buf), &size, NULL);
+    CloseHandle(file);
+    if (!read || size < 64) return false;
+
+    if (memcmp(buf, "GENREP", 6) != 0) return false;
+
+    DWORD offset = 6 + 4 + 4 + 4 + 1 + 1 + 8;   // times, frames, flags, discons
+    if (!readWideStringField(buf, size, &offset, NULL, 0)) return false;   // replay name
+    offset += 16;                                                          // SYSTEMTIME
+    if (!readWideStringField(buf, size, &offset, versionOut, versionSize)) return false;
+    if (!readWideStringField(buf, size, &offset, NULL, 0)) return false;   // version time
+
+    if (offset + 12 > size) return false;
+    offset += 4;   // version number
+    offset += 4;   // exe CRC
+    // Assemble through unsigned int: shifting an unsigned char left by 24
+    // promotes to signed int first, so a CRC with the top bit set would come
+    // out negative and sign-extend on the way into DWORD.
+    *iniCrcOut = (DWORD)(((unsigned int)buf[offset])
+        | ((unsigned int)buf[offset + 1] << 8)
+        | ((unsigned int)buf[offset + 2] << 16)
+        | ((unsigned int)buf[offset + 3] << 24));
+    return true;
+}
+
+enum ReplayDataKind {
+    kReplayDataNoMap,     // versions.csv itself is missing
+    kReplayDataUnknown,   // map read fine, but no row matched this replay
+    kReplayDataDefault,   // this release's own Zulu.big
+    kReplayDataNone,      // retail base data; no -mod
+    kReplayDataArchive    // mount the named archive
+};
+
+static void trimAscii(char *s) {
+    char *start = s;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') ++start;
+    size_t len = strlen(start);
+    while (len > 0) {
+        const char c = start[len - 1];
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') break;
+        --len;
+    }
+    memmove(s, start, len);
+    s[len] = 0;
+}
+
+// Reader for ReplayData\versions.csv. Only the first three fields matter here;
+// git_ref and note are build-time documentation.
+// csvPathOut receives the path consulted, so callers can name it when the map
+// is missing -- "this version isn't listed" and "the map isn't installed" look
+// identical to the user otherwise, and they have very different fixes.
+static ReplayDataKind resolveReplayData(const char *installDir, const char *version,
+                                        DWORD iniCrc, char *bigOut, DWORD bigSize,
+                                        char *csvPathOut, DWORD csvPathSize) {
+    char csvPath[MAX_PATH];
+    _snprintf(csvPath, sizeof(csvPath) - 1, "%s\\%s\\versions.csv", installDir, kReplayDataFolder);
+    csvPath[sizeof(csvPath) - 1] = 0;
+    if (csvPathOut) {
+        strncpy(csvPathOut, csvPath, csvPathSize);
+        csvPathOut[csvPathSize - 1] = 0;
+    }
+
+    FILE *csv = fopen(csvPath, "rb");
+    if (!csv) return kReplayDataNoMap;
+
+    char crcMatch[128];
+    crcMatch[0] = 0;
+    char match[128];
+    match[0] = 0;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), csv)) {
+        char kind[64], value[128], big[128];
+        kind[0] = value[0] = big[0] = 0;
+
+        // Split off the first three comma-separated fields.
+        const char *p = line;
+        int field = 0;
+        const char *fieldStart = line;
+        for (;; ++p) {
+            if (*p != ',' && *p != 0 && *p != '\n') continue;
+            char *dest = (field == 0) ? kind : (field == 1) ? value : (field == 2) ? big : NULL;
+            if (dest) {
+                const size_t cap = (field == 0) ? sizeof(kind) : sizeof(value);
+                size_t len = (size_t)(p - fieldStart);
+                if (len > cap - 1) len = cap - 1;
+                memcpy(dest, fieldStart, len);
+                dest[len] = 0;
+                trimAscii(dest);
+            }
+            ++field;
+            if (*p == 0 || *p == '\n' || field > 2) break;
+            fieldStart = p + 1;
+        }
+
+        if (kind[0] == 0 || kind[0] == '#') continue;
+        if (_stricmp(kind, "match_kind") == 0) continue;
+        if (big[0] == 0) continue;
+
+        if (_stricmp(kind, "version") == 0 && _stricmp(value, version) == 0) {
+            strncpy(match, big, sizeof(match));
+            match[sizeof(match) - 1] = 0;
+            break;   // exact version match wins outright
+        }
+        if (_stricmp(kind, "inicrc") == 0 && crcMatch[0] == 0) {
+            if ((DWORD)strtoul(value, NULL, 16) == iniCrc) {
+                strncpy(crcMatch, big, sizeof(crcMatch));
+                crcMatch[sizeof(crcMatch) - 1] = 0;
+            }
+        }
+    }
+    fclose(csv);
+
+    // iniCRC is only the fallback: it identifies dev and prerelease builds,
+    // which all report a non-semantic version like "Version 1.04".
+    if (match[0] == 0) {
+        if (crcMatch[0] == 0) return kReplayDataUnknown;
+        strncpy(match, crcMatch, sizeof(match));
+        match[sizeof(match) - 1] = 0;
+    }
+
+    if (_stricmp(match, "@default") == 0) return kReplayDataDefault;
+    if (_stricmp(match, "@none") == 0) return kReplayDataNone;
+
+    strncpy(bigOut, match, bigSize);
+    bigOut[bigSize - 1] = 0;
+    return kReplayDataArchive;
+}
+
+// Ask for a replay under the user's Replays folder. Returns false when the
+// user cancels.
+static bool pickReplay(const char *replaysDir, char *out, DWORD outSize) {
+    char file[MAX_PATH];
+    file[0] = 0;
+
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFilter = "Replays (*.rep)\0*.rep\0All files\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.lpstrInitialDir = replaysDir;
+    ofn.lpstrTitle = "Zulu Replay Theater - choose a replay";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    strncpy(out, file, outSize);
+    out[outSize - 1] = 0;
+    return true;
+}
+
+static int runReplayTheater(const char *gameExe, const char *installDir) {
+    char userDataDir[MAX_PATH];
+    if (!getUserDataDir(userDataDir, sizeof(userDataDir))) {
+        MessageBoxA(NULL,
+            "Could not locate your Zero Hour user data folder.",
+            kAppName, MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    char replaysDir[MAX_PATH];
+    _snprintf(replaysDir, sizeof(replaysDir) - 1, "%sReplays", userDataDir);
+    replaysDir[sizeof(replaysDir) - 1] = 0;
+
+    for (;;) {
+        char replayPath[MAX_PATH];
+        if (!pickReplay(replaysDir, replayPath, sizeof(replayPath))) {
+            return 0;   // user closed the picker; done
+        }
+
+        // -watchReplay is resolved against the Replays folder, the same as the
+        // in-game replay list, so anything outside it has no name we can pass.
+        const size_t replaysLen = strlen(replaysDir);
+        if (_strnicmp(replayPath, replaysDir, replaysLen) != 0
+            || (replayPath[replaysLen] != '\\' && replayPath[replaysLen] != '/')) {
+            MessageBoxA(NULL,
+                "That replay is outside your Replays folder.\n\n"
+                "Move or copy it into the Replays folder and try again.",
+                kAppName, MB_OK | MB_ICONWARNING);
+            continue;
+        }
+        const char *relativePath = replayPath + replaysLen + 1;
+
+        char version[128];
+        version[0] = 0;
+        DWORD iniCrc = 0;
+        if (!readReplayHeaderInfo(replayPath, version, sizeof(version), &iniCrc)) {
+            MessageBoxA(NULL,
+                "That file does not look like a Zero Hour replay.",
+                kAppName, MB_OK | MB_ICONWARNING);
+            continue;
+        }
+
+        char big[128];
+        big[0] = 0;
+        char csvPath[MAX_PATH];
+        csvPath[0] = 0;
+        const ReplayDataKind kind =
+            resolveReplayData(installDir, version, iniCrc, big, sizeof(big),
+                              csvPath, sizeof(csvPath));
+
+        if (kind == kReplayDataNoMap) {
+            char msg[MAX_PATH + 512];
+            _snprintf(msg, sizeof(msg) - 1,
+                "The replay data map is missing, so Replay Theater cannot tell which "
+                "version's data this replay needs.\n\n"
+                "Looked for:\n%s\n\n"
+                "That folder ships with Zulu; reinstalling will restore it.",
+                csvPath);
+            msg[sizeof(msg) - 1] = 0;
+            MessageBoxA(NULL, msg, kAppName, MB_OK | MB_ICONWARNING);
+            continue;
+        }
+
+        if (kind == kReplayDataUnknown) {
+            char msg[512];
+            _snprintf(msg, sizeof(msg) - 1,
+                "This replay reports version \"%s\", which is not in the replay data map.\n\n"
+                "It will be played with the current version's data, so it may go out of sync.\n\n"
+                "Watch it anyway?",
+                version);
+            msg[sizeof(msg) - 1] = 0;
+            if (MessageBoxA(NULL, msg, kAppName,
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+                continue;
+            }
+        }
+
+        char args[MAX_PATH * 3];
+        if (kind == kReplayDataArchive) {
+            // Absolute, and quoted: a relative -mod is resolved against the
+            // user data directory (parseMod), which is not where these live
+            // any more, and the install path has spaces in it.
+            _snprintf(args, sizeof(args) - 1,
+                "-mod \"%s\\%s\\%s\" -watchReplay \"%s\" -replaytheater",
+                installDir, kReplayDataFolder, big, relativePath);
+        } else if (kind == kReplayDataNone) {
+            // Retail data: no -mod at all, not even our own Zulu.big.
+            _snprintf(args, sizeof(args) - 1,
+                "-watchReplay \"%s\" -replaytheater", relativePath);
+        } else {
+            _snprintf(args, sizeof(args) - 1,
+                "-mod Zulu.big -watchReplay \"%s\" -replaytheater", relativePath);
+        }
+        args[sizeof(args) - 1] = 0;
+
+        HANDLE gameProcess = NULL;
+        if (!launchGameEx(gameExe, args, &gameProcess)) {
+            MessageBoxA(NULL,
+                "Could not launch generalszh_zulu.exe.",
+                kAppName, MB_OK | MB_ICONERROR);
+            return 1;
+        }
+
+        // Wait it out, then offer the picker again. The game quits itself when
+        // the replay ends (see RecorderClass::stopPlayback), so this is how the
+        // theater loops without ever leaving a mismatched-data client sitting
+        // on the main menu.
+        WaitForSingleObject(gameProcess, INFINITE);
+        CloseHandle(gameProcess);
+    }
 }
 
 int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
@@ -377,6 +768,14 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
+    // Replay Theater shortcut. Skips the update check on purpose: someone who
+    // opened this wants to watch a replay, not sit through an install, and an
+    // update mid-session would swap the data out from under the loop.
+    // Matched as a prefix because shortcuts routinely carry a trailing space.
+    if (_strnicmp(fwdArgs, "-replaytheater", 14) == 0) {
+        return runReplayTheater(gameExe, installDir);
+    }
+
     const bool devBuild = isDevBuild();
     const char *manifestUrl = devBuild ? kLatestJsonURLDev : kLatestJsonURLRelease;
     const char *installerLeaf = devBuild ? kInstallerLeafDev : kInstallerLeafRelease;
@@ -388,8 +787,15 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     bool haveLatest = false;
     char latestUrl[2048]; latestUrl[0] = 0;
     char latestVersion[64]; latestVersion[0] = 0;
-    char latestSha[80]; latestSha[0] = 0;
-    bool haveLatestSha = false;
+    // "exe_sha256" is the hash of the game exe *inside* the published
+    // installer, which is what the dev gate can compare against what is on
+    // disk. The manifest also carries "sha256", the hash of the installer
+    // itself -- deliberately not used here: hashing the installed
+    // generalszh_zulu.exe and comparing it to the hash of Zulu-Installer-Dev.exe
+    // compares two different files, never matches, and made every dev launch
+    // claim a new build was available.
+    char latestExeSha[80]; latestExeSha[0] = 0;
+    bool haveLatestExeSha = false;
 
     char *json = httpGet(manifestUrl, NULL);
     if (json) {
@@ -397,22 +803,25 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             jsonGetString(json, "url", latestUrl, sizeof(latestUrl))) {
             haveLatest = parseSemVer(latestVersion, latest);
         }
-        haveLatestSha = jsonGetString(json, "sha256", latestSha, sizeof(latestSha));
+        haveLatestExeSha = jsonGetString(json, "exe_sha256", latestExeSha, sizeof(latestExeSha));
         free(json);
     }
 
     const bool urlOk = (latestUrl[0] != 0) &&
         (strncmp(latestUrl, kAllowedURLPrefix, strlen(kAllowedURLPrefix)) == 0);
 
-    // Dev gate: any SHA mismatch between the manifest and the installed exe
-    // triggers a prompt, since dev builds don't bump semver between rebuilds.
+    // Dev gate: compare the game exe we have against the game exe the latest
+    // dev installer would lay down, since dev builds don't bump semver between
+    // rebuilds. A manifest without "exe_sha256" (published before that field
+    // existed) leaves the gate closed rather than prompting on every launch --
+    // the next dev build republishes the manifest and it starts working.
     // Release gate: strict ">" semver comparison so we never downgrade.
     char installedSha[80]; installedSha[0] = 0;
     bool needUpdate = false;
     if (devBuild) {
         bool haveInstalledSha = computeFileSha256Hex(gameExe, installedSha, sizeof(installedSha));
-        needUpdate = haveLatestSha && haveInstalledSha && urlOk &&
-                     (_stricmp(latestSha, installedSha) != 0);
+        needUpdate = haveLatestExeSha && haveInstalledSha && urlOk &&
+                     (_stricmp(latestExeSha, installedSha) != 0);
     } else {
         needUpdate = haveInstalled && haveLatest && urlOk &&
                      semVerCompare(latest, installed) > 0;
@@ -423,10 +832,10 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         if (devBuild) {
             _snprintf(msg, sizeof(msg) - 1,
                 "A new Zulu dev build is available.\n\n"
-                "Installed SHA: %.12s...\n"
-                "Latest SHA:    %.12s...\n\n"
+                "Installed game exe SHA: %.12s...\n"
+                "Latest game exe SHA:    %.12s...\n\n"
                 "Download and install the update now?",
-                installedSha, latestSha);
+                installedSha, latestExeSha);
         } else {
             _snprintf(msg, sizeof(msg) - 1,
                 "A newer Zulu release is available.\n\n"

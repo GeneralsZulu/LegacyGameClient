@@ -845,9 +845,9 @@ void ActiveBody::attemptHealing( DamageInfo *damageInfo )
 		m_lastDamageCleared = false;
 		// Healing no longer stamps the damage timestamp, so structures can
 		// stealth while being repaired (community patch, paired with the
-		// StealthUpdate::allowedToStealth change). Introduced in 1.5.4; gate on
+		// StealthUpdate::allowedToStealth change). Introduced in 1.5.5; gate on
 		// the epoch to keep older replays deterministic.
-		if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V154))
+		if (TheRecorder && !TheRecorder->isReplayEpochAtLeast(RecorderClass::REPLAY_EPOCH_V155))
 			m_lastDamageTimestamp = TheGameLogic->getFrame();
 		m_lastHealingTimestamp = TheGameLogic->getFrame();
 

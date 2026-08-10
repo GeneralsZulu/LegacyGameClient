@@ -7,6 +7,8 @@
 #   make installer-release   build the installer and upload it to GCS as a
 #                            versioned, publicly-downloadable object
 #   make zulu-big            just (re)pack assets/ into build/installer-tmp/Zulu.big
+#   make replay-bigs         rebuild the per-release data archives (ReplayData/)
+#                            that Replay Theater mounts to play back old replays
 #   make zulu-exe            build the shipping Release exe
 #   make zulu-exe-log        build a Release exe with DEBUG_LOGGING + DEBUG_CRASHING
 #                            (no debug CRT; same DLL deps as the shipping exe)
@@ -43,11 +45,21 @@ SOURCE_EXE      := $(BUILD_DIR)/GeneralsMD/generalszh.exe
 SOURCE_EXE_LOG  := $(BUILD_DIR_LOG)/GeneralsMD/generalszh.exe
 SOURCE_LAUNCHER := $(BUILD_DIR)/launcher/ZuluLauncher.exe
 
+# Per-release data archives for old-replay playback. Reconstructed from git on
+# demand rather than checked in: they are ~95% identical to one another, so
+# storing them would add ~73 MB of near-duplicate binaries to the repo.
+REPLAY_DATA_CSV := installer/replay_data_versions.csv
+REPLAY_DATA_DIR := $(TMP_DIR)/ReplayData
+REPLAY_DATA_STAMP := $(TMP_DIR)/.replay-data-built
+
 NSI               := installer/Zulu.nsi
 INSTALLER_OUT     := installer/Zulu_Setup.exe
 INSTALLER_OUT_DEV := installer/Zulu_Setup_Dev.exe
 LATEST_JSON       := $(TMP_DIR)/latest.json
 LATEST_DEV_JSON   := $(TMP_DIR)/latest-dev.json
+# Hash of the game exe a dev installer carries, stashed while it is still
+# staged so the manifest can publish it. See the installer-dev recipe.
+DEV_EXE_SHA_FILE  := $(TMP_DIR)/dev-exe-sha256.txt
 
 # Dev artifact lives at a fixed name in the same GCS bucket so the dev
 # launcher can always pull the latest dev build from a stable URL; the
@@ -92,7 +104,7 @@ ASSET_FILES := $(shell find $(ASSETS_DIR) -type f 2>/dev/null)
 # big-endian first-data offset = 16.
 EMPTY_BIG_BYTES := 'BIGF\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10'
 
-.PHONY: installer installer-release installer-dev zulu-big zulu-exe zulu-exe-log zulu-launcher clean-installer
+.PHONY: installer installer-release installer-dev zulu-big replay-bigs zulu-exe zulu-exe-log zulu-launcher clean-installer
 
 # Target-specific variables that propagate down the prereq chain so the
 # docker-build-* recipes pick the right Discord webhook secret and bake
@@ -110,6 +122,8 @@ installer: $(INSTALLER_OUT)
 
 zulu-big: $(TMP_BIG)
 
+replay-bigs: $(REPLAY_DATA_STAMP)
+
 zulu-exe: $(TMP_EXE)
 
 zulu-exe-log: $(TMP_EXE_LOG)
@@ -126,6 +140,18 @@ zulu-launcher: $(TMP_LAUNCHER)
 $(TMP_BIG): $(ASSET_FILES) | $(TMP_DIR)
 	@rm -f $@
 	@python3 scripts/pack_big.py $(ASSETS_DIR) $@
+
+# Stage every historical Zulu.big next to a copy of the version map, so an
+# installed client can mount the data a given replay was recorded against
+# (see installer/replay_data_versions.csv for why that is necessary). Each
+# archive is rebuilt from the assets tree its release shipped, straight out
+# of git history, so this depends only on the map and the packer -- not on
+# the current working tree.
+$(REPLAY_DATA_STAMP): $(REPLAY_DATA_CSV) scripts/build_replay_bigs.py scripts/pack_big.py | $(TMP_DIR)
+	@rm -rf "$(REPLAY_DATA_DIR)"
+	@python3 scripts/build_replay_bigs.py "$(REPLAY_DATA_CSV)" "$(REPLAY_DATA_DIR)"
+	@cp "$(REPLAY_DATA_CSV)" "$(REPLAY_DATA_DIR)/versions.csv"
+	@touch $@
 
 # Drive the docker build for the Zero Hour exe and copy the result into the
 # tmp dir under its installer name. We always invoke docker-build.sh so the
@@ -218,11 +244,12 @@ $(TMP_LAUNCHER): docker-build-z_launcher | $(TMP_DIR)
 # .nsi file's directory, i.e. installer/). After packaging, drop the staged
 # big/exe/launcher so they don't sit around taking disk; keep $(TMP_DIR)
 # itself in case something else stashes things there.
-$(INSTALLER_OUT): $(TMP_BIG) $(TMP_EXE) $(TMP_LAUNCHER) $(NSI)
+$(INSTALLER_OUT): $(TMP_BIG) $(TMP_EXE) $(TMP_LAUNCHER) $(REPLAY_DATA_STAMP) $(NSI)
 	$(NSIS) \
 		-DBIG_SOURCE="../$(TMP_BIG)" \
 		-DEXE_SOURCE="../$(TMP_EXE)" \
 		-DLAUNCHER_SOURCE="../$(TMP_LAUNCHER)" \
+		-DREPLAYDATA_SOURCE="../$(REPLAY_DATA_DIR)" \
 		$(NSI)
 	@rm -f "$(TMP_BIG)" "$(TMP_EXE)" "$(TMP_LAUNCHER)"
 
@@ -241,14 +268,19 @@ clean-installer:
 # We rename the NSIS output to $(INSTALLER_OUT_DEV) so a later `make
 # installer` doesn't see a fresh installer/Zulu_Setup.exe on disk and
 # skip the build.
-installer-dev: $(TMP_BIG) $(TMP_EXE_LOG) $(TMP_LAUNCHER) $(NSI) | $(TMP_DIR)
+installer-dev: $(TMP_BIG) $(TMP_EXE_LOG) $(TMP_LAUNCHER) $(REPLAY_DATA_STAMP) $(NSI) | $(TMP_DIR)
 	@test -n "$(APPVERSION)" || { \
 		echo "ERROR: could not parse APPVERSION from $(NSI)"; exit 1; }
 	$(NSIS) \
 		-DBIG_SOURCE="../$(TMP_BIG)" \
 		-DEXE_SOURCE="../$(TMP_EXE_LOG)" \
 		-DLAUNCHER_SOURCE="../$(TMP_LAUNCHER)" \
+		-DREPLAYDATA_SOURCE="../$(REPLAY_DATA_DIR)" \
 		$(NSI)
+	@# The dev update gate compares the game exe on disk against the game exe
+	@# this installer carries, so the manifest needs that hash -- take it while
+	@# the staged exe still exists (it is dropped once the manifest is written).
+	@sha256sum "$(TMP_EXE_LOG)" | cut -d' ' -f1 > "$(DEV_EXE_SHA_FILE)"
 	@rm -f "$(TMP_BIG)" "$(TMP_EXE_LOG)" "$(TMP_LAUNCHER)"
 	mv "$(INSTALLER_OUT)" "$(INSTALLER_OUT_DEV)"
 	$(GCLOUD) storage cp "$(INSTALLER_OUT_DEV)" "$(DEV_GCS_URI)"
@@ -258,14 +290,21 @@ installer-dev: $(TMP_BIG) $(TMP_EXE_LOG) $(TMP_LAUNCHER) $(NSI) | $(TMP_DIR)
 	@$(GCLOUD) storage objects update "$(DEV_GCS_URI)" \
 		--add-acl-grant=entity=AllUsers,role=READER \
 		|| echo "[note] per-object ACL grant failed for $(DEV_OBJECT_NAME); rely on bucket-level allUsers grant."
+	@# "sha256" is the installer's own hash; "exe_sha256" is the hash of the
+	@# game exe inside it. The launcher's dev gate compares exe_sha256 against
+	@# the installed generalszh_zulu.exe. Comparing against "sha256" instead is
+	@# what made every dev launch think an update was waiting: it hashed the
+	@# game exe and compared it to the hash of a completely different file.
 	@SIZE=$$(stat -c%s "$(INSTALLER_OUT_DEV)"); \
 	SHA=$$(sha256sum "$(INSTALLER_OUT_DEV)" | cut -d' ' -f1); \
+	EXESHA=$$(cat "$(DEV_EXE_SHA_FILE)"); \
 	printf '%s\n' \
 	    '{' \
 	    '  "version": "$(APPVERSION)",' \
 	    '  "url": "$(DEV_PUBLIC_URL)",' \
 	    "  \"size\": $$SIZE," \
-	    "  \"sha256\": \"$$SHA\"" \
+	    "  \"sha256\": \"$$SHA\"," \
+	    "  \"exe_sha256\": \"$$EXESHA\"" \
 	    '}' > "$(LATEST_DEV_JSON)"
 	$(GCLOUD) storage cp "$(LATEST_DEV_JSON)" "$(LATEST_DEV_GCS_URI)"
 	@$(GCLOUD) storage objects update "$(LATEST_DEV_GCS_URI)" \
@@ -275,7 +314,7 @@ installer-dev: $(TMP_BIG) $(TMP_EXE_LOG) $(TMP_LAUNCHER) $(NSI) | $(TMP_DIR)
 	@$(GCLOUD) storage objects update "$(LATEST_DEV_GCS_URI)" \
 		--add-acl-grant=entity=AllUsers,role=READER \
 		|| echo "[note] per-object ACL grant failed for latest-dev.json; rely on bucket-level allUsers grant."
-	@rm -f "$(LATEST_DEV_JSON)"
+	@rm -f "$(LATEST_DEV_JSON)" "$(DEV_EXE_SHA_FILE)"
 	@echo
 	@echo "Uploaded dev installer: $(DEV_GCS_URI)"
 	@echo "Public URL:             $(DEV_PUBLIC_URL)"
