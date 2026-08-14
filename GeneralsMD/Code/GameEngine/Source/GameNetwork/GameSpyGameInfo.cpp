@@ -560,7 +560,8 @@ void GameSpyLaunchGame()
 		GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_NEW_GAME );
 		msg->appendIntegerArgument(GAME_INTERNET);
 
-		TheGlobalData->m_useFpsLimit = false;
+		// Render FPS cap is suspended automatically while TheNetwork exists
+		// (FramePacer::isActualFramesPerSecondLimitEnabled); no toggle needed.
 
 		// Set the random seed
 		InitGameLogicRandom( TheGameSpyGame->getSeed() );

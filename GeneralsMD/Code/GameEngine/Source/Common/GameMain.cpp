@@ -42,6 +42,11 @@ Int GameMain()
 	// initialize the game engine using factory function
 	TheFramePacer = new FramePacer();
 	TheFramePacer->enableFramesPerSecondLimit(TRUE);
+	// Pace non-network logic (shell map, replays, skirmish) at
+	// LOGICFRAMES_PER_SECOND instead of once per render frame, so game speed
+	// no longer depends on the render frame rate. Network games are governed
+	// by TheNetwork and catchup modes bypass this in canUpdateRegularGameLogic.
+	TheFramePacer->enableLogicTimeScale(TRUE);
 	TheGameEngine = CreateGameEngine();
 	TheGameEngine->init();
 

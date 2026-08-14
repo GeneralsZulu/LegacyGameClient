@@ -438,9 +438,7 @@ GameWindow *listboxPlayers = nullptr;
 NameKeyType listboxGamesID = NAMEKEY_INVALID;
 GameWindow *listboxGames = nullptr;
 
-// hack to disable framerate limiter in LAN games
 //static Bool shellmapOn;
-static Bool useFpsLimit;
 static UnicodeString defaultName;
 
 static void playerTooltip(GameWindow *window,
@@ -542,16 +540,13 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 			delete s_coord;
 		}
 		s_coord = new OnlineCoordinatorAPI();
-		useFpsLimit = TheGlobalData->m_useFpsLimit;
 	}
 	else if (!TheLAN)
 	{
 		TheLAN = NEW LANAPI();	/// @todo clh delete TheLAN and
-		useFpsLimit = TheGlobalData->m_useFpsLimit;
 	}
 	else
 	{
-		TheWritableGlobalData->m_useFpsLimit = useFpsLimit;
 		TheLAN->reset();
 	}
 
@@ -757,7 +752,6 @@ void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 
 	// our shutdown is complete
 	//TheShell->shutdownComplete( layout );
-	TheWritableGlobalData->m_useFpsLimit = useFpsLimit;
 
 	LANisShuttingDown = true;
 

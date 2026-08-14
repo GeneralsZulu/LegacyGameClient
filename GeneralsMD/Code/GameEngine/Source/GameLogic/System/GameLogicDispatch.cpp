@@ -298,6 +298,15 @@ void GameLogic::clearGameData( Bool showScoreScreen )
 		m_background = nullptr;
 	}
 
+	// Restore default logic pacing so a per-game speed (skirmish slider,
+	// replay header, speed hotkeys) never leaks into the shell or the next
+	// game. The next MSG_NEW_GAME re-applies its own speed after this.
+	if (TheFramePacer)
+	{
+		TheFramePacer->setLogicTimeScaleFps(LOGICFRAMES_PER_SECOND);
+		TheFramePacer->enableLogicTimeScale(TRUE);
+	}
+
 	setClearingGameData( FALSE );
 
 }
@@ -446,12 +455,17 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 
 			if ( msg->getArgumentCount() >= 4 )
 			{
-				Int maxFPS = msg->getArgument( 3 )->integer;
-				if (maxFPS < 1 || maxFPS > 1000)
-					maxFPS = TheGlobalData->m_framesPerSecondLimit;
-				DEBUG_LOG(("Setting max FPS limit to %d FPS", maxFPS));
-				TheFramePacer->setFramesPerSecondLimit(maxFPS);
-				TheWritableGlobalData->m_useFpsLimit = true;
+				// Game speed request: the skirmish/single-player speed slider, or
+				// a replay header echoing the recorded speed. Logic pacing is
+				// decoupled from the render frame rate, so this drives the logic
+				// time scale; the render FPS cap stays the user's own. Values at
+				// or above the render cap fall through to one logic frame per
+				// render frame ("no limit" on the slider), same as before.
+				Int gameSpeedFps = msg->getArgument( 3 )->integer;
+				if (gameSpeedFps < 1 || gameSpeedFps > 1000)
+					gameSpeedFps = LOGICFRAMES_PER_SECOND;
+				DEBUG_LOG(("Setting game speed to %d logic FPS", gameSpeedFps));
+				TheFramePacer->setLogicTimeScaleFps(gameSpeedFps);
 			}
 
 			// prepare for new game

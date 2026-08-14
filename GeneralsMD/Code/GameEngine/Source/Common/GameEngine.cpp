@@ -927,7 +927,13 @@ Bool GameEngine::canUpdateRegularGameLogic()
 			|| (TheRecorder && TheRecorder->isResumeCatchupMode()));
 #endif
 
-	if (useFastMode || !enabled || logicTimeScaleFps >= maxRenderFps)
+	// Catchup modes (resume-from-replay, live-observer snapshot drain) boost
+	// the render FPS cap and fast-forward by running one logic frame per
+	// render frame; the logic time scale must not throttle them to realtime.
+	const Bool inCatchup = TheRecorder
+		&& (TheRecorder->isResumeCatchupMode() || TheRecorder->isLiveObserverCatchup());
+
+	if (useFastMode || inCatchup || !enabled || logicTimeScaleFps >= maxRenderFps)
 	{
 		// Logic time scale is uncapped or larger equal Render FPS. Update straight away.
 		return true;

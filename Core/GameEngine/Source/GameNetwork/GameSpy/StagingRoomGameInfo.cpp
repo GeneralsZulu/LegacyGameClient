@@ -850,7 +850,8 @@ void GameSpyStagingRoom::launchGame()
 	GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_NEW_GAME );
 	msg->appendIntegerArgument(GAME_INTERNET);
 
-	TheWritableGlobalData->m_useFpsLimit = false;
+	// Render FPS cap is suspended automatically while TheNetwork exists
+	// (FramePacer::isActualFramesPerSecondLimitEnabled); no toggle needed.
 
 	// Set the seeds
 	InitRandom( getSeed() );
