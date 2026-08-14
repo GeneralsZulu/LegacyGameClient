@@ -789,22 +789,13 @@ void ConnectionManager::processChat(NetChatCommandMsg *msg)
 		return;
 	}
 
-	// Surrender directive: latch consent on the sender regardless of who can see
-	// the chat locally. processChat() is frame-synchronized (every client runs it
-	// at the same tick), so the resulting flag is deterministic across clients
-	// and replays. AI allies pick it up from AISkirmishPlayer::processSurrenderDirective.
-	{
-		UnicodeString body = msg->getText();
-		body.trim();
-		if (body.startsWithNoCase(L"!unsurrender"))
-		{
-			const_cast<Player *>(player)->setSurrenderConsented(FALSE);
-		}
-		else if (body.startsWithNoCase(L"!surrender"))
-		{
-			const_cast<Player *>(player)->setSurrenderConsented(TRUE);
-		}
-	}
+	// The "!surrender"/"!unsurrender" directive is deliberately NOT latched
+	// here. processChat() runs when the chat packet arrives, which is a
+	// different logic frame on every client, so a latch here desyncs anything
+	// in the simulation that acts on it (the AI surrender check killed the AI
+	// on different frames on different clients). The sending client posts
+	// GameMessage::MSG_SURRENDER_CONSENT instead (InGameChat.cpp), which
+	// executes lockstep and is recorded in replays.
 
 	Bool fromObserver = !player->isPlayerActive();
 	Bool amIObserver = !ThePlayerList->getLocalPlayer()->isPlayerActive();
