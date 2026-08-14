@@ -24,6 +24,7 @@
 #include "Common/File.h"
 #include "Common/GlobalData.h"
 #include "Common/OptionPreferences.h"
+#include "Common/ReleaseLog.h"
 #include "Common/version.h"
 #include "GameClient/MapUtil.h"
 #include "GameNetwork/FileTransfer.h"
@@ -129,6 +130,7 @@ static bool openHttpRequest(const AsciiString& url,
 	if (!InternetCrackUrlA(url.str(), 0, 0, &uc))
 	{
 		printf("%s: failed to parse URL \"%s\"\n", logTag, url.str());
+		ReleaseLog("%s: failed to parse URL \"%s\"", logTag, url.str());
 		return false;
 	}
 
@@ -143,14 +145,18 @@ static bool openHttpRequest(const AsciiString& url,
 	out->hInternet = InternetOpenA("GeneralsStatsExporter/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
 	if (out->hInternet == nullptr)
 	{
-		printf("%s: InternetOpen failed (%lu)\n", logTag, GetLastError());
+		DWORD err = GetLastError();
+		printf("%s: InternetOpen failed (%lu)\n", logTag, err);
+		ReleaseLog("%s: InternetOpen failed (%lu)", logTag, err);
 		return false;
 	}
 
 	out->hConnect = InternetConnectA(out->hInternet, hostBuf, port, nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
 	if (out->hConnect == nullptr)
 	{
-		printf("%s: InternetConnect failed (%lu)\n", logTag, GetLastError());
+		DWORD err = GetLastError();
+		printf("%s: InternetConnect failed (%lu)\n", logTag, err);
+		ReleaseLog("%s: InternetConnect failed (%lu)", logTag, err);
 		InternetCloseHandle(out->hInternet);
 		out->hInternet = nullptr;
 		return false;
@@ -160,7 +166,9 @@ static bool openHttpRequest(const AsciiString& url,
 	out->hRequest = HttpOpenRequestA(out->hConnect, method, requestPath, nullptr, nullptr, nullptr, flags, 0);
 	if (out->hRequest == nullptr)
 	{
-		printf("%s: HttpOpenRequest failed (%lu)\n", logTag, GetLastError());
+		DWORD err = GetLastError();
+		printf("%s: HttpOpenRequest failed (%lu)\n", logTag, err);
+		ReleaseLog("%s: HttpOpenRequest failed (%lu)", logTag, err);
 		InternetCloseHandle(out->hConnect);
 		InternetCloseHandle(out->hInternet);
 		out->hConnect = nullptr;
@@ -238,16 +246,23 @@ static void httpPostBytes(const AsciiString& url,
 
 	BOOL result = HttpSendRequestA(s.hRequest, headers, (DWORD)strlen(headers), const_cast<void*>(data), dataLen);
 
+	// Outcomes also go to the ReleaseLog so they survive on disk and ride up
+	// with the next match's log upload (stdout is lost on players' machines).
+	// Safe from the telemetry worker thread: the log file is already open by
+	// match end and ReleaseLog is a single append+flush per call.
 	if (result)
 	{
 		DWORD statusCode = 0;
 		DWORD statusSize = sizeof(statusCode);
 		HttpQueryInfoA(s.hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &statusSize, nullptr);
 		printf("%s: %s -> %lu\n", logTag, url.str(), statusCode);
+		ReleaseLog("%s: %u bytes to %s -> %lu", logTag, dataLen, url.str(), statusCode);
 	}
 	else
 	{
-		printf("%s: HttpSendRequest failed (%lu)\n", logTag, GetLastError());
+		DWORD err = GetLastError();
+		printf("%s: HttpSendRequest failed (%lu)\n", logTag, err);
+		ReleaseLog("%s: %u bytes to %s -> HttpSendRequest failed (%lu)", logTag, dataLen, url.str(), err);
 	}
 
 	closeHttpRequest(&s);
