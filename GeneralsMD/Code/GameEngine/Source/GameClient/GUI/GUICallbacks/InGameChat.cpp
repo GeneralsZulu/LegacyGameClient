@@ -244,6 +244,26 @@ void ToggleInGameChat( Bool immediate )
 							}
 						}
 					}
+					// Surrender directive: apply consent through the lockstep
+					// command stream instead of latching in the chat handler.
+					// Chat packets are processed on arrival, which is a
+					// different logic frame on every client, so a latch there
+					// desyncs anything that acts on it (the AI surrender
+					// check). A GameMessage executes on the same frame
+					// everywhere and is recorded in replays.
+					if (msg.startsWithNoCase(L"!unsurrender"))
+					{
+						GameMessage *consentMsg = TheMessageStream->appendMessage( GameMessage::MSG_SURRENDER_CONSENT );
+						if (consentMsg)
+							consentMsg->appendBooleanArgument( FALSE );
+					}
+					else if (msg.startsWithNoCase(L"!surrender"))
+					{
+						GameMessage *consentMsg = TheMessageStream->appendMessage( GameMessage::MSG_SURRENDER_CONSENT );
+						if (consentMsg)
+							consentMsg->appendBooleanArgument( TRUE );
+					}
+
 					TheLanguageFilter->filterLine(msg);
 					TheNetwork->sendChat(msg, playerMask);
 				}

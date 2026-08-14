@@ -1833,11 +1833,17 @@ void AISkirmishPlayer::processBeaconDirective()
 
 //----------------------------------------------------------------------------------------------------------
 // Surrender Directive: when a human ally types "!surrender" in chat, the
-// receive-side ConnectionManager::processChat() latches m_surrenderConsented
-// on the sender (frame-synchronized, identical across clients). This method
-// then kills this AI player once (a) at least one human ally has consented
-// AND (b) every human on this team is no longer active. "!unsurrender"
-// clears the flag on the sending player.
+// sending client posts GameMessage::MSG_SURRENDER_CONSENT through the
+// lockstep command stream (InGameChat.cpp), and GameLogicDispatch latches
+// m_surrenderConsented on the sender at the same logic frame on every client
+// (and in replays). This method then kills this AI player once (a) at least
+// one human ally has consented AND (b) every human on this team is no longer
+// active. "!unsurrender" clears the flag on the sending player.
+//
+// Do NOT latch the flag from chat receive paths: chat packets are processed
+// on arrival, which is a different logic frame on every client, and the
+// killPlayer() below then fires on different frames -> CRC mismatch (seen
+// live on 2026-08-08, seed 603038953).
 //----------------------------------------------------------------------------------------------------------
 void AISkirmishPlayer::processSurrenderDirective()
 {
