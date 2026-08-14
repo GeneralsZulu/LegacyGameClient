@@ -1438,8 +1438,11 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 				minFps = frameRate;
 			}
 
-			// TheSuperHackers @info this clamps the logic time scale fps in network games
-			minFps = clamp<Int>(MIN_LOGIC_FRAMES, minFps, TheGlobalData->m_framesPerSecondLimit);
+			// TheSuperHackers @info this clamps the logic time scale fps in network games.
+			// Anchor to LOGICFRAMES_PER_SECOND, not the render FPS cap: the render cap is
+			// a presentation setting (and may be raised well above 30), while network
+			// logic must never run faster than the designed logic rate.
+			minFps = clamp<Int>(MIN_LOGIC_FRAMES, minFps, LOGICFRAMES_PER_SECOND);
 			DEBUG_LOG_LEVEL(DEBUG_LEVEL_NET, ("ConnectionManager::updateRunAhead - minFps after adjustment is %d", minFps));
 
 			// TheSuperHackers @bugfix Mauller 21/08/2025 calculate the runahead so it always follows the latency

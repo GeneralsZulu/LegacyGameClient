@@ -424,7 +424,9 @@ void LANAPI::OnGameStart()
 		GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_NEW_GAME );
 		msg->appendIntegerArgument(GAME_LAN);
 
-		TheWritableGlobalData->m_useFpsLimit = false;
+		// The render FPS cap is suspended automatically while TheNetwork
+		// exists (FramePacer::isActualFramesPerSecondLimitEnabled), so it no
+		// longer needs to be toggled here and restored by the lobby.
 
 		// Set the seeds
 		InitRandom( m_currentGame->getSeed() );

@@ -136,6 +136,11 @@ public:
 	// catchup has ended.
 	Bool isResumeCatchupLeadIn() const;
 	Bool isLiveObserverMode() const { return m_mode == RECORDERMODETYPE_LIVE_OBSERVER; }
+	// True while a live observer is fast-forwarding through the initial
+	// snapshot (FPS boosted to 1000). Cleared once playback reaches the live
+	// edge. Logic pacing uses this to run one logic frame per render frame so
+	// the catchup actually runs faster than realtime.
+	Bool isLiveObserverCatchup() const { return isLiveObserverMode() && m_liveObserverFpsBoosted; }
 	// Returns true whenever the recorder is driving local playback and local
 	// user input should be suppressed / not fed into TheCommandList.
 	Bool isSuppressingLocalInput() const { return isPlaybackMode() || isResumeCatchupMode(); }

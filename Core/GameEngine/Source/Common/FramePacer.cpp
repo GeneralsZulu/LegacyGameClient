@@ -84,6 +84,12 @@ Bool FramePacer::isActualFramesPerSecondLimitEnabled() const
 {
 	Bool allowFpsLimit = true;
 
+	// Network games render uncapped so the run-ahead negotiation sees the
+	// machine's real frame rate. Keying this off TheNetwork here (instead of
+	// flipping m_useFpsLimit at every game-start site) means the cap comes
+	// back by itself when the game ends and can never leak into the shell.
+	allowFpsLimit &= (TheNetwork == nullptr);
+
 	if (TheTacticalView != nullptr)
 	{
 		allowFpsLimit &= TheTacticalView->getTimeMultiplier()<=1 && !TheScriptEngine->isTimeFast();

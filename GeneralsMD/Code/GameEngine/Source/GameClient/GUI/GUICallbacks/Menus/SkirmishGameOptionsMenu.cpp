@@ -406,7 +406,7 @@ void setFPSTextBox( Int sliderPos )
 		GadgetStaticTextSetText(staticTextGameSpeed, text);
 		return;
 	}
-	else if( sliderPos == TheGlobalData->m_framesPerSecondLimit )
+	else if( sliderPos == LOGICFRAMES_PER_SECOND )
 	{
 		// set different color
 		staticTextGameSpeed->winEnable(FALSE);
@@ -1386,7 +1386,7 @@ void SkirmishGameOptionsMenuInit( WindowLayout *layout, void *userData )
 	// set up the game speed slider
 //	NameKeyType sliderGameSpeedID = TheNameKeyGenerator->nameToKey( "SkirmishGameOptionsMenu.wnd:SliderGameSpeed" );
 	GameWindow *sliderGameSpeed = TheWindowManager->winGetWindowFromId( parentSkirmishGameOptions, sliderGameSpeedID );
-	Int sliderPos = max(15,min(61,prefs.getInt("FPS", TheGlobalData->m_framesPerSecondLimit)));
+	Int sliderPos = max(15,min(61,prefs.getInt("FPS", LOGICFRAMES_PER_SECOND)));
 	GadgetSliderSetPosition( sliderGameSpeed, sliderPos );
 	setFPSTextBox(sliderPos);
 	buttonStart->winSetText(TheGameText->fetch("GUI:Start"));
