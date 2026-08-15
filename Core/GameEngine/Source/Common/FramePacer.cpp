@@ -84,11 +84,26 @@ Bool FramePacer::isActualFramesPerSecondLimitEnabled() const
 {
 	Bool allowFpsLimit = true;
 
-	// Network games render uncapped so the run-ahead negotiation sees the
-	// machine's real frame rate. Keying this off TheNetwork here (instead of
+	// Network games are capped like everything else. Uncapped rendering is not
+	// needed for the run-ahead negotiation (it clamps its result to
+	// LOGICFRAMES_PER_SECOND, so any cap at or above that leaves it unchanged)
+	// and actively hurts on virtual or weak GPUs: presenting flat out congests
+	// the display pipeline until achieved fps lands BELOW what a capped
+	// renderer reaches, and that sagging display fps then negotiates the whole
+	// match down. Keying the exceptions off live state here (instead of
 	// flipping m_useFpsLimit at every game-start site) means the cap comes
 	// back by itself when the game ends and can never leak into the shell.
-	allowFpsLimit &= (TheNetwork == nullptr);
+	//
+	// The catchup paths are the exception: resume-from-replay catchup and the
+	// live-observer snapshot drain run one logic frame per render frame and
+	// intentionally fast-forward many times faster than realtime, so they need
+	// the render cap out of the way.
+	if (TheNetwork != nullptr)
+	{
+		const Bool inNetworkCatchup = TheRecorder
+			&& (TheRecorder->isResumeCatchupMode() || TheRecorder->isLiveObserverCatchup());
+		allowFpsLimit &= !inNetworkCatchup;
+	}
 
 	if (TheTacticalView != nullptr)
 	{

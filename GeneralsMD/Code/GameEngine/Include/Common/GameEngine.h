@@ -82,6 +82,7 @@ protected:
 	Bool canUpdateGameLogic();
 	Bool canUpdateNetworkGameLogic();
 	Bool canUpdateRegularGameLogic();
+	Bool canRunLogicCatchupTick();
 
 	virtual FileSystem *createFileSystem();								///< Factory for FileSystem classes
 	virtual LocalFileSystem *createLocalFileSystem() = 0;	///< Factory for LocalFileSystem classes
@@ -98,6 +99,7 @@ protected:
 	virtual AudioManager *createAudioManager(Bool dummy) = 0;				///< Factory for Audio Manager
 
 	Real m_logicTimeAccumulator; ///< Frame time accumulated towards submitting a new logic frame
+	Bool m_logicTimePaced; ///< Whether the last canUpdateRegularGameLogic call took the paced accumulator path (a prerequisite for catch-up ticks)
 
 	Bool m_quitting; ///< true when we need to quit the game
 	Bool m_isActive; ///< app has OS focus.

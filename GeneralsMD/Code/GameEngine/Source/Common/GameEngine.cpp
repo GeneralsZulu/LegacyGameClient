@@ -250,6 +250,7 @@ GameEngine::GameEngine()
 {
 	// initialize to non garbage values
 	m_logicTimeAccumulator = 0.0f;
+	m_logicTimePaced = FALSE;
 	m_quitting = FALSE;
 	m_isActive = FALSE;
 
@@ -912,6 +913,14 @@ Bool GameEngine::canUpdateNetworkGameLogic()
 	return false;
 }
 
+// Maximum number of additional logic ticks that may run within a single render
+// frame to repay accumulated logic time debt, and also the debt cap in logic
+// frames beyond the regular tick. Two extra ticks keep the game realtime down
+// to about a third of the logic rate in render fps; below that the game slows
+// down gracefully instead of spiraling (each extra tick costs CPU time that
+// would otherwise starve the renderer further).
+static const Int MAX_LOGIC_CATCHUP_TICKS = 2;
+
 /// -----------------------------------------------------------------------------------------------
 Bool GameEngine::canUpdateRegularGameLogic()
 {
@@ -933,6 +942,8 @@ Bool GameEngine::canUpdateRegularGameLogic()
 	const Bool inCatchup = TheRecorder
 		&& (TheRecorder->isResumeCatchupMode() || TheRecorder->isLiveObserverCatchup());
 
+	m_logicTimePaced = FALSE;
+
 	if (useFastMode || inCatchup || !enabled || logicTimeScaleFps >= maxRenderFps)
 	{
 		// Logic time scale is uncapped or larger equal Render FPS. Update straight away.
@@ -942,8 +953,17 @@ Bool GameEngine::canUpdateRegularGameLogic()
 	{
 		// TheSuperHackers @tweak xezon 06/08/2025
 		// The logic time step is now decoupled from the render update.
+		m_logicTimePaced = TRUE;
+
+		// Accumulate the real elapsed time, so time lost to render frames slower
+		// than the logic step is repaid with catch-up ticks in the same render
+		// frame (see canRunLogicCatchupTick) instead of being dropped, which
+		// would slow the game down whenever render fps sags below the logic
+		// rate. The accumulator is capped so a long stall (window drag, focus
+		// loss, level load) is forgiven rather than fast-forwarded through.
 		const Real targetFrameTime = 1.0f / logicTimeScaleFps;
-		m_logicTimeAccumulator += min(TheFramePacer->getUpdateTime(), targetFrameTime);
+		const Real maxAccumulatedTime = targetFrameTime * (1 + MAX_LOGIC_CATCHUP_TICKS);
+		m_logicTimeAccumulator = min(m_logicTimeAccumulator + TheFramePacer->getUpdateTime(), maxAccumulatedTime);
 
 		if (m_logicTimeAccumulator >= targetFrameTime)
 		{
@@ -953,6 +973,40 @@ Bool GameEngine::canUpdateRegularGameLogic()
 	}
 
 	return false;
+}
+
+/// -----------------------------------------------------------------------------------------------
+/** Whether one more logic tick may run within the current render frame to repay
+ * accumulated logic time debt. Only meaningful in the paced non-network path:
+ * network games are lockstep driven (canUpdateNetworkGameLogic) and the
+ * catchup and fast-forward modes already run unpaced. Consumes one logic frame
+ * of accumulated time on success. */
+Bool GameEngine::canRunLogicCatchupTick()
+{
+	if (TheNetwork != nullptr)
+		return false;
+
+	if (!m_logicTimePaced)
+		return false;
+
+	const Real targetFrameTime = 1.0f / TheFramePacer->getLogicTimeScaleFps();
+
+	if (m_logicTimeAccumulator < targetFrameTime)
+		return false;
+
+	// Same per-tick gating as canUpdateGameLogic: preUpdate can schedule a
+	// pause (pause-on-frame), and the previous tick's scripts can have frozen
+	// time or paused the game, so both must be re-evaluated before every tick.
+	TheGameLogic->preUpdate();
+
+	TheFramePacer->setTimeFrozen(isTimeFrozen());
+	TheFramePacer->setGameHalted(isGameHalted());
+
+	if (TheFramePacer->isGameHalted() || TheFramePacer->isTimeFrozen())
+		return false;
+
+	m_logicTimeAccumulator -= targetFrameTime;
+	return true;
 }
 
 /// -----------------------------------------------------------------------------------------------
@@ -1032,6 +1086,21 @@ void GameEngine::update()
 			if (!catchupSkipRender)
 				TheGameClient->step();
 			TheGameLogic->UPDATE();
+
+			// The engine runs at most one logic tick per render frame here, so
+			// on its own the paced path caps game speed at min(renderFps,
+			// logicFps): every render frame slower than the logic step loses
+			// simulation time. Repay that debt with additional headless ticks,
+			// the same client-less tick shape ReplaySimulation is CRC-verified
+			// with, keeping game speed realtime while render fps sags below the
+			// logic rate. Network games never take this path; their pacing is
+			// owned by the lockstep in canUpdateNetworkGameLogic.
+			Int catchupTicks = MAX_LOGIC_CATCHUP_TICKS;
+			while (catchupTicks-- > 0 && canRunLogicCatchupTick())
+			{
+				TheGameClient->updateHeadless();
+				TheGameLogic->UPDATE();
+			}
 		}
 		else if (canUpdateScript)
 		{
