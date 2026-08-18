@@ -29,6 +29,7 @@
 #include "Common/AcademyStats.h"
 #include "Common/IncomeType.h"
 #include "Common/ScoreKeeper.h"
+#include "GameClient/ControlBar.h"
 #include "GameLogic/Damage.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Object.h"
@@ -191,6 +192,7 @@ struct PlayerStateData
 	Int sciencePurchasePoints;
 	Bool hasRadar;
 	Bool isDead;
+	Bool isHunted;
 	Int bombardment;
 	Int holdTheLine;
 	Int searchAndDestroy;
@@ -208,6 +210,7 @@ struct SkillPointsEvent : StateChangeEvent { Int skillPoints; };
 struct SciencePointsEvent : StateChangeEvent { Int sciencePurchasePoints; };
 struct RadarEvent : StateChangeEvent { Bool hasRadar; };
 struct DeathEvent : StateChangeEvent {};
+struct HuntedEvent : StateChangeEvent { Bool hunted; };
 struct BattlePlanEvent : StateChangeEvent { Int bombardment; Int holdTheLine; Int searchAndDestroy; };
 
 struct FrameSnapshotData
@@ -270,6 +273,7 @@ struct StatsExporterState
 	std::vector<SciencePointsEvent> sciencePointsEvents;
 	std::vector<RadarEvent> radarEvents;
 	std::vector<DeathEvent> deathEvents;
+	std::vector<HuntedEvent> huntedEvents;
 	std::vector<BattlePlanEvent> battlePlanEvents;
 
 	void resetData()
@@ -289,6 +293,7 @@ struct StatsExporterState
 		sciencePointsEvents.clear();
 		radarEvents.clear();
 		deathEvents.clear();
+		huntedEvents.clear();
 		battlePlanEvents.clear();
 	}
 };
@@ -330,6 +335,69 @@ static void initPlayerMapping()
 	// Early calls (before players are fully initialized) will retry.
 	if (s_state.gamePlayerCount > 0)
 		s_state.mappingInitialized = TRUE;
+}
+
+//-----------------------------------------------------------------------------
+// "Hunted" detection: a player is hunted once they have lost the ability to
+// rebuild: no dozer/worker unit alive, and no completed structure whose
+// command set can produce one (command centers for every faction, plus the
+// GLA supply stash). Capability is checked from command sets rather than
+// faction lists so captured cross-faction structures and stolen dozers
+// count naturally (and can make a player un-hunted again).
+//-----------------------------------------------------------------------------
+
+struct HuntedCheckData
+{
+	Bool hasBuilder;
+};
+
+static void huntedCheckObjectFn(Object *obj, void *userData)
+{
+	HuntedCheckData *data = (HuntedCheckData *)userData;
+	if (data->hasBuilder || obj == nullptr)
+		return;
+	if (obj->isEffectivelyDead())
+		return;
+
+	if (obj->isKindOf(KINDOF_DOZER))
+	{
+		data->hasBuilder = TRUE;
+		return;
+	}
+
+	// A structure only counts if it is finished, not being sold, and can
+	// queue a dozer-kind unit from its command set.
+	if (obj->getStatusBits().test(OBJECT_STATUS_UNDER_CONSTRUCTION))
+		return;
+	if (obj->getStatusBits().test(OBJECT_STATUS_SOLD))
+		return;
+	if (TheControlBar == nullptr)
+		return;
+	const CommandSet *commandSet = TheControlBar->findCommandSet(obj->getCommandSetString());
+	if (commandSet == nullptr)
+		return;
+	for (Int j = 0; j < MAX_COMMANDS_PER_SET; ++j)
+	{
+		const CommandButton *button = commandSet->getCommandButton(j);
+		if (button == nullptr)
+			continue;
+		if (button->getCommandType() != GUI_COMMAND_UNIT_BUILD)
+			continue;
+		const ThingTemplate *thing = button->getThingTemplate();
+		if (thing != nullptr && thing->isKindOf(KINDOF_DOZER))
+		{
+			data->hasBuilder = TRUE;
+			return;
+		}
+	}
+}
+
+static Bool computePlayerIsHunted(const Player *player)
+{
+	HuntedCheckData data;
+	data.hasBuilder = FALSE;
+	player->iterateObjects(huntedCheckObjectFn, &data);
+	return !data.hasBuilder;
 }
 
 //-----------------------------------------------------------------------------
@@ -456,6 +524,24 @@ void StatsExporterCollectSnapshot()
 				dev.playerIndex = i;
 				s_state.deathEvents.push_back(dev);
 				last.isDead = curBool;
+			}
+
+			// Skip hunted evaluation once the player is dead: elimination
+			// destroys their objects and would emit a meaningless hunted
+			// event alongside the death event.
+			if (!player->isPlayerDead())
+			{
+				curBool = computePlayerIsHunted(player);
+				if (curBool != last.isHunted)
+				{
+					HuntedEvent hev;
+					memset(&hev, 0, sizeof(hev));
+					hev.frame = currentFrame;
+					hev.playerIndex = i;
+					hev.hunted = curBool;
+					s_state.huntedEvents.push_back(hev);
+					last.isHunted = curBool;
+				}
 			}
 
 			curVal = player->getBattlePlansActiveSpecific(PLANSTATUS_BOMBARDMENT);
@@ -725,6 +811,16 @@ static void writeStateChangeEventsJson(gzFile f)
 	}
 	gzputc(f, ']');
 
+	gzputs(f, ",\n\"huntedEvents\":[");
+	for (i = 0; i < s_state.huntedEvents.size(); ++i)
+	{
+		const HuntedEvent &ev = s_state.huntedEvents[i];
+		if (i > 0) gzputc(f, ',');
+		gzprintf(f, "{\"frame\":%u,\"player\":%d,\"hunted\":%s}",
+			ev.frame, remapPlayerIndex(ev.playerIndex), ev.hunted ? "true" : "false");
+	}
+	gzputc(f, ']');
+
 	gzputs(f, ",\n\"battlePlanEvents\":[");
 	for (i = 0; i < s_state.battlePlanEvents.size(); ++i)
 	{
@@ -901,7 +997,7 @@ AsciiString ExportGameStatsJSON(const AsciiString& replayDir, const AsciiString&
 		return AsciiString();
 	}
 
-	gzputs(f, "{\n\"version\":2,\n\"game\":{");
+	gzputs(f, "{\n\"version\":3,\n\"game\":{");
 	gzputs(f, "\"map\":");  gzPrintJsonStr(f, TheGlobalData->m_mapName.str());
 	gzputs(f, ",\"mode\":"); gzPrintJsonStr(f, gameModeToString(TheGameLogic->getGameMode()));
 	gzprintf(f, ",\"frameCount\":%u,\"seed\":%u,",
