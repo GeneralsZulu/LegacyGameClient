@@ -599,6 +599,7 @@ private:
 	void drawGameTime();
 	void drawPlayerInfoList();
 	void drawObserverPlayerTable();
+	void updateHuntedPlayers();				///< refresh the cached per-player hunted state and announce transitions
 
 public:
 	void registerWindowLayout(WindowLayout *layout); // register a layout for updates
@@ -873,6 +874,17 @@ protected:
 	};
 
 	ObserverPlayerTable						m_observerPlayerTable;
+
+	//
+	// Cached "hunted" state (player can no longer rebuild), one entry per player
+	// index. Recomputed on an interval rather than per frame because the check
+	// walks every object a player owns; see StatsExporterComputePlayerIsHunted.
+	// Only maintained for viewer-only clients - for anyone still playing it
+	// would leak that an opponent has no dozers left.
+	//
+	Bool													m_playerHunted[MAX_PLAYER_COUNT];
+	UnsignedInt										m_playerHuntedSinceFrame[MAX_PLAYER_COUNT];
+	UnsignedInt										m_nextHuntedEvalFrame;
 
 	PlayerInfoList								m_playerInfoList;
 	AsciiString										m_playerInfoListFont;

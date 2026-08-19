@@ -56,6 +56,15 @@ bool StatsExporterIsActive();
 /// replay-watch sessions where humans-vs-humans isn't actually happening.
 bool StatsExporterHasMinHumansForUpload();
 
+/// TRUE when the player has lost the ability to rebuild: no living dozer/worker
+/// and no finished, unsold structure whose command set can produce one. Shared
+/// with the observer UI so what viewers see and what the stats export records
+/// can never disagree. Walks every object the player owns, so callers that run
+/// per frame should cache the result rather than call it each time. Callers
+/// must skip dead players themselves; elimination destroys their objects and
+/// would otherwise read as "hunted".
+Bool StatsExporterComputePlayerIsHunted(const Player *player);
+
 /// Record a kill event with full context (called from Object::scoreTheKill).
 void StatsExporterRecordKill(const Object *killer, const Object *victim, const DamageInfo *damageInfo);
 
