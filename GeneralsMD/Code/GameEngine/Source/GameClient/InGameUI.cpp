@@ -49,6 +49,7 @@
 #include "Common/BuildAssistant.h"
 #include "Common/Recorder.h"
 #include "Common/SpecialPower.h"
+#include "Common/StatsExporter.h"
 
 #include "GameClient/Anim2D.h"
 #include "GameClient/ControlBar.h"
@@ -1202,6 +1203,14 @@ InGameUI::InGameUI()
 	m_cameoVideoStream = nullptr;
 	m_cameoVideoBuffer = nullptr;
 
+	// hunted-player cache (observer only)
+	for( i = 0; i < MAX_PLAYER_COUNT; i++ )
+	{
+		m_playerHunted[ i ] = FALSE;
+		m_playerHuntedSinceFrame[ i ] = 0;
+	}
+	m_nextHuntedEvalFrame = 0;
+
 	// message info
 	for( i = 0; i < MAX_UI_MESSAGES; i++ )
 	{
@@ -1926,6 +1935,9 @@ void InGameUI::update()
 		}
 	}
 
+	// observer-only: refresh who can no longer rebuild, and announce any change
+	updateHuntedPlayers();
+
 	//
 	// remove any message strings that have expired, note that the oldest strings are
 	// always at the end of the array (higher index numbers) so we can just remove things
@@ -2232,6 +2244,13 @@ void InGameUI::reset()
 	refreshCustomUiResources();
 
 	Int i;
+	for (i=0; i<MAX_PLAYER_COUNT; ++i)
+	{
+		m_playerHunted[i] = FALSE;
+		m_playerHuntedSinceFrame[i] = 0;
+	}
+	m_nextHuntedEvalFrame = 0;
+
 	for (i=0; i<MAX_PLAYER_COUNT; ++i)
 	{
 		for (SuperweaponMap::iterator mapIt = m_superweapons[i].begin(); mapIt != m_superweapons[i].end(); ++mapIt)
@@ -6528,6 +6547,72 @@ static UnicodeString formatObserverCash(UnsignedInt amount)
 }
 
 //-------------------------------------------------------------------------------------------------
+/** Refresh the cached "hunted" flag for every player and announce the transitions.
+	* Hunted means the player can no longer rebuild: no living dozer or worker, and no finished
+	* structure able to produce one. This calls the same check the stats export records, so what a
+	* viewer sees and what ends up in the match stats can never disagree.
+	*
+	* Viewer-only. Observers re-simulate every player, so the state is available for everyone on the
+	* map - which is exactly why it must not reach someone still playing, who would learn that an
+	* opponent has no dozers left. */
+//-------------------------------------------------------------------------------------------------
+void InGameUI::updateHuntedPlayers()
+{
+	if (!isViewerOnlyClient())
+		return;
+	if (ThePlayerList == nullptr || TheGameLogic == nullptr)
+		return;
+
+	const UnsignedInt now = TheGameLogic->getFrame();
+	if (now < m_nextHuntedEvalFrame)
+		return;
+	// The check walks every object a player owns, so it samples on the same
+	// once-a-second cadence the stats exporter uses rather than running per frame.
+	m_nextHuntedEvalFrame = now + LOGICFRAMES_PER_SECOND;
+
+	AsciiString name;
+	Int slotIndex;
+	for (slotIndex = 0; slotIndex < MAX_SLOTS; ++slotIndex)
+	{
+		name.format("player%d", slotIndex);
+		Player *player = ThePlayerList->findPlayerWithNameKey(TheNameKeyGenerator->nameToKey(name));
+		if (player == nullptr || player->isPlayerObserver())
+			continue;
+
+		const Int playerIndex = player->getPlayerIndex();
+		if (playerIndex < 0 || playerIndex >= MAX_PLAYER_COUNT)
+			continue;
+
+		// Elimination destroys a player's objects, so a dead player trivially reads as
+		// hunted. Clear it silently instead of announcing it - they are out, which the
+		// observer can already see, and a ticking hunted timer on a dead row is a lie.
+		if (player->isPlayerDead())
+		{
+			m_playerHunted[playerIndex] = FALSE;
+			m_playerHuntedSinceFrame[playerIndex] = 0;
+			continue;
+		}
+
+		const Bool hunted = StatsExporterComputePlayerIsHunted(player);
+		if (hunted == m_playerHunted[playerIndex])
+			continue;
+
+		m_playerHunted[playerIndex] = hunted;
+		m_playerHuntedSinceFrame[playerIndex] = hunted ? now : 0;
+
+		const UnicodeString announcement = hunted
+			? TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverPlayerHunted",
+					L"%ls is hunted", player->getPlayerDisplayName().str())
+			: TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverPlayerUnhunted",
+					L"%ls is no longer hunted", player->getPlayerDisplayName().str());
+
+		RGBColor rgb;
+		rgb.setFromInt(GameMakeColorReadable(player->getPlayerColor()));
+		messageNoFormat(&rgb, announcement);
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
 /** The box the observer sees while nothing is selected: a header row and one row per player,
 	* each row in that player's color, anchored bottom center in the gap the observer control bar
 	* leaves open. Drawn after the windows, so it sits on top of the bar. */
@@ -6558,6 +6643,22 @@ void InGameUI::drawObserverPlayerTable()
 
 		const Int teamNumber = (slot && slot->getTeamNumber() >= 0) ? slot->getTeamNumber() + 1 : 0;
 		text.format(L"(%d) %s", teamNumber, player->getPlayerDisplayName().str());
+
+		//
+		// Hunted players are marked in place rather than given their own column: the
+		// table is already eight columns wide. How long they have held out matters as
+		// much as the fact - most are dead within a minute, so the ones that are not
+		// are the interesting story - hence the running clock rather than a bare flag.
+		//
+		const Int playerIndex = player->getPlayerIndex();
+		if (playerIndex >= 0 && playerIndex < MAX_PLAYER_COUNT && m_playerHunted[playerIndex])
+		{
+			const UnsignedInt heldFrames = TheGameLogic->getFrame() - m_playerHuntedSinceFrame[playerIndex];
+			const Int heldSeconds = (Int)(heldFrames / LOGICFRAMES_PER_SECOND);
+			text.concat(TheGameText->FETCH_OR_SUBSTITUTE_FORMAT("GUI:ObserverTableHunted",
+				L" [HUNTED %d:%02d]", heldSeconds / 60, heldSeconds % 60));
+		}
+
 		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Player][row]->setText(text);
 
 		m_observerPlayerTable.cells[ObserverPlayerTable::ColumnType_Army][row]->setText(getObserverArmyLabel(player));

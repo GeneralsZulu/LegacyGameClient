@@ -392,8 +392,11 @@ static void huntedCheckObjectFn(Object *obj, void *userData)
 	}
 }
 
-static Bool computePlayerIsHunted(const Player *player)
+Bool StatsExporterComputePlayerIsHunted(const Player *player)
 {
+	if (player == nullptr)
+		return FALSE;
+
 	HuntedCheckData data;
 	data.hasBuilder = FALSE;
 	player->iterateObjects(huntedCheckObjectFn, &data);
@@ -531,7 +534,7 @@ void StatsExporterCollectSnapshot()
 			// event alongside the death event.
 			if (!player->isPlayerDead())
 			{
-				curBool = computePlayerIsHunted(player);
+				curBool = StatsExporterComputePlayerIsHunted(player);
 				if (curBool != last.isHunted)
 				{
 					HuntedEvent hev;
