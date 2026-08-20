@@ -63,6 +63,49 @@ map history blurbs work. The pipeline:
   the upload helpers on game-over, gated on `>= 2 human players`
   (commit `9bc0a2a8d`).
 
+## Connection-failure logs (online lobby)
+
+Everything above fires at game-over. The one failure that never
+reaches it is the one players report most: "I couldn't host" /
+"I couldn't join". No match starts, so nothing is ever uploaded,
+and the client's `ReleaseLog.txt` is rewritten on the next launch
+— by the time anyone asks, the evidence is gone on both ends.
+
+The online lobby therefore ships its own log the moment an attempt
+fails (`coordinatorReportFailure` in `LanLobbyMenu.cpp`):
+
+- **Triggers** — `connect` (socket/DNS failure before the session
+  starts), `host` (the coordinator refused or errored the host
+  request), `host-ack` (the listing was never confirmed within
+  15 s), `join` (after the two automatic retries are exhausted),
+  `version` (version-mismatch refusal), `closed` (the coordinator
+  dropped a live session), `coordinator` (anything else).
+- **What is sent** — a `Coordinator FAILURE (<phase>)` summary line
+  (endpoint, nick, state, last error, discovered public addresses,
+  hosted/join ids, retry count) is written to `ReleaseLog.txt`, then
+  that log — plus the debug log in logging builds — is POSTed to the
+  same cncstats `/logs` endpoint the match telemetry uses, on the
+  same background worker. Nothing blocks the UI.
+- **How it is keyed** — `X-Game-Seed` is not a seed here (there is
+  no match); it is a per-UTC-day bucket, `connfail-YYYYMMDD`, and
+  `X-Player` is `<nick>-<HHMMSS>-<phase>`. One evening's failures
+  across all players come back in a single request:
+
+      curl -H "Authorization: Bearer $KEY" \
+        "https://cncstats.computersrfun.org/get_logs?seed=connfail-20260820" -o logs.zip
+
+- **Bounded** — at most four uploads per visit to the lobby, so a
+  player stuck in a retry loop can't spam the server.
+- **Testing** — `-logsUrl http://127.0.0.1:9099/logs` redirects the
+  upload at a local listener, and `-coordhost <host:port>` points the
+  lobby at a dead or local coordinator to provoke each phase.
+
+The server half is `pkg/serverlog` in cncstats: the coordinator's
+log lines (tagged `component=coordinator`, including every rejection
+it sends a client) are teed from container stderr into a per-day file
+on the logs volume, so a redeploy no longer erases the record of a
+player's failed session.
+
 ## Concerns
 
 - **Privacy.** The replay and stats uploads include player names,

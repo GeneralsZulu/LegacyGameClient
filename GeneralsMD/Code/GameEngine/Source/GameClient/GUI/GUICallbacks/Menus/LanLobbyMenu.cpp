@@ -42,6 +42,7 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/QuotedPrintable.h"
 #include "Common/ReleaseLog.h"
+#include "Common/StatsUploader.h"
 #include "Common/OptionPreferences.h"
 #include "GameClient/AnimateWindowManager.h"
 #include "GameClient/ClientInstance.h"
@@ -95,10 +96,24 @@ static const Int                COORD_JOIN_MAX_RETRIES = 2;
 // Observe-in-progress: game id whose observe request should be sent once
 // the coordinator connection is READY (mirrors s_coordPendingJoinID).
 static AsciiString              s_coordPendingObserveID;
+// Failure diagnostics: a host/join that never becomes a game produces no
+// end-of-match telemetry, so the ReleaseLog is shipped from here instead.
+// Bounded per lobby visit so a player stuck in a retry loop can't spam the
+// server (and so the log we do get is the first, most informative one).
+static Int                      s_coordFailureUploads = 0;
+static const Int                COORD_MAX_FAILURE_UPLOADS = 4;
+// Time requestHost() was sent, for the listing-ack watchdog below. 0 = no
+// host request outstanding.
+static UnsignedInt              s_coordHostRequestMs = 0;
 
 static const char* COORD_HOST_DEFAULT = "cncstats.computersrfun.org";
 static const UnsignedShort COORD_TCP_PORT_DEFAULT = 27500;
 static const UnsignedInt   COORD_LIST_REFRESH_MS  = 5000;
+// How long to wait for the coordinator to ack a host request before calling
+// the attempt failed. The ack is one TCP round trip; anything approaching
+// this means the signaling channel is not working, and without the watchdog
+// the lobby just sits on "Waiting for players to join..." forever.
+static const UnsignedInt   COORD_HOST_ACK_TIMEOUT_MS = 15000;
 
 void LanLobbyMenuSetUseCoordinator( Bool enable )
 {
@@ -171,6 +186,7 @@ OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator()
 // just above LanLobbyMenuUpdate further down in this file.
 static void connectCoordinatorIfNeeded();
 static void pumpCoordinator();
+static void coordinatorPostStatus(const char* msg);
 
 
 
@@ -528,6 +544,8 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	s_coordPendingJoinID.clear();
 	s_coordListedIDs.clear();
 	s_coordLastListMs = 0;
+	s_coordFailureUploads = 0;
+	s_coordHostRequestMs = 0;
 	if (s_useCoordinator)
 	{
 		if (TheLAN)
@@ -789,6 +807,104 @@ static AsciiString readPlayerNickAscii()
 	return a;
 }
 
+// Coordinator endpoint, honouring the -coordhost "host[:port]" override
+// used by the lab/test harnesses.
+static void coordinatorEndpoint(AsciiString& outHost, UnsignedShort& outPort)
+{
+	outHost = COORD_HOST_DEFAULT;
+	outPort = COORD_TCP_PORT_DEFAULT;
+	if (TheGlobalData->m_coordHost.isEmpty())
+		return;
+
+	AsciiString host = TheGlobalData->m_coordHost;
+	const char* colon = strchr(host.str(), ':');
+	if (colon)
+	{
+		outPort = (UnsignedShort)atoi(colon + 1);
+		AsciiString hostOnly;
+		for (const char* p = host.str(); p != colon; ++p)
+			hostOnly.concat(*p);
+		host = hostOnly;
+	}
+	outHost = host;
+}
+
+// An online attempt failed before any game existed. Write the full picture to
+// the ReleaseLog and ship that log to cncstats right now.
+//
+// This is the only path that ever produces server-side evidence for "I
+// couldn't host" / "I couldn't join": no match means no end-of-match
+// telemetry, and the player's ReleaseLog is truncated by their next launch.
+// The upload is keyed by a per-day bucket so a whole evening's failures come
+// back from one /get_logs?seed=connfail-YYYYMMDD, and by a per-attempt player
+// id so two failures never overwrite each other.
+//
+// `phase` is a short tag for what was being attempted; coordFailurePhase()
+// derives it from the state the session failed out of.
+static void coordinatorReportFailure(const char* phase)
+{
+	if (s_coord == nullptr)
+		return;
+
+	AsciiString host;
+	UnsignedShort port = 0;
+	coordinatorEndpoint(host, port);
+
+	ReleaseLog("Coordinator FAILURE (%s): coord=%s:%u nick=%s state=%d amIHost=%d error=\"%s\" "
+		"publicLobby=%s publicGame=%s local=%s hostedID=%s joinID=%s retries=%d",
+		phase, host.str(), (unsigned)port, s_coordCurrentNick.str(),
+		(Int)s_coord->state(), (Int)s_coord->amIHost(), s_coord->lastError().str(),
+		s_coord->publicAddr().str(), s_coord->gamePublicAddr().str(), s_coord->localAddr().str(),
+		s_coord->hostedGameID().str(), s_coordLastJoinID.str(), s_coordJoinRetries);
+
+	if (TheGlobalData->m_logsUrl.isEmpty())
+		return;
+	if (s_coordFailureUploads >= COORD_MAX_FAILURE_UPLOADS)
+		return;
+	++s_coordFailureUploads;
+
+	// UTC so every player's failures on one game night land in the same
+	// bucket regardless of time zone.
+	SYSTEMTIME st;
+	GetSystemTime(&st);
+	AsciiString seedLabel;
+	seedLabel.format("connfail-%04u%02u%02u",
+		(unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay);
+	AsciiString playerId;
+	playerId.format("%s-%02u%02u%02u-%s",
+		s_coordCurrentNick.isEmpty() ? "anonymous" : s_coordCurrentNick.str(),
+		(unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond, phase);
+
+	std::vector<AsciiString> paths;
+	paths.push_back(AsciiString(ReleaseGetLogFileName()));
+#ifdef DEBUG_LOGGING
+	paths.push_back(AsciiString(DebugGetLogFileName()));
+#endif
+	ReleaseLog("Coordinator FAILURE (%s): uploading logs as %s/%s",
+		phase, seedLabel.str(), playerId.str());
+	StartDiagnosticLogUpload(TheGlobalData->m_logsUrl, seedLabel, playerId, paths);
+}
+
+// What the session was doing when it failed. STATE_ERROR erases the previous
+// state, so the caller passes the state from before update() ran; this is the
+// difference between "we never reached the coordinator" and "the punch to the
+// other player timed out", which is the first thing anyone triaging the
+// uploaded log needs to know.
+static const char* coordFailurePhase(OnlineCoordinatorAPI::State prev)
+{
+	switch (prev)
+	{
+	case OnlineCoordinatorAPI::STATE_CONNECTING:  return "connect";
+	case OnlineCoordinatorAPI::STATE_HANDSHAKING: return "hello";
+	case OnlineCoordinatorAPI::STATE_DISCOVERING: return "stun";
+	case OnlineCoordinatorAPI::STATE_READY:       return "ready";
+	case OnlineCoordinatorAPI::STATE_HOSTING:     return "host";
+	case OnlineCoordinatorAPI::STATE_JOINING:     return "join";
+	case OnlineCoordinatorAPI::STATE_PUNCHING:    return "punch";
+	default:                                      return "coordinator";
+	}
+}
+
 static void connectCoordinatorIfNeeded()
 {
 	if (!s_coord) return;
@@ -798,22 +914,10 @@ static void connectCoordinatorIfNeeded()
 		return;
 	}
 	s_coordCurrentNick = readPlayerNickAscii();
-	AsciiString host = COORD_HOST_DEFAULT;
+	AsciiString host;
 	UnsignedShort tcpPort = COORD_TCP_PORT_DEFAULT;
-	// -coordhost "host[:port]" override for lab/testing.
-	if (!TheGlobalData->m_coordHost.isEmpty())
-	{
-		host = TheGlobalData->m_coordHost;
-		const char* colon = strchr(host.str(), ':');
-		if (colon)
-		{
-			tcpPort = (UnsignedShort)atoi(colon + 1);
-			AsciiString hostOnly;
-			for (const char* p = host.str(); p != colon; ++p)
-				hostOnly.concat(*p);
-			host = hostOnly;
-		}
-	}
+	coordinatorEndpoint(host, tcpPort);
+	s_coordHostRequestMs = 0;
 	// Bind UDP/8086 (lobby) so the punched NAT mapping is on the port the LAN
 	// code will rebind after PUNCH_OK, AND UDP/8088 (NETWORK_BASE_PORT_NUMBER,
 	// in-game data) so ConnectionManager's later socket inherits an already-
@@ -832,7 +936,15 @@ static void connectCoordinatorIfNeeded()
 		s_coordCurrentNick, buildVersion,
 		/*lobbyBindPort=*/8086, /*gameBindPort=*/NETWORK_BASE_PORT_NUMBER))
 	{
+		// Synchronous failures (name resolution, or UDP 8086/8088 already
+		// taken by another copy of the game) never reach the state-change
+		// handler in pumpCoordinator, so report them here or they are
+		// invisible to both the player and the server.
 		ReleaseLog("Coordinator connect FAILED: %s", s_coord->lastError().str());
+		AsciiString msg;
+		msg.format("Could not start the online connection: %s", s_coord->lastError().str());
+		coordinatorPostStatus(msg.str());
+		coordinatorReportFailure("connect");
 	}
 }
 
@@ -958,6 +1070,7 @@ static void pumpCoordinator()
 			if (definitiveError)
 			{
 				coordinatorPostStatus(s_coord->lastError().str());
+				coordinatorReportFailure("version");
 				s_coordLastJoinID.clear();
 				s_coordJoinRetries = 0;
 				connectCoordinatorIfNeeded();
@@ -982,6 +1095,7 @@ static void pumpCoordinator()
 				// Retries exhausted: give a human answer and put the lobby
 				// back into a usable browsing state.
 				coordinatorPostStatus("Could not connect to that game's host. Their network may be blocking the connection.");
+				coordinatorReportFailure("join");
 				s_coordLastJoinID.clear();
 				s_coordJoinRetries = 0;
 				connectCoordinatorIfNeeded();
@@ -991,7 +1105,24 @@ static void pumpCoordinator()
 				AsciiString s;
 				s.format("Connection error: %s", s_coord->lastError().str());
 				coordinatorPostStatus(s.str());
+				// Hosting has no retry path (nobody is waiting on us), so
+				// this is where a failed host lands, along with any error
+				// raised before a host/join was ever dispatched.
+				coordinatorReportFailure(coordFailurePhase(prevState));
 			}
+		}
+		// The coordinator closing the TCP session drops us to IDLE without an
+		// error. Before the handoff that silently kills hosting/browsing: the
+		// lobby keeps showing a stale games list and the Host button does
+		// nothing. Treat it as a failure, then reconnect so the lobby heals.
+		if (state == OnlineCoordinatorAPI::STATE_IDLE && !s_coordHandoffDone
+			&& prevState != OnlineCoordinatorAPI::STATE_IDLE
+			&& prevState != OnlineCoordinatorAPI::STATE_ERROR)
+		{
+			coordinatorPostStatus("The online service closed the connection. Reconnecting...");
+			coordinatorReportFailure("closed");
+			s_coordHostRequestMs = 0;
+			connectCoordinatorIfNeeded();
 		}
 		if (state == OnlineCoordinatorAPI::STATE_PUNCH_OK && !s_coordHandoffDone)
 		{
@@ -1009,6 +1140,26 @@ static void pumpCoordinator()
 	// it further in this tick.
 	if (!s_coord)
 		return;
+
+	// Host watchdog: the request went out but the coordinator never acked
+	// the listing. Without this the lobby claims the game is registered and
+	// waits forever for joiners who can't see it.
+	if (!s_coordHandoffDone
+	    && s_coord->amIHost()
+	    && s_coord->state() == OnlineCoordinatorAPI::STATE_HOSTING
+	    && s_coord->hostedGameID().isEmpty()
+	    && s_coordHostRequestMs != 0
+	    && timeGetTime() - s_coordHostRequestMs > COORD_HOST_ACK_TIMEOUT_MS)
+	{
+		coordinatorPostStatus("The online service never confirmed your game. Reconnecting - please try hosting again.");
+		coordinatorReportFailure("host-ack");
+		s_coordHostRequestMs = 0;
+		// Force a clean session: connectCoordinatorIfNeeded only acts from
+		// IDLE/ERROR, and this one is stuck in HOSTING.
+		s_coord->disconnect();
+		connectCoordinatorIfNeeded();
+		return;
+	}
 
 	// Host: as soon as the coordinator ACKS our listing (game_id in hand,
 	// so joiners can actually find us), hand off to the LAN lobby instead
@@ -1101,6 +1252,10 @@ static void pumpCoordinator()
 			}
 			s_coord->requestHost(u, mapLeaf, maxPlayers);
 			s_coordPendingHostName.clear();
+			// Arm the listing-ack watchdog (never 0, which means "not armed").
+			s_coordHostRequestMs = timeGetTime();
+			if (s_coordHostRequestMs == 0)
+				s_coordHostRequestMs = 1;
 		}
 		else if (!s_coordPendingJoinID.isEmpty())
 		{
@@ -1180,6 +1335,8 @@ static void doCoordinatorHostHandoffToLAN()
 {
 	if (!s_coord || s_coordHandoffDone) return;
 	DEBUG_LOG(("HOST HANDOFF: start (pre-joiner)"));
+	// Listing acked: the host watchdog has nothing left to catch.
+	s_coordHostRequestMs = 0;
 
 	// Set BEFORE anything can push a screen: RequestGameCreate's
 	// OnGameCreate callback runs TheShell->push synchronously, which runs

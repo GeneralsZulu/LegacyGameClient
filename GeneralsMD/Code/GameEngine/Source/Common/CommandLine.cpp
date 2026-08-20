@@ -460,6 +460,19 @@ Int parseStatsUrl(char *args[], int num)
 	return 1;
 }
 
+// Override the /logs endpoint (GameData.ini LogsUrl). Lets the
+// connection-failure and end-of-match log uploads be pointed at a local
+// listener for testing instead of production cncstats.
+Int parseLogsUrl(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_logsUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
 // TheSuperHackers @feature Path to a JSON-lines file that batch replay
 // simulation appends a per-replay verdict to (OK / OK_RETAIL_UNCHECKED /
 // DESYNC / INCOMPLETE / CANT_OPEN). Forwarded to worker processes when
@@ -1445,6 +1458,9 @@ static CommandLineParam paramsForStartup[] =
 	// URL to POST gzipped stats JSON after export. Defaults to the project
 	// stats endpoint; pass an empty string ("") to skip upload.
 	{ "-statsUrl", parseStatsUrl },
+
+	// Override the client log-upload endpoint (GameData.ini LogsUrl).
+	{ "-logsUrl", parseLogsUrl },
 
 	// Path to a JSON-lines result log for batch replay simulation. Each replay
 	// appends one line with its verdict (OK / OK_RETAIL_UNCHECKED / DESYNC /

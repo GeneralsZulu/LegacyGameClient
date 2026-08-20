@@ -67,6 +67,30 @@ struct MatchTelemetryUpload
 /// threads (AsciiString's refCount is non-atomic).
 void StartMatchTelemetryUpload(const MatchTelemetryUpload& p);
 
+/// Ship this client's diagnostic logs when there is no match to attach them
+/// to - specifically when an online host/join attempt fails, which is the one
+/// failure mode that never reaches the end-of-match telemetry above (no game
+/// ever starts, so nothing is ever uploaded and the evidence dies with the
+/// player's next launch).
+///
+/// Same worker, same /logs endpoint, same per-file gzip; only the key differs.
+/// `seedLabel` replaces the numeric game seed in the X-Game-Seed header, so
+/// pick something a human can ask the server for later (the lobby uses one
+/// bucket per day, "connfail-YYYYMMDD", and puts the attempt's timestamp in
+/// `playerId` so repeated failures don't overwrite each other).
+///
+/// Non-blocking and best-effort: files that don't exist are skipped, and the
+/// whole upload is dropped rather than reported if nothing can be read or the
+/// worker can't start. Safe to call from the main thread mid-menu.
+/// @param logsUrl Full URL of the /logs endpoint (empty disables)
+/// @param seedLabel X-Game-Seed value; header/path-sanitized internally
+/// @param playerId X-Player grouping id, sanitized the same way
+/// @param logFilePaths On-disk log files to ship (up to 4 are taken)
+void StartDiagnosticLogUpload(const AsciiString& logsUrl,
+                              const AsciiString& seedLabel,
+                              const AsciiString& playerId,
+                              const std::vector<AsciiString>& logFilePaths);
+
 /// Upload gzip-compressed stats data to a REST endpoint via HTTP POST.
 /// Sends Content-Type: application/gzip with the X-Game-Seed header.
 /// @param url Full URL including path (e.g. "http://server:8080/stats")
