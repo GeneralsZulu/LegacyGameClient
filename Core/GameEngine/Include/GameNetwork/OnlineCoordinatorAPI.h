@@ -249,6 +249,13 @@ private:
 	// open our NAT mapping without reaching (and poisoning) the peer's NAT.
 	Int           m_punchTtl;
 
+	// Deadline for the in-flight TCP connect (0 = none). A coordinator port
+	// that is filtered rather than refused produces no socket event at all,
+	// so without this the client sits in STATE_CONNECTING for as long as the
+	// OS keeps retrying SYNs - which looks to the player like a lobby that
+	// simply never works.
+	UnsignedInt   m_connectDeadlineMs;
+
 	// TCP receive buffer (raw bytes; lines extracted in pumpTcpRecv)
 	std::vector<char> m_rxBuf;
 
