@@ -219,15 +219,17 @@ static void closeHttpRequest(WinInetSession *s)
 	if (s->hInternet) InternetCloseHandle(s->hInternet);
 }
 
-// Shared HTTP POST. Posts arbitrary bytes with the given Content-Type and
-// the X-Game-Seed header. Best-effort; logs status to stdout.
-static void httpPostBytes(const AsciiString& url,
-                          const void *data,
-                          unsigned int dataLen,
-                          const char *contentType,
-                          const char *extraHeaders,
-                          unsigned int seed,
-                          const char *logTag)
+// Shared HTTP POST, X-Game-Seed given as an already-formatted string. Match
+// telemetry passes the numeric game seed (see httpPostBytes); uploads that
+// have no match to key off - the coordinator connection-failure logs - pass
+// a bucket label instead. Best-effort; logs status to stdout.
+static void httpPostBytesSeedStr(const AsciiString& url,
+                                 const void *data,
+                                 unsigned int dataLen,
+                                 const char *contentType,
+                                 const char *extraHeaders,
+                                 const char *seedStr,
+                                 const char *logTag)
 {
 	if (data == nullptr || dataLen == 0)
 		return;
@@ -237,7 +239,8 @@ static void httpPostBytes(const AsciiString& url,
 		return;
 
 	char headers[1024];
-	int n = sprintf(headers, "Content-Type: %s\r\nX-Game-Seed: %u\r\n", contentType, seed);
+	int n = sprintf(headers, "Content-Type: %s\r\nX-Game-Seed: %.63s\r\n", contentType,
+		(seedStr != nullptr) ? seedStr : "0");
 	if (extraHeaders != nullptr && extraHeaders[0] != '\0' && n < (int)sizeof(headers))
 	{
 		// Caller-provided extra headers (already terminated with \r\n).
@@ -266,6 +269,20 @@ static void httpPostBytes(const AsciiString& url,
 	}
 
 	closeHttpRequest(&s);
+}
+
+// Numeric-seed form: every match-telemetry channel goes through here.
+static void httpPostBytes(const AsciiString& url,
+                          const void *data,
+                          unsigned int dataLen,
+                          const char *contentType,
+                          const char *extraHeaders,
+                          unsigned int seed,
+                          const char *logTag)
+{
+	char seedStr[32];
+	sprintf(seedStr, "%u", seed);
+	httpPostBytesSeedStr(url, data, dataLen, contentType, extraHeaders, seedStr, logTag);
 }
 
 void UploadStatsToServer(const AsciiString& url, const void *data, unsigned int dataLen, unsigned int seed)
@@ -317,16 +334,16 @@ struct MultipartTextField
 // Issue an HTTP POST as multipart/form-data with one binary part plus any
 // number of text parts. Skips any text field whose value is empty so we
 // don't bake a sentinel into the form.
-static void httpPostMultipartFile(const AsciiString& url,
-                                  const char *fieldName,
-                                  const char *filename,
-                                  const void *data,
-                                  unsigned int dataLen,
-                                  const MultipartTextField *textFields,
-                                  unsigned int textFieldCount,
-                                  const char *extraHeaders,
-                                  unsigned int seed,
-                                  const char *logTag)
+static void httpPostMultipartFileSeedStr(const AsciiString& url,
+                                         const char *fieldName,
+                                         const char *filename,
+                                         const void *data,
+                                         unsigned int dataLen,
+                                         const MultipartTextField *textFields,
+                                         unsigned int textFieldCount,
+                                         const char *extraHeaders,
+                                         const char *seedStr,
+                                         const char *logTag)
 {
 	if (data == nullptr || dataLen == 0)
 		return;
@@ -390,9 +407,27 @@ static void httpPostMultipartFile(const AsciiString& url,
 	char contentType[128];
 	sprintf(contentType, "multipart/form-data; boundary=%s", boundary);
 
-	httpPostBytes(url, body, bodyLen, contentType, extraHeaders, seed, logTag);
+	httpPostBytesSeedStr(url, body, bodyLen, contentType, extraHeaders, seedStr, logTag);
 
 	free(body);
+}
+
+// Numeric-seed form (match telemetry); see httpPostBytesSeedStr.
+static void httpPostMultipartFile(const AsciiString& url,
+                                  const char *fieldName,
+                                  const char *filename,
+                                  const void *data,
+                                  unsigned int dataLen,
+                                  const MultipartTextField *textFields,
+                                  unsigned int textFieldCount,
+                                  const char *extraHeaders,
+                                  unsigned int seed,
+                                  const char *logTag)
+{
+	char seedStr[32];
+	sprintf(seedStr, "%u", seed);
+	httpPostMultipartFileSeedStr(url, fieldName, filename, data, dataLen,
+		textFields, textFieldCount, extraHeaders, seedStr, logTag);
 }
 
 // ---------------------------------------------------------------------------
@@ -3051,6 +3086,10 @@ struct TelemetryLogBuf
 struct TelemetryJob
 {
 	unsigned int seed;
+	// Non-empty overrides `seed` for the X-Game-Seed header on the log
+	// upload. Diagnostic uploads that happen outside a match (a failed
+	// online host/join) have no seed, so they group under a label instead.
+	char seedLabel[64];
 
 	bool haveStats;
 	char statsUrl[512];
@@ -3139,6 +3178,14 @@ static unsigned __stdcall telemetryThreadProc(void *arg)
 			char playerHeader[192];
 			sprintf(playerHeader, "X-Player: %s\r\n", playerToken);
 
+			// One X-Game-Seed for every file in this job: the numeric match
+			// seed, or the diagnostic bucket label when there is no match.
+			char seedStr[64];
+			if (job->seedLabel[0] != '\0')
+				copyCStr(seedStr, sizeof(seedStr), job->seedLabel);
+			else
+				sprintf(seedStr, "%u", job->seed);
+
 			unsigned int i;
 			for (i = 0; i < job->logCount; ++i)
 			{
@@ -3158,8 +3205,8 @@ static unsigned __stdcall telemetryThreadProc(void *arg)
 					nameBuf, gzLen, job->logs[i].len);
 				fflush(stdout);
 
-				httpPostMultipartFile(AsciiString(job->logsUrl), "file", nameBuf, gz, gzLen,
-					nullptr, 0, playerHeader, job->seed, "Log upload");
+				httpPostMultipartFileSeedStr(AsciiString(job->logsUrl), "file", nameBuf, gz, gzLen,
+					nullptr, 0, playerHeader, seedStr, "Log upload");
 
 				free(gz);
 			}
@@ -3281,6 +3328,64 @@ void StartMatchTelemetryUpload(const MatchTelemetryUpload& p)
 	if (hThread == NULL)
 	{
 		// Couldn't spawn; telemetry is best-effort, so just drop it.
+		freeTelemetryJob(job);
+		return;
+	}
+	CloseHandle(hThread); // detached; the worker frees the job when it finishes
+}
+
+void StartDiagnosticLogUpload(const AsciiString& logsUrl,
+                              const AsciiString& seedLabel,
+                              const AsciiString& playerId,
+                              const std::vector<AsciiString>& logFilePaths)
+{
+	if (logsUrl.isEmpty() || seedLabel.isEmpty() || logFilePaths.empty())
+		return;
+
+	TelemetryJob *job = (TelemetryJob *)calloc(1, sizeof(TelemetryJob));
+	if (job == nullptr)
+		return;
+
+	copyCStr(job->logsUrl, sizeof(job->logsUrl), logsUrl.str());
+	copyCStr(job->playerId, sizeof(job->playerId), playerId.str());
+	// The label lands in an HTTP header and, server-side, in a directory
+	// name; sanitize it exactly like the player id.
+	sanitizeHeaderToken(seedLabel, job->seedLabel, sizeof(job->seedLabel));
+	if (job->seedLabel[0] == '\0')
+	{
+		freeTelemetryJob(job);
+		return;
+	}
+
+	size_t i;
+	const size_t maxLogs = sizeof(job->logs) / sizeof(job->logs[0]);
+	for (i = 0; i < logFilePaths.size() && job->logCount < maxLogs; ++i)
+	{
+		if (logFilePaths[i].isEmpty())
+			continue;
+
+		unsigned char *b = nullptr;
+		unsigned int n = 0;
+		if (!readWholeFile(logFilePaths[i].str(), &b, &n))
+			continue;
+
+		TelemetryLogBuf *slot = &job->logs[job->logCount];
+		slot->bytes = b;
+		slot->len = n;
+		sanitizeMultipartFilename(logFilePaths[i].str(), slot->name, sizeof(slot->name));
+		++job->logCount;
+	}
+	job->haveLogs = (job->logCount > 0);
+	if (!job->haveLogs)
+	{
+		freeTelemetryJob(job);
+		return;
+	}
+
+	unsigned threadId = 0;
+	HANDLE hThread = (HANDLE)_beginthreadex(nullptr, 0, telemetryThreadProc, job, 0, &threadId);
+	if (hThread == NULL)
+	{
 		freeTelemetryJob(job);
 		return;
 	}

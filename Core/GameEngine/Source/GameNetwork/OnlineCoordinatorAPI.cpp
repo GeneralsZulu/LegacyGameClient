@@ -56,6 +56,11 @@ static const UnsignedInt  STUN_PROBE_INTERVAL_MS = 500;
 static const Int          STUN_PROBE_MAX_TRIES   = 6;
 static const UnsignedInt  PUNCH_BLAST_INTERVAL_MS = 200;
 static const UnsignedInt  PUNCH_TIMEOUT_MS        = 8000;
+// How long to wait for the signaling TCP connect to complete. Windows retries
+// a dropped SYN for ~21s and then fails, but a firewall that blackholes the
+// port can keep the connect pending far longer; either way the player needs
+// an answer rather than a spinner.
+static const UnsignedInt  TCP_CONNECT_TIMEOUT_MS  = 15000;
 // The first punch volley goes out with a low IP TTL: enough hops to cross
 // our own NAT(s) (home router + possible CGNAT) and create the outbound
 // mapping, but expiring in transit before reaching the peer's NAT. Without
@@ -507,6 +512,7 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_punchOkGame(FALSE)
 	, m_punchTtl(0)
 	, m_lastHeartbeatMs(0)
+	, m_connectDeadlineMs(0)
 	, m_coordTcpPort(0)
 {
 	memset(&m_peerInfo, 0, sizeof(m_peerInfo));
@@ -590,6 +596,7 @@ void OnlineCoordinatorAPI::disconnect()
 	}
 	closeSockets();
 	m_state = STATE_IDLE;
+	m_connectDeadlineMs = 0;
 	m_peerInfoArmed = FALSE;
 	m_postHandoff = FALSE;
 	m_newPeers.clear();
@@ -774,6 +781,7 @@ Bool OnlineCoordinatorAPI::beginTcpConnect(UnsignedInt ipHostOrder, UnsignedShor
 		}
 	}
 	m_tcpFd = fd;
+	m_connectDeadlineMs = timeGetTime() + TCP_CONNECT_TIMEOUT_MS;
 	return TRUE;
 }
 
@@ -1293,13 +1301,21 @@ void OnlineCoordinatorAPI::update()
 	// the connect is still pending instead of WSAEWOULDBLOCK).
 	if (m_state == STATE_CONNECTING && m_tcpFd != -1)
 	{
-		fd_set wfds;
+		// Winsock reports a FAILED connect in exceptfds only - a refused or
+		// reset connection never becomes "writable" the way it does on BSD
+		// sockets. Selecting on writefds alone therefore left the client
+		// parked in STATE_CONNECTING forever whenever the coordinator port
+		// was closed or firewalled: no error, no log line, no way for the
+		// player to tell hosting from hanging.
+		fd_set wfds, efds;
 		FD_ZERO(&wfds);
 		FD_SET(m_tcpFd, &wfds);
+		FD_ZERO(&efds);
+		FD_SET(m_tcpFd, &efds);
 		struct timeval tv;
 		tv.tv_sec  = 0;
 		tv.tv_usec = 0;
-		Int rc = select((int)m_tcpFd + 1, NULL, &wfds, NULL, &tv);
+		Int rc = select((int)m_tcpFd + 1, NULL, &wfds, &efds, &tv);
 		if (rc < 0)
 		{
 			AsciiString msg;
@@ -1307,12 +1323,19 @@ void OnlineCoordinatorAPI::update()
 			setError(msg);
 			return;
 		}
-		if (rc == 0 || !FD_ISSET(m_tcpFd, &wfds))
+		if (rc == 0 || (!FD_ISSET(m_tcpFd, &wfds) && !FD_ISSET(m_tcpFd, &efds)))
 		{
-			// connect still in progress; try again next tick
+			// Connect still in progress. A filtered port produces no event at
+			// all, so bound the wait ourselves.
+			if (m_connectDeadlineMs != 0 && nowMs >= m_connectDeadlineMs)
+			{
+				AsciiString msg;
+				msg.format("tcp connect timed out after %ums", TCP_CONNECT_TIMEOUT_MS);
+				setError(msg);
+			}
 			return;
 		}
-		// Socket is writable: either connected or failed. SO_ERROR tells us.
+		// Writable or in error: SO_ERROR tells us which.
 		int soerr = 0;
 		// VC6 winsock has no socklen_t; int* works on both stacks.
 		int errlen = sizeof(soerr);
@@ -1331,6 +1354,7 @@ void OnlineCoordinatorAPI::update()
 			return;
 		}
 		// Connected. Send HELLO and transition.
+		m_connectDeadlineMs = 0;
 		AsciiString hello = "{\"type\":\"hello\",\"data\":{\"nick\":";
 		appendEscaped(hello, m_nick.str());
 		hello.concat(",\"version\":");

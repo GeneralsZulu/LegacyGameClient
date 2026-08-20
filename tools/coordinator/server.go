@@ -35,6 +35,7 @@ type Session struct {
 	LocalAddr      string
 	HostingGame    string
 	JoiningGame    string // game id of the last join attempt (player-count bookkeeping)
+	Started        time.Time
 	LastSeen       time.Time
 	writeMu        sync.Mutex
 }
@@ -202,6 +203,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		Nick:       sanitizeNick(hello.Nick),
 		Version:    hello.Version,
 		RemoteAddr: conn.RemoteAddr().String(),
+		Started:    time.Now(),
 		LastSeen:   time.Now(),
 	}
 
@@ -232,6 +234,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		s.mu.Unlock()
 		var env Envelope
 		if err := json.Unmarshal(line, &env); err != nil {
+			log.Printf("session %s nick=%q rejected: bad envelope (%v)", token[:8], sess.Nick, err)
 			sess.send(MsgError, Error{Message: "bad envelope"})
 			continue
 		}
@@ -239,6 +242,12 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 			if err == io.EOF {
 				return
 			}
+			// Every rejection the client is shown is recorded here: this is
+			// the server's only record of why a player's host/join attempt
+			// failed, and the client-side ReleaseLog it uploads on failure
+			// is matched against it by nick + time.
+			log.Printf("session %s nick=%q version=%s from %s: %s REJECTED: %v",
+				token[:8], sess.Nick, sess.Version, sess.RemoteAddr, env.Type, err)
 			sess.send(MsgError, Error{Message: err.Error()})
 		}
 	}
@@ -630,6 +639,13 @@ func (s *Server) removeGuestFromOtherGamesLocked(sess *Session, keepGameID strin
 }
 
 func (s *Server) dropSession(sess *Session) {
+	// Log the shape of the session on the way out: a client that connected,
+	// never got as far as hosting or joining, and vanished seconds later is
+	// the fingerprint of a punch/STUN failure on its side.
+	log.Printf("session %s ended nick=%q from %s hosting=%q joining=%q after %s",
+		sess.Token[:8], sess.Nick, sess.RemoteAddr, sess.HostingGame, sess.JoiningGame,
+		time.Since(sess.Started).Round(time.Second))
+
 	s.mu.Lock()
 	delete(s.sessions, sess.Token)
 	if sess.HostingGame != "" {
