@@ -13,6 +13,7 @@
 ;   <user-chosen install dir>\ZuluLauncher.exe
 ;   <user-chosen install dir>\Uninstall_Zulu.exe
 ;   %USERPROFILE%\Documents\Command and Conquer Generals Zero Hour Data\Zulu.big
+;   %USERPROFILE%\Documents\Command and Conquer Generals Zero Hour Data\ReplayData\
 ;   Desktop and Start Menu shortcuts that launch:
 ;     <install dir>\ZuluLauncher.exe -mod Zulu.big
 ;   The launcher fetches https://storage.googleapis.com/zulu-installer/latest.json
@@ -115,19 +116,31 @@ Section "Install ${APPNAME}" SecInstall
     ; Zulu.bigs plus the version map that says which one a given replay
     ; needs. Replay Theater mounts the right one via -mod.
     ;
-    ; Next to the exe, not under Documents: this is program data, one set per
-    ; machine. Under a user's Documents it was invisible to every other
-    ; account on the box, so Replay Theater came up empty for anyone who
-    ; hadn't personally run the installer.
+    ; Under the user data dir, never next to the exe. We do not own the
+    ; install directory: Generals Online shares it, and GO mounts every .big
+    ; it finds underneath it. Our engine fences the folder off
+    ; (isInReplayDataFolder in ArchiveFileSystem), GO has no such fence, so a
+    ; ReplayData folder there loaded all 16 historical archives into GO and
+    ; broke it for anyone running both.
     ;
-    ; It has to stay in its own subfolder: the engine's install-dir "*.big"
-    ; sweep recurses, so without the ReplayData skip in ArchiveFileSystem it
-    ; would mount all 16 archives at once.
-    SetOutPath "$INSTDIR\${REPLAYDATALEAF}"
+    ; The price is that the archives are per-account: another Windows account
+    ; on the same box gets a Replay Theater with no map until it runs the
+    ; installer itself. The launcher names the path it looked in when the map
+    ; is missing, so that failure at least explains itself.
+    ;
+    ; It has to stay in its own subfolder rather than loose in the user data
+    ; dir, where the engine's "Zulu*.big" sweep would mount all 16 at once.
+    ;
+    ; Wiped before extracting so archives dropped from the map (or renamed)
+    ; don't accumulate. Everything in there is ours and regenerable.
+    RMDir /r "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
+    SetOutPath "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
     File /r "${REPLAYDATA_SOURCE}\*.*"
 
-    ; Reclaim the per-user copy written by 1.5.6 dev builds before the move.
-    RMDir /r "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
+    ; Clear the install-dir copy 1.5.6 and 1.5.7 wrote. This is the half of
+    ; the fix that matters for people who already have it: until it is gone,
+    ; GO keeps picking the archives up from there.
+    RMDir /r "$INSTDIR\${REPLAYDATALEAF}"
 
     ; --- Shortcuts -------------------------------------------------------
     ; Targets the launcher, not the game directly, so every cold start
@@ -135,10 +148,10 @@ Section "Install ${APPNAME}" SecInstall
     ; game when no update is pending.
     ;
     ; All-users context, so $DESKTOP is the Public desktop and $SMPROGRAMS the
-    ; common Start Menu: the install is machine-wide (Program Files + a
-    ; machine-wide ReplayData), so every account on the box should see it, not
-    ; just whoever happened to run the installer. Switched back to the current
-    ; user afterwards because $DOCUMENTS above must stay per-user.
+    ; common Start Menu: the exe lives in Program Files, so every account on
+    ; the box should see the shortcuts, not just whoever happened to run the
+    ; installer. Switched back to the current user afterwards because
+    ; $DOCUMENTS above must stay per-user.
     SetShellVarContext all
 
     ; Drop the per-user copies an older installer left on the installing
@@ -221,9 +234,9 @@ Section "Uninstall"
     ; Everything in here is ours and regenerable, so clear it wholesale.
     ; RMDir /r is scoped to our own subfolder, never $INSTDIR itself (which
     ; is the user's Zero Hour install) nor the user data dir (their replays,
-    ; maps and saves). The $DOCUMENTS line clears the pre-move location.
-    RMDir /r "$INSTDIR\${REPLAYDATALEAF}"
+    ; maps and saves). The $INSTDIR line clears the 1.5.6/1.5.7 location.
     RMDir /r "$DOCUMENTS\${USERDATALEAF}\${REPLAYDATALEAF}"
+    RMDir /r "$INSTDIR\${REPLAYDATALEAF}"
 
     ; Shortcuts are created all-users; clear that context, then sweep the
     ; per-user location too for anything an older installer left behind.

@@ -43,7 +43,7 @@ why this is a relaunch and not a button in the replay menu.
 
 | Piece | What it does |
 |---|---|
-| `installer/replay_data_versions.csv` | The map: replay version (or iniCRC) to archive, plus the git ref each archive is built from. Ships to `<install dir>\ReplayData\versions.csv`. |
+| `installer/replay_data_versions.csv` | The map: replay version (or iniCRC) to archive, plus the git ref each archive is built from. Ships to `<user data dir>\ReplayData\versions.csv`. |
 | `scripts/build_replay_bigs.py` | Rebuilds each archive from its release's `assets/` tree straight out of git history. Run by `make replay-bigs`. |
 | `ZuluLauncher.exe -replaytheater` | Replay Theater: picks a replay, reads its header, resolves the archive, launches the game with it, waits, repeats. Runs as instance 1 so the player's own `Options.ini` (and therefore their resolution) is used - see the note below. |
 | `-watchReplay <file>` | Plays one replay in the normal game window. Distinct from `-replay`, which runs the headless batch re-simulation and exits. |
@@ -69,25 +69,43 @@ identical and solid LZMA collapses them - but only with
 `SetCompressorDictSize 64` in `Zulu.nsi`. At NSIS's 8 MB default they do not
 all fit in the window at once and cost ~2.9 MB instead.
 
-### Where it lives, and why the fence matters
+### Where it lives, and why
 
-`ReplayData` sits next to the game exe in the install directory - **not**
-under a user's Documents. It is program data, one set per machine; under
-Documents it was invisible to every other account on the box, so Replay
-Theater came up empty for anyone who had not personally run the installer.
-The launcher therefore passes an **absolute** `-mod` path, because a relative
-one is resolved against the user data directory (`parseMod`).
+`ReplayData` sits under the user data directory
+(`Documents\Command and Conquer Generals Zero Hour Data\ReplayData`), next to
+`Zulu.big` - **not** in the install directory.
 
-That makes the sweep guard load-bearing rather than belt-and-braces: the
-install-dir `*.big` scan recurses, so without it all 16 archives would be
-mounted at once on every launch. `isInReplayDataFolder()` in
-`ArchiveFileSystem.cpp` skips the folder, and both the Win32 and Std BIG
-backends call it. It matches `ReplayData` only as a whole path component, so
-`ReplayDataExtra\x.big` and `MyReplayData\x.big` are still loaded normally.
+1.5.6 and 1.5.7 did put it next to the game exe, on the reasoning that
+per-machine program data belongs with the program, and that under Documents
+it is invisible to every other Windows account on the box. That broke
+Generals Online: GO shares the Zero Hour install directory with us and mounts
+every `.big` it finds underneath it, so it loaded all 16 historical archives
+at once. Our own engine fences the folder off; GO has no such fence, and the
+install directory is not ours to put game data in.
 
-The installer creates its shortcuts in the all-users context for the same
-reason - a machine-wide install should be visible to every account, not just
-whoever ran setup.
+So the archives are per-account again. Another account on the same machine
+gets a Replay Theater with no version map until it runs the installer itself;
+the launcher names the path it looked in when the map is missing, so at least
+that failure explains itself.
+
+Two guards remain load-bearing after the move:
+
+- The archives stay in their **own subfolder**, not loose in the user data
+  dir, where `loadZuluBigsFrom()`'s `Zulu*.big` sweep would mount all 16.
+- `isInReplayDataFolder()` in `ArchiveFileSystem.cpp` still skips the folder
+  in the recursive install-dir `*.big` scan, because a 1.5.6/1.5.7 copy can
+  survive there. Both the Win32 and Std BIG backends call it. It matches
+  `ReplayData` only as a whole path component, so `ReplayDataExtra\x.big` and
+  `MyReplayData\x.big` are still loaded normally.
+
+The installer removes `<install dir>\ReplayData` on both install and
+uninstall - that removal, not the new destination, is what unbreaks GO for
+someone who already has the old layout.
+
+The launcher passes an **absolute** `-mod` path. A relative one would now
+resolve correctly, since `parseMod` resolves it against the user data
+directory, but only for as long as the launcher and the game agree on where
+that is; the launcher has already resolved it once.
 
 ## Adding a release
 

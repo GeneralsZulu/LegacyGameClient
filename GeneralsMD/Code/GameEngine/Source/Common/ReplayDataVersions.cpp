@@ -106,24 +106,15 @@ static UnsignedInt parseHex(const AsciiString& text)
 // rather than cached. Editing it then takes effect without a restart, which
 // is convenient when adding a release.
 //
-// It lives next to the executable, not in the user data directory: the
-// archives are program data, one set per machine, and putting them under a
-// user's Documents made them invisible to every other account on the box.
-// Derived from the module path rather than the working directory, which the
-// save-game code moves around at runtime (GameState.cpp).
+// It lives in the user data directory, not next to the executable: we share
+// the install directory with other clients (Generals Online mounts every .big
+// it finds under there, recursively), so nothing of ours that looks like game
+// data may sit in it. getPath_UserData() is absolute and ends in a backslash,
+// so this does not depend on the working directory, which the save-game code
+// moves around at runtime (GameState.cpp).
 static AsciiString getVersionsCsvPath()
 {
-	Char buffer[_MAX_PATH];
-	buffer[0] = '\0';
-	GetModuleFileName(nullptr, buffer, sizeof(buffer));
-
-	AsciiString path = buffer;
-	const char *lastSlash = path.reverseFind('\\');
-	if (lastSlash != nullptr)
-		path.truncateBy(path.getLength() - (Int)(lastSlash - path.str()) - 1);
-	else
-		path.clear();
-
+	AsciiString path = TheGlobalData->getPath_UserData();
 	path.concat(ARCHIVE_REPLAY_DATA_FOLDER);
 	path.concat("\\versions.csv");
 	return path;

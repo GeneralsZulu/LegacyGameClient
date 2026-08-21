@@ -85,7 +85,9 @@ class ArchivedFileInfo;
 // so old replays can be re-simulated against the data they were recorded on
 // (see GeneralsMD Common/ReplayDataVersions.h for the full story). Exactly one
 // of them is ever mounted, named explicitly via -mod, so the automatic *.big
-// sweeps -- which recurse -- have to leave the whole folder alone.
+// sweeps -- which recurse -- have to leave the whole folder alone. It ships to
+// the user data dir, but the install-dir sweep still needs this: 1.5.6 and
+// 1.5.7 put it next to the exe, and a copy can survive there.
 #define ARCHIVE_REPLAY_DATA_FOLDER "ReplayData"
 
 // True if 'path' has ARCHIVE_REPLAY_DATA_FOLDER as one of its directory

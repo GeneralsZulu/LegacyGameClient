@@ -534,14 +534,16 @@ static void trimAscii(char *s) {
 
 // Reader for ReplayData\versions.csv. Only the first three fields matter here;
 // git_ref and note are build-time documentation.
+// 'userDataDir' is the folder the installer puts ReplayData in, and ends with a
+// backslash (getUserDataDir).
 // csvPathOut receives the path consulted, so callers can name it when the map
 // is missing -- "this version isn't listed" and "the map isn't installed" look
 // identical to the user otherwise, and they have very different fixes.
-static ReplayDataKind resolveReplayData(const char *installDir, const char *version,
+static ReplayDataKind resolveReplayData(const char *userDataDir, const char *version,
                                         DWORD iniCrc, char *bigOut, DWORD bigSize,
                                         char *csvPathOut, DWORD csvPathSize) {
     char csvPath[MAX_PATH];
-    _snprintf(csvPath, sizeof(csvPath) - 1, "%s\\%s\\versions.csv", installDir, kReplayDataFolder);
+    _snprintf(csvPath, sizeof(csvPath) - 1, "%s%s\\versions.csv", userDataDir, kReplayDataFolder);
     csvPath[sizeof(csvPath) - 1] = 0;
     if (csvPathOut) {
         strncpy(csvPathOut, csvPath, csvPathSize);
@@ -638,7 +640,7 @@ static bool pickReplay(const char *replaysDir, char *out, DWORD outSize) {
     return true;
 }
 
-static int runReplayTheater(const char *gameExe, const char *installDir) {
+static int runReplayTheater(const char *gameExe) {
     char userDataDir[MAX_PATH];
     if (!getUserDataDir(userDataDir, sizeof(userDataDir))) {
         MessageBoxA(NULL,
@@ -685,7 +687,7 @@ static int runReplayTheater(const char *gameExe, const char *installDir) {
         char csvPath[MAX_PATH];
         csvPath[0] = 0;
         const ReplayDataKind kind =
-            resolveReplayData(installDir, version, iniCrc, big, sizeof(big),
+            resolveReplayData(userDataDir, version, iniCrc, big, sizeof(big),
                               csvPath, sizeof(csvPath));
 
         if (kind == kReplayDataNoMap) {
@@ -717,12 +719,14 @@ static int runReplayTheater(const char *gameExe, const char *installDir) {
 
         char args[MAX_PATH * 3];
         if (kind == kReplayDataArchive) {
-            // Absolute, and quoted: a relative -mod is resolved against the
-            // user data directory (parseMod), which is not where these live
-            // any more, and the install path has spaces in it.
+            // Absolute, and quoted: a relative -mod would be resolved against
+            // the user data directory (parseMod), which happens to be right,
+            // but only as long as the launcher and the game agree on where
+            // that is. We already resolved it once; don't ask twice. Quoted
+            // because Documents paths have spaces in them.
             _snprintf(args, sizeof(args) - 1,
-                "-mod \"%s\\%s\\%s\" -watchReplay \"%s\" -replaytheater",
-                installDir, kReplayDataFolder, big, relativePath);
+                "-mod \"%s%s\\%s\" -watchReplay \"%s\" -replaytheater",
+                userDataDir, kReplayDataFolder, big, relativePath);
         } else if (kind == kReplayDataNone) {
             // Retail data: no -mod at all, not even our own Zulu.big.
             _snprintf(args, sizeof(args) - 1,
@@ -773,7 +777,7 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     // update mid-session would swap the data out from under the loop.
     // Matched as a prefix because shortcuts routinely carry a trailing space.
     if (_strnicmp(fwdArgs, "-replaytheater", 14) == 0) {
-        return runReplayTheater(gameExe, installDir);
+        return runReplayTheater(gameExe);
     }
 
     const bool devBuild = isDevBuild();
