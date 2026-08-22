@@ -811,6 +811,94 @@ static bool readWholeFile(const char *path, unsigned char **outBuf, unsigned int
 	return true;
 }
 
+// Cap on how much of any one client log is uploaded. A log is a diagnostic
+// tail: when one runs long, the end explains the failure and the head is a
+// session that already finished. Keeps a future runaway logger from turning
+// end-of-match telemetry into a multi-megabyte POST, the way the per-frame
+// observer checkpoints did at 15 MB a session.
+static const unsigned int LOG_UPLOAD_MAX_BYTES = 1024 * 1024;
+
+// Read at most the last maxBytes of a file. Under the cap this is exactly
+// readWholeFile. Over it, the returned buffer opens on a line boundary and
+// carries a marker saying how much was dropped, so a truncated log can never
+// be mistaken for a complete one. maxBytes of 0 means no cap.
+static bool readLogFileTail(const char *path, unsigned int maxBytes,
+                            unsigned char **outBuf, unsigned int *outLen)
+{
+	*outBuf = nullptr;
+	*outLen = 0;
+
+	FILE *fp = fopen(path, "rb");
+	if (fp == nullptr)
+		return false;
+	fseek(fp, 0, SEEK_END);
+	long size = ftell(fp);
+	fclose(fp);
+	if (size <= 0)
+		return false;
+	if (maxBytes == 0 || (unsigned long)size <= (unsigned long)maxBytes)
+		return readWholeFile(path, outBuf, outLen);
+
+	fp = fopen(path, "rb");
+	if (fp == nullptr)
+		return false;
+	const long dropped = size - (long)maxBytes;
+	if (fseek(fp, dropped, SEEK_SET) != 0)
+	{
+		fclose(fp);
+		return false;
+	}
+	unsigned char *tail = (unsigned char *)malloc((size_t)maxBytes);
+	if (tail == nullptr)
+	{
+		fclose(fp);
+		return false;
+	}
+	size_t got = fread(tail, 1, (size_t)maxBytes, fp);
+	fclose(fp);
+	if (got == 0)
+	{
+		free(tail);
+		return false;
+	}
+
+	// Advance to just past the first newline so the upload never opens on
+	// half a line. If the whole tail holds no newline at all, keep it as-is
+	// rather than throwing the only content away.
+	size_t start = 0;
+	while (start < got && tail[start] != '\n')
+		++start;
+	if (start < got)
+		++start;
+	else
+		start = 0;
+
+	char marker[160];
+	int markerLen = sprintf(marker,
+		"[log truncated for upload: %ld earlier bytes dropped, last %u kept]\n",
+		dropped + (long)start, (unsigned int)(got - start));
+	if (markerLen <= 0)
+	{
+		free(tail);
+		return false;
+	}
+
+	unsigned int outSize = (unsigned int)markerLen + (unsigned int)(got - start);
+	unsigned char *buf = (unsigned char *)malloc((size_t)outSize);
+	if (buf == nullptr)
+	{
+		free(tail);
+		return false;
+	}
+	memcpy(buf, marker, (size_t)markerLen);
+	memcpy(buf + markerLen, tail + start, got - start);
+	free(tail);
+
+	*outBuf = buf;
+	*outLen = outSize;
+	return true;
+}
+
 // Reduce an arbitrary player identifier to a header-safe, single-segment token:
 // map anything that would break an HTTP header line or a path component to '_',
 // and cap the length.
@@ -3291,7 +3379,7 @@ void StartMatchTelemetryUpload(const MatchTelemetryUpload& p)
 
 			unsigned char *b = nullptr;
 			unsigned int n = 0;
-			if (!readWholeFile(p.logFilePaths[i].str(), &b, &n))
+			if (!readLogFileTail(p.logFilePaths[i].str(), LOG_UPLOAD_MAX_BYTES, &b, &n))
 				continue;
 
 			TelemetryLogBuf *slot = &job->logs[job->logCount];
@@ -3366,7 +3454,7 @@ void StartDiagnosticLogUpload(const AsciiString& logsUrl,
 
 		unsigned char *b = nullptr;
 		unsigned int n = 0;
-		if (!readWholeFile(logFilePaths[i].str(), &b, &n))
+		if (!readLogFileTail(logFilePaths[i].str(), LOG_UPLOAD_MAX_BYTES, &b, &n))
 			continue;
 
 		TelemetryLogBuf *slot = &job->logs[job->logCount];

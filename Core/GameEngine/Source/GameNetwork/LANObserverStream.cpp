@@ -24,21 +24,54 @@ static FILE* s_obsLogFile = NULL;
 // silently killed the log and left a stale copy to be re-uploaded forever.
 // Resolved lazily because TheGlobalData doesn't exist during early startup.
 static const char* const OBS_LOG_FILE_NAME = "ObserverLog.txt";
+// The previous run's log, kept alongside the current one. The file is opened
+// "w" once per process, so without this a relaunch destroyed the only record
+// of the session that just went wrong -- which is exactly the session worth
+// keeping, since "it broke, so I restarted the game" is how players react to
+// an observer failure. Both files ride up with the next telemetry upload.
+static const char* const OBS_PREV_LOG_FILE_NAME = "ObserverLog.prev.txt";
+// Ceiling on one session's log. Nothing should come close now that the
+// per-frame checkpoints are gone, so hitting it means a new logger is running
+// away; stop writing rather than fill the user's disk and let the upload
+// carry the evidence of where it stopped.
+static const UnsignedInt OBS_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
 static char s_obsLogPath[512] = "";
+static char s_obsPrevLogPath[512] = "";
+static UnsignedInt s_obsLogBytes = 0;
+static Bool s_obsLogCapped = FALSE;
+
+// Build "<user data dir><leaf>" into `out`. FALSE when the user data dir is
+// not known yet (early startup) or the result would not fit.
+static Bool buildObsLogPath(char* out, UnsignedInt outSize, const char* leaf)
+{
+	if (TheGlobalData == NULL)
+		return FALSE;
+	const AsciiString& dir = TheGlobalData->getPath_UserData();
+	if (dir.isEmpty()
+	    || dir.getLength() + (Int)strlen(leaf) + 1 > (Int)outSize)
+		return FALSE;
+	strcpy(out, dir.str());
+	strcat(out, leaf);
+	return TRUE;
+}
 
 static const char* obsLogPath()
 {
 	if (s_obsLogPath[0] != '\0')
 		return s_obsLogPath;
-	if (TheGlobalData == NULL)
+	if (!buildObsLogPath(s_obsLogPath, (UnsignedInt)sizeof(s_obsLogPath), OBS_LOG_FILE_NAME))
 		return NULL;
-	const AsciiString& dir = TheGlobalData->getPath_UserData();
-	if (dir.isEmpty()
-	    || dir.getLength() + (Int)strlen(OBS_LOG_FILE_NAME) + 1 > (Int)sizeof(s_obsLogPath))
-		return NULL;
-	strcpy(s_obsLogPath, dir.str());
-	strcat(s_obsLogPath, OBS_LOG_FILE_NAME);
 	return s_obsLogPath;
+}
+
+static const char* obsPrevLogPath()
+{
+	if (s_obsPrevLogPath[0] != '\0')
+		return s_obsPrevLogPath;
+	if (!buildObsLogPath(s_obsPrevLogPath, (UnsignedInt)sizeof(s_obsPrevLogPath), OBS_PREV_LOG_FILE_NAME))
+		return NULL;
+	return s_obsPrevLogPath;
 }
 
 const char* LANObsGetLogFileName()
@@ -47,27 +80,67 @@ const char* LANObsGetLogFileName()
 	return path != NULL ? path : OBS_LOG_FILE_NAME;
 }
 
+const char* LANObsGetPrevLogFileName()
+{
+	const char* path = obsPrevLogPath();
+	return path != NULL ? path : OBS_PREV_LOG_FILE_NAME;
+}
+
 void LANObsLog(const char* fmt, ...)
 {
+	if (s_obsLogCapped)
+		return;
+
 	if (!s_obsLogFile)
 	{
 		const char* path = obsLogPath();
 		if (!path)
 			return;	// user data dir not known yet; try again on the next call
+
+		// Roll the previous session aside before truncating. Both failures are
+		// survivable: worst case we lose the older log and carry on with the
+		// current one, which is the behaviour we had before.
+		const char* prevPath = obsPrevLogPath();
+		if (prevPath != NULL)
+		{
+			remove(prevPath);
+			rename(path, prevPath);
+		}
+
 		s_obsLogFile = fopen(path, "w");
 		if (!s_obsLogFile)
 			return;
 	}
+
+	Int written = 0;
+	Int n;
 	time_t now = time(NULL);
 	struct tm* lt = localtime(&now);
 	if (lt)
-		fprintf(s_obsLogFile, "[%02d:%02d:%02d] ", lt->tm_hour, lt->tm_min, lt->tm_sec);
+	{
+		n = fprintf(s_obsLogFile, "[%02d:%02d:%02d] ", lt->tm_hour, lt->tm_min, lt->tm_sec);
+		if (n > 0)
+			written += n;
+	}
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(s_obsLogFile, fmt, ap);
+	n = vfprintf(s_obsLogFile, fmt, ap);
 	va_end(ap);
+	if (n > 0)
+		written += n;
 	fputc('\n', s_obsLogFile);
+	++written;
 	fflush(s_obsLogFile);
+
+	s_obsLogBytes += (UnsignedInt)written;
+	if (s_obsLogBytes >= OBS_LOG_MAX_BYTES)
+	{
+		s_obsLogCapped = TRUE;
+		fprintf(s_obsLogFile,
+			"[observer log hit its %u byte ceiling; nothing further is recorded this session]\n",
+			OBS_LOG_MAX_BYTES);
+		fflush(s_obsLogFile);
+	}
 }
 
 #ifdef _WIN32

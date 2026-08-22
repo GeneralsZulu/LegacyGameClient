@@ -354,6 +354,11 @@ RecorderClass::RecorderClass()
 	m_liveObserverStarvedSinceMs  = 0;
 	m_observerLogUploaded         = FALSE;
 	m_observedMatchSeed           = 0;
+	m_liveObsLastLogMs            = 0;
+	m_liveObsLastWaiting          = FALSE;
+	m_liveObsLastStreamOpen       = FALSE;
+	m_liveObsCommandsSinceLog     = 0;
+	m_liveObsBytesSinceLog        = 0;
 	init(); // just for the heck of it.
 }
 
@@ -544,6 +549,14 @@ void RecorderClass::init() {
 	m_replayShortRead             = FALSE;
 	m_resumeRecordPos             = 0;
 	m_liveObserverStarvedSinceMs  = 0;
+	// Checkpoint bookkeeping starts clean for each session; a zero timestamp
+	// makes the first updatePlayback emit a line, which marks the session
+	// start in the log.
+	m_liveObsLastLogMs            = 0;
+	m_liveObsLastWaiting          = FALSE;
+	m_liveObsLastStreamOpen       = FALSE;
+	m_liveObsCommandsSinceLog     = 0;
+	m_liveObsBytesSinceLog        = 0;
 
 	OptionPreferences optionPref;
 	m_archiveReplays = optionPref.getArchiveReplaysEnabled();
@@ -591,12 +604,6 @@ void RecorderClass::update() {
 					L"Fast Forward is unavailable while observing a live game."));
 	}
 
-	// Diagnostic: every recorder update fires a one-liner in LIVE_OBSERVER
-	// mode so the trail in ObserverLog.txt shows ticks elapsing.
-	if (m_mode == RECORDERMODETYPE_LIVE_OBSERVER)
-		LANObsLog("Recorder::update tick mode=%d frame=%u", (int)m_mode,
-			TheGameLogic ? TheGameLogic->getFrame() : 0xFFFFFFFFu);
-
 	// LIVE_OBSERVER (joiner side) and RECORD (host side): TheLAN::update is
 	// only driven by the LAN lobby menu, so once we're in-game the observer
 	// host listen socket and client TCP recv stop being pumped. Drive them
@@ -621,16 +628,26 @@ void RecorderClass::update() {
  * Do the update for the next frame of this playback.
  */
 void RecorderClass::updatePlayback() {
-	// LIVE_OBSERVER: per-tick checkpoint so the crash log can be correlated
-	// with what the playback was doing at the moment of the fault.
+	// LIVE_OBSERVER: checkpoint the playback state into ObserverLog.txt so a
+	// crash or a stall can be correlated with what the stream was doing. Fire
+	// on the transitions that carry the meaning, and otherwise once a second
+	// as proof that time is still passing. This used to log unconditionally
+	// here and again in update(), which is where the 15 MB session logs came
+	// from -- two flushed lines per frame, ~65 a second, for the whole watch.
 	if (isLiveObserverMode())
 	{
-		LANObsLog("updatePlayback tick: gameFrame=%u m_nextFrame=%d filePos=%d waiting=%d streamOpen=%d",
-			TheGameLogic ? TheGameLogic->getFrame() : 0xFFFFFFFFu,
-			(Int)m_nextFrame,
-			m_file ? m_file->position() : -1,
-			m_liveObserverWaitingForBytes ? 1 : 0,
-			m_liveObserverStreamOpen ? 1 : 0);
+		const UnsignedInt LIVE_OBSERVER_HEARTBEAT_MS = 1000;
+		const UnsignedInt nowMs = timeGetTime();
+		const char *reason = NULL;
+		if (m_liveObserverWaitingForBytes != m_liveObsLastWaiting)
+			reason = m_liveObserverWaitingForBytes ? "at live edge, waiting for bytes" : "bytes resumed";
+		else if (m_liveObserverStreamOpen != m_liveObsLastStreamOpen)
+			reason = m_liveObserverStreamOpen ? "stream opened" : "stream closed";
+		else if (m_liveObsLastLogMs == 0 || nowMs - m_liveObsLastLogMs >= LIVE_OBSERVER_HEARTBEAT_MS)
+			reason = "heartbeat";
+
+		if (reason != NULL)
+			liveObserverCheckpoint(reason);
 	}
 
 	// Remove any bad commands that have been inserted by the local user that shouldn't be
@@ -731,10 +748,15 @@ void RecorderClass::updatePlayback() {
 		Int posBeforeAppend = isLiveObserverMode() && m_file ? m_file->position() : 0;
 		appendNextCommand();	// append the next command to TheCommandQueue
 		Int posAfterAppend = isLiveObserverMode() && m_file ? m_file->position() : 0;
+		// Accumulate rather than log per command: one line per appended
+		// command was ~13k lines a session on its own. The running totals
+		// ride along on the next checkpoint, where they answer the same
+		// question (is the stream actually feeding us?) in one line.
 		if (isLiveObserverMode())
-			LANObsLog("appendNextCommand frame=%d gameFrame=%u: %d -> %d (delta=%d)",
-				(Int)m_nextFrame, curFrame, posBeforeAppend, posAfterAppend,
-				posAfterAppend - posBeforeAppend);
+		{
+			++m_liveObsCommandsSinceLog;
+			m_liveObsBytesSinceLog += (posAfterAppend - posBeforeAppend);
+		}
 		readNextFrame();	// Read the next command's frame number for playback.
 		// LIVE_OBSERVER: if readNextFrame hit EOF, bail so the retry path
 		// runs next tick rather than spinning forever here.
@@ -802,6 +824,31 @@ void RecorderClass::uploadObserverLog(UnsignedInt seed)
 
 	LANObsLog("uploading observer log for match seed %u as '%s'", seed, playerId.str());
 	StartDiagnosticLogUpload(TheGlobalData->m_logsUrl, seedLabel, playerId, logs);
+}
+
+/**
+ * Write one observer checkpoint into ObserverLog.txt: where playback is, what
+ * the stream is doing, and what has happened since the previous checkpoint.
+ * `reason` names the trigger so a reader can tell a state change from the
+ * once-a-second heartbeat.
+ */
+void RecorderClass::liveObserverCheckpoint(const char *reason)
+{
+	LANObsLog("observer %s: gameFrame=%u nextFrame=%d filePos=%d waiting=%d streamOpen=%d (+%u cmds, +%d bytes since last)",
+		reason,
+		TheGameLogic ? TheGameLogic->getFrame() : 0xFFFFFFFFu,
+		(Int)m_nextFrame,
+		m_file ? m_file->position() : -1,
+		m_liveObserverWaitingForBytes ? 1 : 0,
+		m_liveObserverStreamOpen ? 1 : 0,
+		m_liveObsCommandsSinceLog,
+		m_liveObsBytesSinceLog);
+
+	m_liveObsLastLogMs        = timeGetTime();
+	m_liveObsLastWaiting      = m_liveObserverWaitingForBytes;
+	m_liveObsLastStreamOpen   = m_liveObserverStreamOpen;
+	m_liveObsCommandsSinceLog = 0;
+	m_liveObsBytesSinceLog    = 0;
 }
 
 /**
@@ -1224,6 +1271,12 @@ void RecorderClass::stopRecording() {
 #endif
 				up.logFilePaths.push_back(AsciiString(LANObsGetLogFileName()));   // observer log, in the user data dir
 				up.logFilePaths.push_back(AsciiString(ReleaseGetLogFileName())); // always-on release log, same dir
+				// The observer log from before the last relaunch. Absent on a
+				// first run, and skipped silently when so. Worth carrying
+				// because a player whose spectating just broke restarts the
+				// game, which is precisely what truncates the log that would
+				// have explained it.
+				up.logFilePaths.push_back(AsciiString(LANObsGetPrevLogFileName()));
 			}
 
 			// Map check + conditional map upload. Look up the played map's CRC

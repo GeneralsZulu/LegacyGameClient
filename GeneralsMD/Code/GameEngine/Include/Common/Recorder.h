@@ -340,6 +340,24 @@ protected:
 	/// the watched match's seed. Spectators otherwise upload nothing at all,
 	/// so a failed watch leaves no evidence anywhere.
 	void uploadObserverLog(UnsignedInt seed);
+
+	// Rate limiting for the observer checkpoint written to ObserverLog.txt.
+	// The interesting content of that log is the state changes (reaching the
+	// live edge, the stream opening or closing) plus proof that time is still
+	// passing; logging every frame instead produced ~65 lines a second, so a
+	// 40 minute spectating session wrote a 15 MB file that then rode up with
+	// every later match's telemetry. These track what was last reported so
+	// the checkpoint can fire on change, and otherwise once a second.
+	UnsignedInt m_liveObsLastLogMs;           ///< wall clock of the last checkpoint line, 0 before the first
+	Bool        m_liveObsLastWaiting;         ///< m_liveObserverWaitingForBytes as of that line
+	Bool        m_liveObsLastStreamOpen;      ///< m_liveObserverStreamOpen as of that line
+	UnsignedInt m_liveObsCommandsSinceLog;    ///< commands appended since that line
+	Int         m_liveObsBytesSinceLog;       ///< replay bytes consumed since that line
+
+	/// Write one observer checkpoint line describing the current playback
+	/// state, and fold in what has happened since the last one. `reason` says
+	/// what triggered it (a state change, or the heartbeat).
+	void liveObserverCheckpoint(const char *reason);
 };
 
 extern RecorderClass *TheRecorder;
