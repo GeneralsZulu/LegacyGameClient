@@ -159,6 +159,11 @@ public:
 	UnsignedInt    bytesReceived() const { return m_bytesWritten; }
 	UnsignedInt    snapshotSize() const { return m_snapshotSize; }
 	Bool           isStreamClosed() const { return m_state == STATE_CLOSED; }
+	// TRUE once the TCP handshake has completed at least once on this client.
+	// Distinguishes "the host's port never answered" (nothing inbound reaches
+	// the host, i.e. a firewall drop) from "we connected and then it went
+	// wrong", which are the same STATE_CLOSED to every other caller.
+	Bool           everConnected() const { return m_everConnected; }
 
 private:
 	State        m_state;
@@ -167,6 +172,7 @@ private:
 	AsciiString  m_localPath;
 	UnsignedInt  m_bytesWritten;      // total bytes appended to local file
 	UnsignedInt  m_connectStartedAt;  // ms timestamp of connect kickoff (connect deadline)
+	Bool         m_everConnected;     // TCP handshake completed at least once; survives close()
 
 	// Snapshot header progress. Bytes accumulate into m_headerBuf until the
 	// full LANObserverStreamHeader has arrived, then snapshotSize is parsed.

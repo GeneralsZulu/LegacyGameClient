@@ -463,6 +463,11 @@ LANObserverClient::LANObserverClient()
 	, m_writeHandle(NULL)
 	, m_bytesWritten(0)
 	, m_connectStartedAt(0)
+	// Deliberately not reset by close(): the retry loop closes and reconnects
+	// the same object, and the question this answers spans the whole observe
+	// attempt. A fresh attempt gets a fresh object (stopObserverClient deletes
+	// this one), so it starts FALSE again.
+	, m_everConnected(FALSE)
 	, m_headerBytesRead(0)
 	, m_snapshotSize(0)
 	, m_snapshotBytesRead(0)
@@ -564,6 +569,7 @@ Bool LANObserverClient::adoptFd(Int fd, const AsciiString& localPath)
 	// The relay socket is already connected end to end; the next bytes on
 	// the wire are the snapshot header.
 	m_state = STATE_BUFFERING;
+	m_everConnected = TRUE;
 	m_connectStartedAt = timeGetTime();
 	LANObsLog("LANObserverClient: adopted relay fd=%d", fd);
 	return TRUE;
@@ -652,6 +658,7 @@ void LANObserverClient::update()
 		// header is detected as it arrives via the recv loop below.
 		LANObsLog("LANObserverClient: TCP connected; waiting for snapshot header");
 		m_state = STATE_BUFFERING;
+		m_everConnected = TRUE;
 		// fall through to recv below
 	}
 
