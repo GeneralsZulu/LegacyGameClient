@@ -1213,7 +1213,7 @@ void LANAPI::RequestGameCreate( UnicodeString gameName, Bool isDirectConnect )
 	m_inLobby = false;
 	LANGameInfo *myGame = NEW LANGameInfo;
 
-	myGame->setSeed(GetTickCount());
+	myGame->setSeed(GenerateGameSeed());
 
 //	myGame->setInProgress(false);
 	myGame->enterGame();
