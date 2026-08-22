@@ -79,6 +79,35 @@ static const UnsignedInt desyncOffset = frameCountOffset + sizeof(UnsignedInt);
 static const UnsignedInt quitEarlyOffset = desyncOffset + sizeof(Bool);
 static const UnsignedInt disconOffset = quitEarlyOffset + sizeof(Bool);
 
+// UTF-8 encode a lobby display name onto the end of `out`. Player names reach
+// the telemetry endpoints as HTTP header and form values, which are bytes, and
+// nothing else in the engine converts a UnicodeString for that purpose.
+static void appendUtf8(AsciiString& out, const UnicodeString& name)
+{
+	const WideChar *p = name.str();
+	if (p == nullptr)
+		return;
+	for (; *p != L'\0'; ++p)
+	{
+		unsigned int c = static_cast<unsigned int>(*p);
+		if (c < 0x80)
+		{
+			out.concat(static_cast<char>(c));
+		}
+		else if (c < 0x800)
+		{
+			out.concat(static_cast<char>(0xC0 | (c >> 6)));
+			out.concat(static_cast<char>(0x80 | (c & 0x3F)));
+		}
+		else
+		{
+			out.concat(static_cast<char>(0xE0 | (c >> 12)));
+			out.concat(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+			out.concat(static_cast<char>(0x80 | (c & 0x3F)));
+		}
+	}
+}
+
 static void writeAtOffset(File* file, Int offset, const void* data, Int dataSize)
 {
 	UnsignedInt fileSize = file->size();
@@ -323,6 +352,8 @@ RecorderClass::RecorderClass()
 	m_replayShortRead             = FALSE;
 	m_resumeRecordPos             = 0;
 	m_liveObserverStarvedSinceMs  = 0;
+	m_observerLogUploaded         = FALSE;
+	m_observedMatchSeed           = 0;
 	init(); // just for the heck of it.
 }
 
@@ -522,6 +553,16 @@ void RecorderClass::init() {
  * Reset the recorder to the "initialized state."
  */
 void RecorderClass::reset() {
+	// Quitting a watch from the in-game menu never reaches stopPlayback: the
+	// menu calls clearGameData directly (Shell::showShell has the same note
+	// about exits stopPlayback does not see), and clearGameData lands here.
+	// Catch that exit too, or the watches a spectator abandons -- the ones
+	// most likely to have gone wrong -- are exactly the ones that upload
+	// nothing. uploadObserverLog is idempotent, so overlapping with
+	// stopPlayback on the normal path costs nothing.
+	if (isLiveObserverMode())
+		uploadObserverLog(m_observedMatchSeed);
+
 	if (m_file != nullptr) {
 		m_file->close();
 		m_file = nullptr;
@@ -717,10 +758,61 @@ void RecorderClass::updatePlayback() {
 }
 
 /**
+ * Ship this client's ObserverLog.txt at the end of a live-observer session.
+ *
+ * Spectators produce no telemetry at all today: every stopRecording() call
+ * site is gated on RECORDERMODETYPE_RECORD and StatsExporter is inactive in
+ * GAME_REPLAY, so a client that only watched uploads nothing and its evidence
+ * dies with the next launch. That is a real diagnostic hole, not a
+ * theoretical one: on 2026-08-21 two spectators sat on the LAN all evening
+ * and left no trace on the server, and the sessions where observing failed
+ * outright were the ones nobody could look at afterwards.
+ *
+ * Only the observer log goes up. No stats (there are none), no replay (it is
+ * the host's, already uploaded by the players), and no ReleaseLog, which
+ * belongs to whatever this client did as a player.
+ *
+ * Keyed by the seed of the match being watched, so an observer's log files
+ * land next to the players' under one match on the server.
+ */
+void RecorderClass::uploadObserverLog(UnsignedInt seed)
+{
+	// One upload per observer session; stopPlayback can be reached more than
+	// once on the way out.
+	if (m_observerLogUploaded)
+		return;
+	if (TheGlobalData == nullptr || TheGlobalData->m_logsUrl.isEmpty())
+		return;
+	m_observerLogUploaded = TRUE;
+
+	// "obs-" prefix because the same person may also have played this match
+	// from another client; without it the two uploads would land on the same
+	// <seed>/<player>/ path and one would overwrite the other.
+	AsciiString playerId = "obs-";
+	if (TheLAN != nullptr)
+		appendUtf8(playerId, TheLAN->GetMyName());
+	if (playerId == "obs-")
+		playerId = "obs-unknown";
+
+	AsciiString seedLabel;
+	seedLabel.format("%u", seed);
+
+	std::vector<AsciiString> logs;
+	logs.push_back(AsciiString(LANObsGetLogFileName()));
+
+	LANObsLog("uploading observer log for match seed %u as '%s'", seed, playerId.str());
+	StartDiagnosticLogUpload(TheGlobalData->m_logsUrl, seedLabel, playerId, logs);
+}
+
+/**
  * Stop the currently running playback. This is probably due either to the user exiting out of the playback or
  * reaching the end of the playback file.
  */
 void RecorderClass::stopPlayback() {
+	// Ship the watch log before exitGame() below tears the session down.
+	if (isLiveObserverMode())
+		uploadObserverLog(m_observedMatchSeed);
+
 	if (m_file != nullptr) {
 		m_file->close();
 		m_file = nullptr;
@@ -1081,32 +1173,7 @@ void RecorderClass::stopRecording() {
 			{
 				const GameSlot *s = TheGameInfo->getConstSlot(localPlayerSlot);
 				if (s != nullptr)
-				{
-					UnicodeString w = s->getName();
-					const WideChar *p = w.str();
-					if (p != nullptr)
-					{
-						for (; *p != L'\0'; ++p)
-						{
-							unsigned int c = static_cast<unsigned int>(*p);
-							if (c < 0x80)
-							{
-								playerNameUtf8.concat(static_cast<char>(c));
-							}
-							else if (c < 0x800)
-							{
-								playerNameUtf8.concat(static_cast<char>(0xC0 | (c >> 6)));
-								playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
-							}
-							else
-							{
-								playerNameUtf8.concat(static_cast<char>(0xE0 | (c >> 12)));
-								playerNameUtf8.concat(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
-								playerNameUtf8.concat(static_cast<char>(0x80 | (c & 0x3F)));
-							}
-						}
-					}
-				}
+					appendUtf8(playerNameUtf8, s->getName());
 			}
 		}
 
@@ -1450,6 +1517,14 @@ Bool RecorderClass::playbackFileLiveObserver(AsciiString filename)
 	if (success)
 	{
 		m_mode = RECORDERMODETYPE_LIVE_OBSERVER;
+		// A fresh watch gets a fresh upload, keyed by the seed the header we
+		// just parsed carries. Both are set here rather than in init(), which
+		// runs mid-playbackFile above (clearGameData -> reset) and would undo
+		// them. Holding the seed in a member rather than reading m_gameInfo
+		// at upload time matters: the upload can fire from reset(), by which
+		// point m_gameInfo may already describe the NEXT thing being loaded.
+		m_observerLogUploaded = FALSE;
+		m_observedMatchSeed   = (UnsignedInt)m_gameInfo.getSeed();
 		// If the open-time first read already hit EOF (snapshot from a
 		// just-started game: header flushed, first command not yet), KEEP
 		// the armed wait state so updatePlayback's retry loop picks it up;
