@@ -178,6 +178,12 @@ struct LANMessage
 		MSG_INACTIVE,						///< I've alt-tabbed out.  Unaccept me cause I'm a poo-flinging monkey.
 
 		MSG_REQUEST_GAME_INFO,	///< For direct connect, get the game info from a specific IP Address
+
+		///< I gave up trying to reach your observer stream port. Appended last
+		///< on purpose: the wire values of everything above stay put, and an
+		///< older client that receives this falls into update()'s default case
+		///< and ignores it.
+		MSG_OBSERVE_UNREACHABLE,
 	} messageType;
 
 	WideChar name[g_lanPlayerNameLength+1]; ///< My name, for convenience
@@ -284,6 +290,19 @@ struct LANMessage
 		{
 			char options[m_lanMaxOptionsLength+1];
 		} GameOptions;
+
+		// ObserveFailure is sent with MSG_OBSERVE_UNREACHABLE. The would-be
+		// observer tells the host that its stream port never answered, which
+		// is a fact only the observer holds: the host's listen socket bound
+		// fine and simply never saw a connection. Carries the port so the
+		// host can name it, and how long we spent trying so the host's log
+		// shows this was a real timeout rather than one dropped packet.
+		struct
+		{
+			UnsignedInt   gameIP;
+			UnsignedShort observerPort;
+			UnsignedInt   attemptMs;
+		} ObserveFailure;
 
 	};
 };
@@ -519,6 +538,10 @@ protected:
 	Bool									m_observerClientPlaybackKicked; // we called playbackFileLiveObserver already
 	UnsignedInt						m_observerProgressLastMs;       // last time we posted a download-progress chat line
 	UnsignedInt						m_observerProgressLastBytes;    // bytes reported at the last progress post
+	// Host: whether we have already told the player that someone could not
+	// reach our observer port this game. Several blocked spectators, or one
+	// retrying from the menu, would otherwise each post their own line.
+	Bool									m_observeUnreachableReported;
 
 	// Non-blocking map download (peer side). When the host advertises a map CRC
 	// we don't have, OnGameOptions kicks off a background CDN fetch and
@@ -603,5 +626,6 @@ protected:
 	void handleGameStartTimer( LANMessage *msg, UnsignedInt senderIP );
 	void handleGameOptions( LANMessage *msg, UnsignedInt senderIP );
 	void handleInActive( LANMessage *msg, UnsignedInt senderIP );
+	void handleObserveUnreachable( LANMessage *msg, UnsignedInt senderIP );
 
 };

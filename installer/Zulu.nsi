@@ -71,6 +71,7 @@ InstallDir       "$PROGRAMFILES\EA Games\Command and Conquer Generals Zero Hour"
 RequestExecutionLevel admin
 
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
 
 !define MUI_ABORTWARNING
 
@@ -212,9 +213,38 @@ Section "Install ${APPNAME}" SecInstall
     ; every other inbound rule for this exe, in particular the block rules
     ; Windows auto-creates when the consent prompt is dismissed (block
     ; overrides allow, so a stale one would defeat the rule we add).
+    ;
+    ; Both deletes are allowed to fail (nothing to delete is the normal first
+    ; install), but the add is not: every previous version threw its exit code
+    ; away, so a netsh that never ran -- an unelevated install, a policy that
+    ; blocks it, a machine where a third-party firewall owns the stack --
+    ; produced an install that reported success and silently could not host or
+    ; be observed. Verify by asking for the rule back rather than trusting the
+    ; add's return code, since that is what actually decides whether inbound
+    ; traffic arrives.
     nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${APPNAME} (${EXENAME})"'
+    Pop $0
     nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=all dir=in program="$INSTDIR\${EXENAME}"'
+    Pop $0
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${APPNAME} (${EXENAME})" dir=in action=allow program="$INSTDIR\${EXENAME}" enable=yes profile=any'
+    Pop $0
+    DetailPrint "Firewall rule add returned: $0"
+
+    ; show rule exits non-zero when no rule matches the name.
+    nsExec::ExecToLog 'netsh advfirewall firewall show rule name="${APPNAME} (${EXENAME})" dir=in'
+    Pop $1
+    DetailPrint "Firewall rule verification returned: $1"
+
+    ${If} $1 != 0
+        DetailPrint "WARNING: no inbound firewall rule for $INSTDIR\${EXENAME}."
+        DetailPrint "Hosting a LAN game and being spectated will not work until one exists."
+        ; Silent installs come from the launcher's update flow, which runs
+        ; unattended: a modal box there would hang the update behind a dialog
+        ; nobody is watching. The detail lines above still land in the install
+        ; log either way.
+        IfSilent +2
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Windows Firewall could not be configured for ${APPNAME}.$\r$\n$\r$\nOther players may be unable to join or spectate games you host. To fix this manually, allow inbound connections for:$\r$\n$INSTDIR\${EXENAME}$\r$\n$\r$\nRunning this installer as an administrator usually resolves it."
+    ${EndIf}
 
     ; Silent invocations come from the launcher's update flow. The
     ; *calling* launcher (still running while we install) waits for us

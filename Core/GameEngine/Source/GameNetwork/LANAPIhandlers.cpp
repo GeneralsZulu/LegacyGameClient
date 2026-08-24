@@ -897,3 +897,45 @@ void LANAPI::handleInActive(LANMessage *msg, UnsignedInt senderIP) {
 	RequestGameOptions(options, FALSE);
 	lanUpdateSlotList();
 }
+
+/**
+ * A would-be observer is telling us it could never open a TCP connection to
+ * our observer stream port. Only the observer can know this: our listen
+ * socket bound and listened successfully and simply never saw a connection,
+ * which is indistinguishable from nobody having tried. The lobby UDP traffic
+ * that carried this message is a different protocol on a different port, so
+ * it routinely works while the stream port is dropped -- that is exactly the
+ * shape of the 2026-08-21 failure, where a host bound port 8188, logged
+ * LISTENING, accepted nothing all session, and two spectators sat through
+ * 8 second connect timeouts with no way to tell the host why.
+ *
+ * Say so in chat, on the machine that can actually fix it.
+ */
+void LANAPI::handleObserveUnreachable(LANMessage *msg, UnsignedInt senderIP)
+{
+	// Only meaningful for the host of the game they were trying to watch.
+	if (msg->ObserveFailure.gameIP != m_localIP)
+		return;
+	if (m_inLobby || m_currentGame == nullptr || !m_currentGame->amIHost())
+		return;
+
+	UnicodeString playerName;
+	playerName = msg->name;
+
+	LANObsLog("handleObserveUnreachable: %ls could not reach our observer port %u from %08X after %u ms; inbound TCP is being dropped (listener running=%d)",
+		playerName.str(), msg->ObserveFailure.observerPort, senderIP,
+		msg->ObserveFailure.attemptMs,
+		(m_observerHost && m_observerHost->isRunning()) ? 1 : 0);
+
+	// Rate limit: several spectators failing on the same blocked port would
+	// otherwise each post their own line, and a player who retries from the
+	// menu generates one per attempt. One warning per game is the message.
+	if (m_observeUnreachableReported)
+		return;
+	m_observeUnreachableReported = TRUE;
+
+	UnicodeString chat;
+	chat.format(L"%s could not connect to your observer stream on port %u. Your firewall is likely blocking incoming connections for this game.",
+		playerName.str(), msg->ObserveFailure.observerPort);
+	OnChat(L"", 0, chat, LANCHAT_SYSTEM);
+}

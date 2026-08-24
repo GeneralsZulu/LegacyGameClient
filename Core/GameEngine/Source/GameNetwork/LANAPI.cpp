@@ -99,6 +99,7 @@ LANAPI::LANAPI() : m_transport(nullptr)
 	m_observerClientPlaybackKicked = FALSE;
 	m_observerProgressLastMs = 0;
 	m_observerProgressLastBytes = 0;
+	m_observeUnreachableReported = FALSE;
 	m_mapDownloadPending = FALSE;
 	m_mapDownloadCRC = 0;
 	m_mapDownloadFailedCRC = 0;
@@ -444,6 +445,9 @@ AsciiString GetMessageTypeString(UnsignedInt type)
 		case LANMessage::MSG_INACTIVE:
 			returnString.format("Inactive (%d)", type);
 			break;
+		case LANMessage::MSG_OBSERVE_UNREACHABLE:
+			returnString.format("Observe Unreachable (%d)", type);
+			break;
 		default:
 			returnString.format("Unknown Message (%d)",type);
 	}
@@ -638,6 +642,10 @@ void LANAPI::update()
 				break;
 			case LANMessage::MSG_INACTIVE:		// someone is telling us that we're inactive.
 				handleInActive( msg, senderIP );
+				break;
+			case LANMessage::MSG_OBSERVE_UNREACHABLE:	// somebody couldn't reach our observer port.
+				DEBUG_LOG(("LANAPI::update - got a MSG_OBSERVE_UNREACHABLE from %d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP)));
+				handleObserveUnreachable( msg, senderIP );
 				break;
 
 			default:
@@ -1709,6 +1717,9 @@ void LANAPI::startObserverHost()
 		m_observerHost = new LANObserverHost();
 	if (!m_observerHost->isRunning())
 	{
+		// New listen socket, so a new game: let it warn once again if
+		// spectators still cannot get in.
+		m_observeUnreachableReported = FALSE;
 		UnsignedShort port = (UnsignedShort)(NETWORK_BASE_PORT_NUMBER + LAN_OBSERVER_PORT_OFFSET);
 		if (!m_observerHost->start(port))
 		{
@@ -2067,6 +2078,30 @@ void LANAPI::updateObserver()
 				return;
 			}
 			LANObsLog("updateObserver: observer connect failed after all retries; giving up");
+
+			// Tell the host, but only when the TCP handshake never completed
+			// once. That case means our SYNs never got answered while the
+			// host's listen socket was bound and healthy, which from the
+			// host's side is invisible: it sees no connection attempt at all.
+			// The lobby UDP path is a separate protocol and port and is
+			// routinely fine when the stream port is blocked, which is exactly
+			// how 2026-08-21 went. A stall or a mid-stream close means we did
+			// connect, so inbound works and this would be a false alarm.
+			if (!m_observerClient->everConnected() && s_observeHostIPHostOrder != 0)
+			{
+				// Host byte order throughout, like every other IP in a
+				// LANMessage payload; only the socket calls use htonl.
+				LANMessage failMsg;
+				fillInLANMessage( &failMsg );
+				failMsg.messageType                 = LANMessage::MSG_OBSERVE_UNREACHABLE;
+				failMsg.ObserveFailure.gameIP       = s_observeHostIPHostOrder;
+				failMsg.ObserveFailure.observerPort = s_observeConnectPort;
+				failMsg.ObserveFailure.attemptMs    = timeGetTime() - s_observeLastProgressMs;
+				LANObsLog("updateObserver: reporting unreachable observer port %u to host %08X",
+					s_observeConnectPort, s_observeHostIPHostOrder);
+				sendMessage(&failMsg, s_observeHostIPHostOrder);
+			}
+
 			stopObserverClient();
 			UnicodeString title = TheGameText->fetch("LAN:JoinFailed");
 			UnicodeString body  = TheGameText->FETCH_OR_SUBSTITUTE("LAN:ObserveConnectFailedBody",
