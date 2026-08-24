@@ -333,6 +333,13 @@ protected:
 	Bool        m_liveObserverFpsBoosted;
 	Int         m_liveObserverSavedFpsLimit;
 	UnsignedInt m_liveObserverStarvedSinceMs; ///< wall clock when the byte starvation began, 0 while fed
+	Bool        m_observerLogUploaded;        ///< this observer session's log has already been shipped
+	UnsignedInt m_observedMatchSeed;          ///< seed of the match being watched, captured when the watch starts
+
+	/// Upload ObserverLog.txt at the end of a live-observer session, keyed by
+	/// the watched match's seed. Spectators otherwise upload nothing at all,
+	/// so a failed watch leaves no evidence anywhere.
+	void uploadObserverLog(UnsignedInt seed);
 };
 
 extern RecorderClass *TheRecorder;
