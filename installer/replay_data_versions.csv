@@ -68,7 +68,8 @@ version,1.4.0,Zulu_v1.4.0.big,f7c4d3f7e,verified against Zulu_Setup_v1.4.0.exe
 version,1.5.0,Zulu_v1.5.0.big,a47d59d63,
 version,1.5.1,Zulu_v1.5.0.big,a47d59d63,same assets as 1.5.0
 version,1.5.2,Zulu_v1.5.2.big,00be2a558,verified against Zulu_Setup_v1.5.2.exe
-version,1.5.4,Zulu_v1.5.2.big,00be2a558,1.5.4 was cut at 9e68b663e; assets unchanged since 1.5.2. No 1.5.3 was ever released.
+version,1.5.3,Zulu_v1.5.2.big,00be2a558,dev build (Jul 23 2026) handed out before 1.5.4; its Zulu.big is 1.5.2's -- same assets tree, same iniCRC AA7127D2 in real replays
+version,1.5.4,Zulu_v1.5.2.big,00be2a558,1.5.4 was cut at 9e68b663e; assets unchanged since 1.5.2.
 version,1.5.5,@default,,community balance patch data; same assets as 1.5.6
 version,1.5.6,@default,,
 inicrc,FEAAE3F3,@none,,retail 1.04 base data

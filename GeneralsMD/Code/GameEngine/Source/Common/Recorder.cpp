@@ -400,11 +400,22 @@ static RecorderClass::ReplayEpoch epochFromSemanticVersion(Int major, Int minor,
 		if (patch <= 7) return RecorderClass::REPLAY_EPOCH_V121;    // 1.2.1 - 1.2.7
 		return RecorderClass::REPLAY_EPOCH_V128;                    // 1.2.8, 1.2.9
 	}
+	// 1.5.3 is the odd one out. It was never a release: it is a dev build from
+	// Jul 23 2026, handed out before 1.5.4, and it already carried community
+	// patch sim fixes that mainline only shipped (and only then epoch-gated)
+	// in 1.5.5 -- the empty-Stinger snipe fix landed upstream that same day.
+	// So its replays re-simulate closer under the V155 gates than under V130,
+	// measured over six of them against 1.5.2 data: every one survives longer
+	// (0:10 -> 3:34 in the worst case, one clean to the end), none worse.
+	// Exact fidelity is not reachable from mainline, since that build's engine
+	// exists nowhere in this history; this is the best of the epochs we have.
+	if (minor == 5 && patch == 3)
+		return RecorderClass::REPLAY_EPOCH_V155;
 	// 1.5.4 was cut at 9e68b663e (Aug 4 2026) and carries none of the
 	// stable-upgrade-id / community-patch sim changes -- those landed after it
 	// and first shipped in 1.5.5. (The commit that introduced them bumped
 	// APPVERSION 1.5.2 -> 1.5.4 and named the epoch V154, which is why 1.5.4
-	// replays mismatched in 1.5.5; corrected in 1.5.6. There was never a 1.5.3.)
+	// replays mismatched in 1.5.5; corrected in 1.5.6.)
 	if (minor < 5 || (minor == 5 && patch <= 4))
 		return RecorderClass::REPLAY_EPOCH_V130;      // 1.3.0 - 1.5.4
 	return RecorderClass::REPLAY_EPOCH_V155;          // 1.5.5+
