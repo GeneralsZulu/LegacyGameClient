@@ -229,6 +229,9 @@ public:
 	inline Int getMapContentsMask() const;						///< Get the map contents mask
 	void setSeed( Int seed );													///< Set the random seed for the game
 	inline Int getSeed() const;												///< Get the game seed
+	// NOTE: the seed doubles as the match id on both stats servers. Anything
+	// assigning one should call GenerateGameSeed() below rather than reaching
+	// for GetTickCount().
 	inline Int getUseStats() const;		///< Does this game count towards gamespy stats?
 	inline void setUseStats( Int useStats );
 
@@ -334,6 +337,13 @@ void        GameInfo::setEnforceRandom( Bool enforceRandom ) { m_enforceRandom =
 
 AsciiString GameInfoToAsciiString( const GameInfo *game );
 Bool ParseAsciiStringToGameInfo( GameInfo *game, AsciiString options );
+
+/// Pick a seed for a new game. Always use this rather than GetTickCount():
+/// the seed is also the match id on both stats servers, and a raw tick count
+/// is millisecond-since-boot, which collides between freshly booted machines
+/// often enough to merge unrelated matches. Always positive, so every
+/// consumer that formats it signed or unsigned gets the same key.
+Int GenerateGameSeed(void);
 
 
 /**

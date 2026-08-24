@@ -529,7 +529,7 @@ void GameSpyInfo::markAsStagingRoomHost()
 
   m_localStagingRoom.reset();
 	m_localStagingRoom.enterGame();
-	m_localStagingRoom.setSeed(GetTickCount());
+	m_localStagingRoom.setSeed(GenerateGameSeed());
 
   m_localStagingRoom.setUseStats( useStats );
   m_localStagingRoom.setOldFactionsOnly( oldFactionsOnly );
