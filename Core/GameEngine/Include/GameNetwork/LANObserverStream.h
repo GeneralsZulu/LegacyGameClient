@@ -36,6 +36,13 @@ void LANObsLog(const char* fmt, ...);
 // known.
 const char* LANObsGetLogFileName();
 
+// Full path/name of the previous session's observer log. The current log is
+// rolled here when a new process opens it, so a relaunch after a failure no
+// longer destroys the evidence. Same fallback behaviour as above; the file
+// simply does not exist on a first run, and absent files are skipped by the
+// uploader.
+const char* LANObsGetPrevLogFileName();
+
 // Port relative to NETWORK_BASE_PORT_NUMBER (8088) used for the host's
 // observer-stream listen socket. Chosen well above the per-slot ports.
 #define LAN_OBSERVER_PORT_OFFSET 100
