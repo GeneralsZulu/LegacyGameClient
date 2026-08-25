@@ -75,6 +75,10 @@ static const char *kLatestJsonURLDev =
 static const char *kAllowedURLPrefix =
     "https://storage.googleapis.com/zulu-installer/";
 static const char *kGameExeName  = "generalszh_zulu.exe";
+// Must match LAUNCHERNAME in installer/Zulu.nsi: the installer renames the
+// running launcher to "<this>.old" so it can write the new one, and we sweep
+// that leftover on the next start.
+static const char *kLauncherExeName = "ZuluLauncher.exe";
 static const char *kInstallerLeafRelease = "Zulu_Setup_update.exe";
 static const char *kInstallerLeafDev     = "Zulu_Setup_Dev_update.exe";
 static const char *kAppName       = "Zulu";
@@ -764,6 +768,25 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     const char *fwdArgs = extractArgsAfterExe(GetCommandLineA());
 
+    // Sweep the previous launcher an update moved aside. The installer renames
+    // the running exe out of the way so the new one can be written (see
+    // Zulu.nsi), and cannot delete it while that process still holds it -- by
+    // now it does not, because that process is gone and this is its
+    // replacement.
+    //
+    // Best-effort only, and it fails on the default install path: we run
+    // unelevated and Program Files is not ours to delete from. It succeeds for
+    // the many installs that live somewhere writable, and the installer clears
+    // the leftover on its next run either way, so nothing accumulates beyond
+    // one stale 45 KB file between updates.
+    {
+        char oldLauncher[MAX_PATH];
+        _snprintf(oldLauncher, sizeof(oldLauncher) - 1, "%s\\%s.old",
+            installDir, kLauncherExeName);
+        oldLauncher[sizeof(oldLauncher) - 1] = 0;
+        DeleteFileA(oldLauncher);
+    }
+
     if (GetFileAttributesA(gameExe) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxA(NULL,
             "Could not find generalszh_zulu.exe next to the launcher.\n"
@@ -888,9 +911,14 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                     // is intentionally removed: it only knew about the
                     // shortcut's hardcoded LAUNCHARGS and would drop
                     // anything extra (e.g. -zulu_debug) the user added
-                    // on the command line. The launcher .exe being
-                    // overwritten while we wait is fine — Windows
-                    // keeps the in-memory image valid until we exit.
+                    // on the command line.
+                    //
+                    // This process is holding ZuluLauncher.exe open the
+                    // whole time, so the installer cannot write over it
+                    // and does not try: it renames ours aside and writes
+                    // the new one to the free name (see Zulu.nsi). Our
+                    // in-memory image stays valid across that rename, and
+                    // the .old file is swept at the next start.
                     SetCursor(LoadCursorA(NULL, IDC_WAIT));
                     WaitForSingleObject(sei.hProcess, INFINITE);
                     SetCursor(LoadCursorA(NULL, IDC_ARROW));

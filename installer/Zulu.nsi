@@ -103,7 +103,35 @@ Section "Install ${APPNAME}" SecInstall
     ; the staged input is named on disk.
     SetOutPath "$INSTDIR"
     File "/oname=${EXENAME}" "${EXE_SOURCE}"
+
+    ; The launcher is normally RUNNING while we install: it is what downloaded
+    ; and started us, and it waits for us to exit so it can relaunch the game.
+    ; Windows keeps an exclusive image lock on a running exe, so writing over
+    ; it fails -- and a silent installer swallows that failure and still exits
+    ; 0, so the launcher reports a successful update and stays on the old
+    ; build. That is why every ZuluLauncher.exe fix since it began updating
+    ; itself never reached anyone who updates through the launcher.
+    ;
+    ; A running exe CAN be renamed, so move it aside and let the write land on
+    ; a free name. The stale copy is deleted below when nothing holds it (a
+    ; manual install with no launcher running); when the launcher is running it
+    ; survives until the Delete at the top of the next update, since the new
+    ; launcher's own best-effort sweep cannot delete from Program Files
+    ; unelevated. That is one 45 KB file between updates, and
+    ; ${LAUNCHERNAME}.old is not an exe extension, so nothing tries to run it.
+    Delete "$INSTDIR\${LAUNCHERNAME}.old"
+    Rename "$INSTDIR\${LAUNCHERNAME}" "$INSTDIR\${LAUNCHERNAME}.old"
+    ; 'try' rather than the default 'on': a write failure must set the error
+    ; flag and carry on so the restore below can run, not abort the section.
+    SetOverwrite try
+    ClearErrors
     File "/oname=${LAUNCHERNAME}" "${LAUNCHER_SOURCE}"
+    SetOverwrite on
+    IfErrors 0 +2
+        ; Could not write the new one: put the old one back rather than leave
+        ; the shortcuts pointing at nothing.
+        Rename "$INSTDIR\${LAUNCHERNAME}.old" "$INSTDIR\${LAUNCHERNAME}"
+    Delete "$INSTDIR\${LAUNCHERNAME}.old"
 
     ; --- Mod BIG -> user data dir ---------------------------------------
     ; $DOCUMENTS resolves to the invoking user's Documents folder. With UAC
@@ -258,6 +286,9 @@ SectionEnd
 Section "Uninstall"
     Delete "$INSTDIR\${EXENAME}"
     Delete "$INSTDIR\${LAUNCHERNAME}"
+    ; The move-aside copy an update left behind if the launcher was still
+    ; holding it and never got a chance to sweep it.
+    Delete "$INSTDIR\${LAUNCHERNAME}.old"
     Delete "$INSTDIR\Uninstall_Zulu.exe"
     Delete "$DOCUMENTS\${USERDATALEAF}\${BIGNAME}"
 
