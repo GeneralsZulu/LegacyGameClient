@@ -1291,6 +1291,13 @@ void GameLogic::startNewGame( Bool loadingSaveGame )
 	// Release diagnostic log: begin a fresh CRC history for this match and
 	// record a one-line header describing it. Always compiled (unlike DEBUG_LOG).
 	ReleaseLogResetCRCHistory();
+	// The shell map loads through this same path every time we drop back to
+	// the main menu, so without this gate a night's log carries a "Match
+	// start" line per menu visit with no "Match end" to pair with (that one
+	// comes from stopRecording, which only runs for real games). Counting
+	// matches in an uploaded log then comes out wrong -- 178 phantom starts
+	// on the 2026-08-26 online night alone.
+	if (isInInteractiveGame(m_gameMode))
 	{
 		const Bool relIsMP = (TheRecorder && TheRecorder->isMultiplayer());
 		const Int relCRCInterval = TheGameInfo ? TheGameInfo->getCRCInterval() : 0;
