@@ -323,6 +323,36 @@ void Drawable::saturateRGB(RGBColor& color, Real factor)
 
 }
 
+//-------------------------------------------------------------------------------------------------
+// TheSuperHackers @bugfix Flash tints are ADDED to the scene lights when the drawable renders, so a
+// tint that lands near zero is simply never seen. saturateRGB() pushes a color away from mid-grey,
+// which collapses any desaturated house color (Metallic Grey, R:112 G:128 B:144, sits practically on
+// mid-grey) down to nothing, and the "being captured" flash silently does not happen for that player.
+// Detect the collapse and fall back to a plain scaled lift of the original color, which is always
+// positive and always visible.
+void Drawable::saturateRGBForFlash(RGBColor& color, Real factor)
+{
+	const RGBColor unsaturated = color;
+
+	saturateRGB( color, factor );
+
+	// The weakest of the normal, saturated house colors lands around 0.16, so this threshold only
+	// catches colors that genuinely have no flash left.
+	const Real MIN_VISIBLE_TINT = 0.1f;
+
+	Real strength = fabs(color.red);
+	strength = MAX( strength, (Real)fabs(color.green) );
+	strength = MAX( strength, (Real)fabs(color.blue) );
+
+	if ( strength < MIN_VISIBLE_TINT )
+	{
+		Real lift = MAX( factor, MIN_VISIBLE_TINT );
+		color.red   = unsaturated.red   * lift;
+		color.green = unsaturated.green * lift;
+		color.blue  = unsaturated.blue  * lift;
+	}
+}
+
 
 //--- A MACRO TO APPLY TO TheTacticalView->getZoom() ------ To Clamp the return to a visually pleasing size
 //--- so that icons, emoticons, health bars, pips, etc, look reasonably solid and don't shimmer or tweed
@@ -1354,7 +1384,7 @@ void Drawable::flashAsSelected( const RGBColor *color ) ///< drawable takes care
 				tempColor.setFromInt(0xffffffff);//white
 
 			Real saturation = TheGlobalData->m_selectionFlashSaturationFactor;
-			saturateRGB( tempColor, saturation );
+			saturateRGBForFlash( tempColor, saturation );
 			m_selectionFlashEnvelope->play( &tempColor, 0, 4 );
 
 		}

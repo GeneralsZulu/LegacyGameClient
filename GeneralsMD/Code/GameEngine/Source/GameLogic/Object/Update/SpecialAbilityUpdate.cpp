@@ -1229,7 +1229,7 @@ Bool SpecialAbilityUpdate::continuePreparation()
             myHouseColor.setFromInt( getObject()->getIndicatorColor() );
 
             Real saturation = TheGlobalData->m_selectionFlashSaturationFactor;
-            targetDraw->saturateRGB( myHouseColor, saturation );
+            targetDraw->saturateRGBForFlash( myHouseColor, saturation );
 
             targetDraw->flashAsSelected( &myHouseColor ); //In MY house color, not his!
 
