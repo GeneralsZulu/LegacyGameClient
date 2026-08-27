@@ -457,6 +457,7 @@ WindowMsgHandledType WOLMapSelectMenuSystem( GameWindow *window, UnsignedInt msg
 						if (TheGlobalData != nullptr)
 						{
 							UploadAllMapAssetsIfMissing(TheGlobalData->m_mapCheckUrl,
+								TheGlobalData->m_mapAssetsUrl,
 								TheGlobalData->m_mapUploadUrl,
 								it->second.m_CRC,
 								it->second.m_fileName,

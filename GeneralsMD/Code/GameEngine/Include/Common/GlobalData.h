@@ -144,6 +144,13 @@ public:
 	// doesn't already have it.
 	AsciiString m_mapUploadUrl;
 
+	// URL to GET ?crc=<dec> for the list of asset kinds the server already
+	// holds for a map, as {"kinds":["map","preview",...]}. Lets an upload
+	// fill in only the sidecars that are missing, instead of the check URL's
+	// all-or-nothing "do you have this map at all". Empty string falls back
+	// to that older behaviour.
+	AsciiString m_mapAssetsUrl;
+
 	// URL to GET ?crc=<dec>&kind=<map|preview|ini|str|solo|assets|readme>
 	// to pull one stored map asset when a peer joins a lobby for a map it
 	// doesn't have locally. Empty string disables in-lobby map downloads

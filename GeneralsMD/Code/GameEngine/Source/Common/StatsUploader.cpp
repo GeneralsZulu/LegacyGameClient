@@ -1063,34 +1063,55 @@ static void uploadOneAssetIfPresent(const AsciiString& uploadUrl,
 }
 
 void UploadAllMapAssetsIfMissing(const AsciiString& checkUrl,
+                                 const AsciiString& listUrl,
                                  const AsciiString& uploadUrl,
                                  unsigned int mapCRC,
                                  const AsciiString& mapPath,
                                  unsigned int contentsMask,
                                  unsigned int seed)
 {
-	if (checkUrl.isEmpty() || uploadUrl.isEmpty() || mapPath.isEmpty() || mapCRC == 0)
+	if (uploadUrl.isEmpty() || mapPath.isEmpty() || mapCRC == 0)
 		return;
 
-	if (!MapMissingFromServer(checkUrl, mapCRC))
-		return;
+	// What the server already holds, as a contentsMask-shaped bitfield.
+	//
+	// Asking per kind (rather than the old "do you have this map at all")
+	// is what lets a sidecar be filled in later. The all-or-nothing check
+	// short-circuited the whole upload the moment the .map was present, so
+	// a map first uploaded by a host who lacked, say, the .str could never
+	// acquire one afterwards no matter how many hosts who had it played it:
+	// on 2026-08-27 three joiners 404'd on kind=str for a map stored back in
+	// June, and across the whole store only 309 of 1437 maps had a .str at
+	// all.
+	unsigned int have = 0;
+	if (!MapAssetsOnServer(listUrl, mapCRC, &have))
+	{
+		// No per-kind list available (older/other server, or the request
+		// failed). Fall back to the original behaviour so we neither spam
+		// re-uploads nor stop uploading altogether.
+		if (checkUrl.isEmpty() || !MapMissingFromServer(checkUrl, mapCRC))
+			return;
+		have = 0;
+	}
 
-	// Always upload the .map itself; sidecars only if the host's contents
-	// mask says they're present. Mask bits mirror FileTransfer.cpp:264-275
-	// so the round-trip (host upload → peer download) covers exactly the
-	// same set the legacy P2P transfer would have moved.
-	uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, mapPath, "map", seed);
-	if (contentsMask & 2)
+	// Upload the .map itself plus any sidecar the host's contents mask says
+	// is present here and the server says is absent there. Mask bits mirror
+	// FileTransfer.cpp:264-275 so the round-trip (host upload → peer
+	// download) covers exactly the same set the legacy P2P transfer would
+	// have moved.
+	if ((have & 1) == 0)
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, mapPath, "map", seed);
+	if ((contentsMask & 2) && !(have & 2))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetPreviewFromMap(mapPath), "preview", seed);
-	if (contentsMask & 4)
+	if ((contentsMask & 4) && !(have & 4))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetINIFromMap(mapPath), "ini", seed);
-	if (contentsMask & 8)
+	if ((contentsMask & 8) && !(have & 8))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetStrFileFromMap(mapPath), "str", seed);
-	if (contentsMask & 16)
+	if ((contentsMask & 16) && !(have & 16))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetSoloINIFromMap(mapPath), "solo", seed);
-	if (contentsMask & 32)
+	if ((contentsMask & 32) && !(have & 32))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetAssetUsageFromMap(mapPath), "assets", seed);
-	if (contentsMask & 64)
+	if ((contentsMask & 64) && !(have & 64))
 		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetReadmeFromMap(mapPath), "readme", seed);
 }
 
@@ -2176,6 +2197,119 @@ bool MapMissingFromServer(const AsciiString& checkUrl, unsigned int mapCRC)
 	return missing;
 }
 
+bool MapAssetsOnServer(const AsciiString& listUrl, unsigned int mapCRC,
+                       unsigned int *outMask)
+{
+	if (listUrl.isEmpty() || outMask == nullptr || mapCRC == 0)
+		return false;
+
+	// Same URL rebuild as MapMissingFromServer above: keep any query string
+	// the configured URL already carries and append our crc to it.
+	char hostBuf[256];
+	char pathBuf[1024];
+	URL_COMPONENTSA uc;
+	memset(&uc, 0, sizeof(uc));
+	uc.dwStructSize = sizeof(uc);
+	uc.lpszHostName = hostBuf;
+	uc.dwHostNameLength = sizeof(hostBuf);
+	uc.lpszUrlPath = pathBuf;
+	uc.dwUrlPathLength = sizeof(pathBuf);
+
+	if (!InternetCrackUrlA(listUrl.str(), 0, 0, &uc))
+	{
+		printf("Map assets: failed to parse URL \"%s\"\n", listUrl.str());
+		return false;
+	}
+
+	const char *separator = (strchr(pathBuf, '?') != nullptr) ? "&" : "?";
+	char fullPath[1280];
+	sprintf(fullPath, "%s%scrc=%u", pathBuf, separator, mapCRC);
+
+	WinInetSession s;
+	if (!openHttpRequest(listUrl, "GET", fullPath, "Map assets", &s))
+		return false;
+
+	if (!HttpSendRequestA(s.hRequest, nullptr, 0, nullptr, 0))
+	{
+		printf("Map assets: HttpSendRequest failed (%lu)\n", GetLastError());
+		closeHttpRequest(&s);
+		return false;
+	}
+
+	DWORD statusCode = 0;
+	DWORD statusSize = sizeof(statusCode);
+	HttpQueryInfoA(s.hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &statusSize, nullptr);
+
+	if (statusCode < 200 || statusCode >= 300)
+	{
+		// Most likely an older server with no list_map_assets route. Say so
+		// and let the caller fall back to the map_exists probe.
+		printf("Map assets: crc=%u -> %lu, falling back to the existence check\n",
+			mapCRC, statusCode);
+		closeHttpRequest(&s);
+		return false;
+	}
+
+	// The response is small ({"crc","name","kinds":[...]}), but a long map
+	// name could still push it past a tight buffer, so allow some room and
+	// treat a truncated read as "could not ask".
+	char body[1024];
+	memset(body, 0, sizeof(body));
+	DWORD totalRead = 0;
+	for (;;)
+	{
+		DWORD bytesRead = 0;
+		if (!InternetReadFile(s.hRequest, body + totalRead,
+				static_cast<DWORD>(sizeof(body) - 1 - totalRead), &bytesRead))
+			break;
+		if (bytesRead == 0)
+			break;
+		totalRead += bytesRead;
+		if (totalRead >= sizeof(body) - 1)
+			break;
+	}
+	body[totalRead] = '\0';
+	closeHttpRequest(&s);
+
+	// Find the kinds array and read the quoted names out of it. Scoping the
+	// scan to the array matters: "map" would otherwise match inside a map
+	// name that happens to contain it.
+	const char *kinds = strstr(body, "\"kinds\"");
+	if (kinds == nullptr)
+	{
+		printf("Map assets: crc=%u -> no kinds array in \"%s\"\n", mapCRC, body);
+		return false;
+	}
+	const char *arrayStart = strchr(kinds, '[');
+	const char *arrayEnd = (arrayStart != nullptr) ? strchr(arrayStart, ']') : nullptr;
+	if (arrayStart == nullptr || arrayEnd == nullptr)
+	{
+		printf("Map assets: crc=%u -> malformed kinds array in \"%s\"\n", mapCRC, body);
+		return false;
+	}
+
+	// Bit 1 is the .map; s_mapSidecars carries bits 2..64 in the same order
+	// the download path uses.
+	unsigned int mask = 0;
+	AsciiString arrayText;
+	arrayText.set(arrayStart, (Int)(arrayEnd - arrayStart) + 1);
+	if (strstr(arrayText.str(), "\"map\"") != nullptr)
+		mask |= 1;
+	Int i;
+	for (i = 0; i < MAP_SIDECAR_COUNT; ++i)
+	{
+		char quoted[32];
+		_snprintf(quoted, sizeof(quoted), "\"%s\"", s_mapSidecars[i].kind);
+		quoted[sizeof(quoted) - 1] = '\0';
+		if (strstr(arrayText.str(), quoted) != nullptr)
+			mask |= s_mapSidecars[i].mask;
+	}
+
+	printf("Map assets: crc=%u -> mask=0x%02X from %s\n", mapCRC, mask, arrayText.str());
+	*outMask = mask;
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Map match counts via HTTP GET. The endpoint returns a JSON array of
 // {"map": "<path>", "matchCount": N} entries where <path> is in the form
@@ -3199,6 +3333,7 @@ struct TelemetryJob
 
 	bool haveMap;
 	char mapCheckUrl[512];
+	char mapAssetsUrl[512];
 	char mapUploadUrl[512];
 	unsigned int mapCRC;
 	char mapFilePath[512];
@@ -3310,7 +3445,8 @@ static unsigned __stdcall telemetryThreadProc(void *arg)
 	// games). Does its own missing-from-server check first.
 	if (job->haveMap)
 	{
-		UploadAllMapAssetsIfMissing(AsciiString(job->mapCheckUrl), AsciiString(job->mapUploadUrl),
+		UploadAllMapAssetsIfMissing(AsciiString(job->mapCheckUrl), AsciiString(job->mapAssetsUrl),
+			AsciiString(job->mapUploadUrl),
 			job->mapCRC, AsciiString(job->mapFilePath), job->mapContentsMask, job->seed);
 	}
 
@@ -3395,6 +3531,7 @@ void StartMatchTelemetryUpload(const MatchTelemetryUpload& p)
 	if (!p.mapCheckUrl.isEmpty() && !p.mapFilePath.isEmpty() && p.mapCRC != 0)
 	{
 		copyCStr(job->mapCheckUrl, sizeof(job->mapCheckUrl), p.mapCheckUrl.str());
+		copyCStr(job->mapAssetsUrl, sizeof(job->mapAssetsUrl), p.mapAssetsUrl.str());
 		copyCStr(job->mapUploadUrl, sizeof(job->mapUploadUrl), p.mapUploadUrl.str());
 		copyCStr(job->mapFilePath, sizeof(job->mapFilePath), p.mapFilePath.str());
 		job->mapCRC = p.mapCRC;

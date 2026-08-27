@@ -47,6 +47,7 @@ struct MatchTelemetryUpload
 
 	// Map assets (the .map plus whatever sidecars contentsMask flags).
 	AsciiString mapCheckUrl;        ///< empty disables the map check + upload
+	AsciiString mapAssetsUrl;       ///< empty falls back to mapCheckUrl alone
 	AsciiString mapUploadUrl;
 	unsigned int mapCRC;            ///< 0 disables the map check + upload
 	AsciiString mapFilePath;
@@ -162,6 +163,23 @@ void *AppendZuluUploadTag(const void *fileData, unsigned int fileLen,
 /// @param mapCRC The map's stored CRC (from MapMetaData::m_CRC)
 bool MapMissingFromServer(const AsciiString& checkUrl, unsigned int mapCRC);
 
+/// Ask the server which asset kinds it already holds for mapCRC. Issues an
+/// HTTP GET to "<listUrl>?crc=<dec>" and reads the {"kinds":[...]} array out
+/// of the JSON response, returning it as a contentsMask-style bitfield in
+/// *outMask: bit 1 = the .map itself, 2 = preview, 4 = map.ini, 8 = map.str,
+/// 16 = solo.ini, 32 = assetusage.txt, 64 = readme.txt.
+///
+/// This is the finer-grained sibling of MapMissingFromServer: that one can
+/// only say whether the .map is there at all, which means a map first
+/// uploaded without its sidecars could never have them filled in afterwards.
+///
+/// @return false if the server could not be asked (empty listUrl, network
+///         error, non-2xx, unparseable body), in which case *outMask is not
+///         written and the caller should fall back to MapMissingFromServer.
+///         A successful call for an unknown CRC returns true with *outMask 0.
+bool MapAssetsOnServer(const AsciiString& listUrl, unsigned int mapCRC,
+                       unsigned int *outMask);
+
 /// Upload a single map asset (the .map file or its .tga preview) to a REST
 /// endpoint via HTTP POST. Sends Content-Type: application/octet-stream plus
 /// X-Map-CRC, X-Map-Name, X-Map-File, and X-Game-Seed headers. Both calls
@@ -177,21 +195,27 @@ void UploadMapToServer(const AsciiString& uploadUrl, const void *data, unsigned 
                        unsigned int mapCRC, const AsciiString& mapName,
                        const char *fileKind, unsigned int seed);
 
-/// Conditionally upload an entire map (the .map plus every sidecar the host
-/// has on disk) to the configured cncstats endpoint. Issues one
-/// missing-from-server check; if the server already has the CRC, no uploads
-/// happen. Otherwise the .map file is uploaded along with whatever subset
-/// of preview/.ini/.str/solo.ini/assetusage.txt/readme.txt the contentsMask
-/// indicates are present.
+/// Upload whatever parts of a map install the server is missing: the .map
+/// itself and whichever of preview/.ini/.str/solo.ini/assetusage.txt/
+/// readme.txt the contentsMask says exist on disk here but the server does
+/// not already hold.
+///
+/// When listUrl is available the per-kind list decides what to send, so a
+/// map that was first uploaded without its sidecars gets them filled in on
+/// the next game played on it. Without listUrl this falls back to the older
+/// all-or-nothing behaviour: ask whether the .map exists, and upload
+/// everything or nothing.
 ///
 /// Best-effort and blocking; intended for lobby map-select (host side) and
-/// end-of-match upload (recorder side). Silently no-ops if either URL is
-/// empty, the map path is empty, or the missing-from-server check fails.
+/// end-of-match upload (recorder side). Silently no-ops if the upload URL is
+/// empty, the map path is empty, or the server cannot be asked at all.
 ///
-/// @param checkUrl Full URL of the map_exists endpoint (empty disables)
+/// @param checkUrl Full URL of the map_exists endpoint (the fallback probe)
+/// @param listUrl Full URL of the list_map_assets endpoint (empty falls back
+///        to checkUrl alone)
 /// @param uploadUrl Full URL of the add_map endpoint (empty disables)
-/// @param mapCRC The map's CRC for the missing-from-server check and the
-///        X-Map-CRC header on each upload
+/// @param mapCRC The map's CRC for the server queries and the X-Map-CRC
+///        header on each upload
 /// @param mapPath The .map file path (typically MapMetaData::m_fileName)
 /// @param contentsMask GameInfo::getMapContentsMask() bitfield indicating
 ///        which sidecars exist on disk: bit 2 = preview, 4 = map.ini,
@@ -199,6 +223,7 @@ void UploadMapToServer(const AsciiString& uploadUrl, const void *data, unsigned 
 ///        Pass 0 to upload the .map only.
 /// @param seed Game seed for X-Game-Seed correlation
 void UploadAllMapAssetsIfMissing(const AsciiString& checkUrl,
+                                 const AsciiString& listUrl,
                                  const AsciiString& uploadUrl,
                                  unsigned int mapCRC,
                                  const AsciiString& mapPath,
