@@ -1287,7 +1287,22 @@ void RecorderClass::stopRecording() {
 				// because a player whose spectating just broke restarts the
 				// game, which is precisely what truncates the log that would
 				// have explained it.
-				up.logFilePaths.push_back(AsciiString(LANObsGetPrevLogFileName()));
+				//
+				// Once per run, though: it is a snapshot of a file that is
+				// already closed and can no longer change, so every match
+				// after the first was re-uploading the same bytes under a new
+				// match seed. On the 2026-08-26 night that was 57 uploads of
+				// ~15 distinct files, 257 KB -- four times the volume of the
+				// release logs, which are the ones that actually differ per
+				// match, and each copy filed under a seed it has nothing to
+				// do with. The first match after launch is also the one where
+				// it is most likely to be relevant.
+				static Bool s_prevObserverLogSent = FALSE;
+				if (!s_prevObserverLogSent)
+				{
+					s_prevObserverLogSent = TRUE;
+					up.logFilePaths.push_back(AsciiString(LANObsGetPrevLogFileName()));
+				}
 			}
 
 			// Map check + conditional map upload. Look up the played map's CRC
