@@ -40,6 +40,7 @@
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/ControlBarScheme.h"
 #include "GameClient/MapUtil.h"
+#include "GameClient/TerrainRoads.h"
 #include "GameLogic/GameLogic.h"
 
 //-------------------------------------------------------------------------------------------------
@@ -738,6 +739,38 @@ void W3DDrawMapPreview( GameWindow *window, WinInstanceData *instData)
 		TheDisplay->drawFillRect(ul.x, ul.y, lr.x -ul.x, lr.y-ul.y, lineColor);
 	else
 		TheDisplay->drawImage(window->winGetEnabledImage(0) , ul.x, ul.y, lr.x, lr.y );
+
+	// Zulu: bridge spans from the map cache, drawn under the tech/supply
+	// icons. Dark casing first, then the bridge's radar color (neutral tan
+	// when the template is unknown, e.g. landmark bridges) so the line
+	// reads over both water and terrain.
+	if (!mmData->m_bridgeSpans.empty())
+	{
+		Real extW = mmData->m_extent.hi.x - mmData->m_extent.lo.x;
+		Real extH = mmData->m_extent.hi.y - mmData->m_extent.lo.y;
+		if (extW > 0.0f && extH > 0.0f)
+		{
+			Int smallWidth = lr.x - ul.x;
+			Int smallHeight = lr.y - ul.y;
+			MapBridgeSpanList::const_iterator itb = mmData->m_bridgeSpans.begin();
+			for (; itb != mmData->m_bridgeSpans.end(); ++itb)
+			{
+				Int x0 = ul.x + (Int)((itb->m_from.x - mmData->m_extent.lo.x) / extW * smallWidth);
+				Int y0 = ul.y + (Int)((1.0f - (itb->m_from.y - mmData->m_extent.lo.y) / extH) * smallHeight);
+				Int x1 = ul.x + (Int)((itb->m_to.x - mmData->m_extent.lo.x) / extW * smallWidth);
+				Int y1 = ul.y + (Int)((1.0f - (itb->m_to.y - mmData->m_extent.lo.y) / extH) * smallHeight);
+				Color spanColor = GameMakeColor( 210, 180, 120, 255 );
+				TerrainRoadType *bridgeTemplate = TheTerrainRoads ? TheTerrainRoads->findBridge( itb->m_templateName ) : nullptr;
+				if (bridgeTemplate)
+				{
+					RGBColor rgb = bridgeTemplate->getRadarColor();
+					spanColor = GameMakeColor( (Int)(rgb.red * 255.0f), (Int)(rgb.green * 255.0f), (Int)(rgb.blue * 255.0f), 255 );
+				}
+				TheDisplay->drawLine( x0, y0, x1, y1, 3.0f, GameMakeColor( 20, 20, 20, 255 ) );
+				TheDisplay->drawLine( x0, y0, x1, y1, 1.5f, spanColor );
+			}
+		}
+	}
 
 	const Image *image = TheMappedImageCollection->findImageByName("TecBuilding");
 	ICoord2DList::iterator it = TheSupplyAndTechImageLocations.m_techPosList.begin();

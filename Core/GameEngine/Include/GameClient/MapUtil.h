@@ -70,6 +70,18 @@ public:
 
 typedef std::list <Coord3D> Coord3DList;
 
+// A bridge span from the map's object list: world-space endpoints plus the
+// bridge template name (the map object's name) used for radar-color lookup
+// at draw time. Landmark bridges store their thing-template name, which
+// won't resolve via TheTerrainRoads; consumers fall back to a neutral color.
+struct MapBridgeSpan
+{
+	AsciiString m_templateName;
+	Coord3D m_from;
+	Coord3D m_to;
+};
+typedef std::list <MapBridgeSpan> MapBridgeSpanList;
+
 enum { MAX_MAP_START_SPOTS = 8 };	// mirrors MAX_SLOTS (GameNetwork/NetworkDefs.h)
 
 class MapMetaData
@@ -102,6 +114,7 @@ public:
 	Coord3DList m_cratePositions;        ///< KINDOF_CRATE objects
 	Coord3DList m_techDerrickPositions;  ///< Tech buildings whose template name contains "Derrick"
 	Coord3DList m_garrisonablePositions; ///< KINDOF_GARRISONABLE_UNTIL_DESTROYED civilian buildings
+	MapBridgeSpanList m_bridgeSpans;     ///< Bridge spans (sectional pairs + landmark approximations) for preview rendering
 
 	// Ground-path distance between start waypoints in world units, 0-based
 	// spot indices, symmetric. Computed at cache build by flood-filling the
