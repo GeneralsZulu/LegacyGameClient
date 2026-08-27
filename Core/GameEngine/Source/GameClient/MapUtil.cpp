@@ -75,7 +75,7 @@ static const char *mapExtension = ".map";
 // MapCache.ini files that earlier Zulu builds polluted with cratePosition /
 // techDerrickPosition fields (which crash the retail vanilla parser). Bump
 // when the on-disk Zulu cache format gains new fields the engine relies on.
-static const char *MAP_CACHE_FORMAT_VERSION_TAG = "; MapCacheFormatVersion = 5";
+static const char *MAP_CACHE_FORMAT_VERSION_TAG = "; MapCacheFormatVersion = 6";
 
 static Bool hasZuluFormatSentinel(const AsciiString &filename)
 {
@@ -173,6 +173,7 @@ struct CachedWaterArea
 
 struct CachedBridgeSpan
 {
+	AsciiString templateName;	// bridge template = point1/landmark map object name, for radar-color lookup
 	Coord3D from;
 	Coord3D to;
 };
@@ -180,6 +181,7 @@ struct CachedBridgeSpan
 static std::vector<CachedWaterArea> m_waterAreas;
 static std::vector<CachedBridgeSpan> m_bridgeSpans;
 static Coord3D m_pendingBridgeStart;
+static AsciiString m_pendingBridgeName;
 static Bool m_havePendingBridgeStart = FALSE;
 
 // Same crossing test as PolygonTrigger::pointInTrigger, run against a local
@@ -577,6 +579,7 @@ static Bool ParseObjectDataChunk(DataChunkInput &file, DataChunkInfo *info, void
 	if (flags & FLAG_BRIDGE_POINT1)
 	{
 		m_pendingBridgeStart = loc;
+		m_pendingBridgeName = name;
 		m_havePendingBridgeStart = TRUE;
 	}
 	else if (flags & FLAG_BRIDGE_POINT2)
@@ -584,6 +587,7 @@ static Bool ParseObjectDataChunk(DataChunkInput &file, DataChunkInfo *info, void
 		if (m_havePendingBridgeStart)
 		{
 			CachedBridgeSpan span;
+			span.templateName = m_pendingBridgeName;
 			span.from = m_pendingBridgeStart;
 			span.to = loc;
 			m_bridgeSpans.push_back(span);
@@ -599,6 +603,7 @@ static Bool ParseObjectDataChunk(DataChunkInput &file, DataChunkInfo *info, void
 			Real dirX = (Real)cos(angle);
 			Real dirY = (Real)sin(angle);
 			CachedBridgeSpan span;
+			span.templateName = name;
 			span.from.x = loc.x - dirX * halfSpan;
 			span.from.y = loc.y - dirY * halfSpan;
 			span.from.z = loc.z;
@@ -946,6 +951,17 @@ void MapCache::writeCacheINI( const AsciiString &mapDir )
 				fprintf(fp, "  garrisonablePosition = X:%2.2f Y:%2.2f Z:%2.2f\n", pos.x, pos.y, pos.z);
 			}
 #if RTS_ZEROHOUR
+			MapBridgeSpanList::const_iterator itbs = md.m_bridgeSpans.begin();
+			for (; itbs != md.m_bridgeSpans.end(); ++itbs)
+			{
+				AsciiString spanName = itbs->m_templateName;
+				if (spanName.isEmpty())
+					spanName = "Unknown";
+				fprintf(fp, "  bridgeSpan = %s X:%2.2f Y:%2.2f Z:%2.2f X:%2.2f Y:%2.2f Z:%2.2f\n",
+					AsciiStringToQuotedPrintable(spanName).str(),
+					itbs->m_from.x, itbs->m_from.y, itbs->m_from.z,
+					itbs->m_to.x, itbs->m_to.y, itbs->m_to.z);
+			}
 			Int si, sj;
 			for (si = 0; si < md.m_numPlayers && si < MAX_MAP_START_SPOTS; ++si)
 			{
@@ -1262,6 +1278,22 @@ Bool MapCache::addMap(
 	md.m_cratePositions = m_cratePositions;
 	md.m_techDerrickPositions = m_techDerrickPositions;
 	md.m_garrisonablePositions = m_garrisonablePositions;
+#if RTS_ZEROHOUR
+	// Bridge spans survive into the metadata (and the cache INI) so the
+	// lobby preview and the Discord lobby render can draw them without
+	// re-parsing the map.
+	{
+		Int b;
+		for (b = 0; b < (Int)m_bridgeSpans.size(); ++b)
+		{
+			MapBridgeSpan span;
+			span.m_templateName = m_bridgeSpans[b].templateName;
+			span.m_from = m_bridgeSpans[b].from;
+			span.m_to = m_bridgeSpans[b].to;
+			md.m_bridgeSpans.push_back(span);
+		}
+	}
+#endif
 	md.m_CRC = calcCRC(fname);
 
 	Bool exists = false;

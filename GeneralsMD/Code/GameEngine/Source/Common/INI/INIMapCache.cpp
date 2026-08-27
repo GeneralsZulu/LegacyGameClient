@@ -72,6 +72,7 @@ public:
 	Coord3DList m_cratePositions;
 	Coord3DList m_techDerrickPositions;
 	Coord3DList m_garrisonablePositions;
+	MapBridgeSpanList m_bridgeSpans;
 	static const FieldParse m_mapFieldParseTable[];		///< the parse table for INI definition
 	const FieldParse *getFieldParse() const { return m_mapFieldParseTable; }
 };
@@ -119,6 +120,16 @@ void parseGarrisonablePositionCoord3D( INI* ini, void * instance, void * /*store
 	mmdr->m_garrisonablePositions.push_front(coord3d);
 }
 
+void parseBridgeSpanEntry( INI* ini, void * instance, void * /*store*/, const void* /*userData*/ )
+{
+	MapMetaDataReader *mmdr = (MapMetaDataReader *)instance;
+	MapBridgeSpan span;
+	span.m_templateName = QuotedPrintableToAsciiString(ini->getNextAsciiString());
+	INI::parseCoord3D(ini, nullptr, &span.m_from, nullptr);
+	INI::parseCoord3D(ini, nullptr, &span.m_to, nullptr);
+	mmdr->m_bridgeSpans.push_back(span);
+}
+
 const FieldParse MapMetaDataReader::m_mapFieldParseTable[] =
 {
 
@@ -139,6 +150,7 @@ const FieldParse MapMetaDataReader::m_mapFieldParseTable[] =
 	{ "cratePosition",					parseCratePositionCoord3D,	nullptr, 0 },
 	{ "techDerrickPosition",		parseTechDerrickPositionCoord3D,	nullptr, 0 },
 	{ "garrisonablePosition",		parseGarrisonablePositionCoord3D,	nullptr, 0 },
+	{ "bridgeSpan",						parseBridgeSpanEntry,	nullptr, 0 },
 
 	{ "Player_1_Start",					INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_waypoints ) },
 	{ "Player_2_Start",					INI::parseCoord3D,	nullptr,	offsetof( MapMetaDataReader, m_waypoints ) + sizeof(Coord3D) * 1 },
@@ -284,6 +296,8 @@ void INI::parseMapCacheDefinition( INI* ini )
 		md.m_garrisonablePositions.push_front(*it);
 		it++;
 	}
+
+	md.m_bridgeSpans = mdr.m_bridgeSpans;
 
 	// Unpack the flat (i ascending, j ascending) pair list back into the
 	// symmetric matrix. Unwritten pairs stay 0 ("not computed").

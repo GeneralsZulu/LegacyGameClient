@@ -30,6 +30,7 @@
 #include "Common/MapReaderWriterInfo.h"
 #include "Common/MapObject.h"
 #include "GameClient/MapUtil.h"
+#include "GameClient/TerrainRoads.h"
 #include "GameClient/Image.h"
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/LANAPI.h"
@@ -1743,6 +1744,60 @@ static void drawImpassableOverlay(PixBuf *big,
 }
 
 // =========================================================================
+// Bridge overlay.
+// -------------------------------------------------------------------------
+// Bridge spans cached by MapCache (sectional river bridges as exact
+// endpoint pairs, landmark bridges approximated along their facing).
+// Drawn as a dark-cased line in the bridge's radar color (neutral tan
+// when the template is unknown) so crossings read on the preview.
+// =========================================================================
+static void drawBridgeOverlay(PixBuf *big, const MapMetaData *mmd)
+{
+	if (!big || !mmd || mmd->m_bridgeSpans.empty())
+		return;
+	float worldW = mmd->m_extent.hi.x - mmd->m_extent.lo.x;
+	float worldH = mmd->m_extent.hi.y - mmd->m_extent.lo.y;
+	if (worldW <= 0.0f || worldH <= 0.0f)
+		return;
+
+	// Thickness scales with the upscaled image like the icons do.
+	int halfCase = big->w / 220;
+	if (halfCase < 2) halfCase = 2;
+	int halfCore = halfCase - 1;
+
+	MapBridgeSpanList::const_iterator it;
+	for (it = mmd->m_bridgeSpans.begin(); it != mmd->m_bridgeSpans.end(); ++it)
+	{
+		unsigned char cr = 210, cg = 180, cb = 120; // neutral tan fallback
+		if (TheTerrainRoads)
+		{
+			TerrainRoadType *bridgeTemplate = TheTerrainRoads->findBridge(it->m_templateName);
+			if (bridgeTemplate)
+			{
+				RGBColor rgb = bridgeTemplate->getRadarColor();
+				cr = (unsigned char)(rgb.red * 255.0f);
+				cg = (unsigned char)(rgb.green * 255.0f);
+				cb = (unsigned char)(rgb.blue * 255.0f);
+			}
+		}
+		int x0 = (int)((it->m_from.x - mmd->m_extent.lo.x) / worldW * big->w);
+		int y0 = (int)((1.0f - (it->m_from.y - mmd->m_extent.lo.y) / worldH) * big->h);
+		int x1 = (int)((it->m_to.x - mmd->m_extent.lo.x) / worldW * big->w);
+		int y1 = (int)((1.0f - (it->m_to.y - mmd->m_extent.lo.y) / worldH) * big->h);
+
+		// Thick-line rasterizer: stamp discs along the span, casing pass
+		// first so the core never gets overpainted by a later casing stamp.
+		int dx = x1 - x0, dy = y1 - y0;
+		int steps = (int)sqrt((double)(dx * dx + dy * dy)) + 1;
+		int s;
+		for (s = 0; s <= steps; ++s)
+			drawFilledCircle(big, x0 + dx * s / steps, y0 + dy * s / steps, halfCase, 30, 30, 30);
+		for (s = 0; s <= steps; ++s)
+			drawFilledCircle(big, x0 + dx * s / steps, y0 + dy * s / steps, halfCore, cr, cg, cb);
+	}
+}
+
+// =========================================================================
 // Public entry point.
 // =========================================================================
 void PostLanLobbyMapToDiscord(LANGameInfo *game)
@@ -1998,6 +2053,11 @@ void PostLanLobbyMapToDiscord(LANGameInfo *game)
 			debugChat("cliff overlay: heightmap parse failed for %s", mapPath.str());
 		}
 	}
+
+	// Bridge spans: drawn after the impassable wash so crossings stay
+	// visible as the "you can cross here" signal, under the legend and
+	// player markers.
+	drawBridgeOverlay(&big, mmd);
 
 	// Paper-map scale legend (faint 300-wu grid + edge notches with
 	// seconds labels + CC vision ring at each occupied start) drawn onto
