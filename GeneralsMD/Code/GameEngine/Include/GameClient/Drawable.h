@@ -560,6 +560,7 @@ public:
 	void setFlashCount( Int count ) { m_flashCount = count; }
 	void setFlashColor( Color color ) { m_flashColor = color; }
   void saturateRGB(RGBColor& color, Real factor);// not strictly for flash color, but it is the only practical use for this
+  void saturateRGBForFlash(RGBColor& color, Real factor);// like saturateRGB, but guarantees the result is still visible as a tint
 	//---------------------------------------------------------------------------------
 
 	// caption text methods -----------------------------------------------------------
