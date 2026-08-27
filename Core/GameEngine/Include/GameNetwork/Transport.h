@@ -46,7 +46,12 @@ public:
 	~Transport();
 
 	Bool init( AsciiString ip, UnsignedShort port );
-	Bool init( UnsignedInt ip, UnsignedShort port );
+	/// @param logFailure FALSE for a speculative bind whose caller re-binds or
+	///        adopts a socket on the same port immediately afterwards. Such a
+	///        bind is expected to fail whenever something else legitimately
+	///        still holds the port, and the follow-up call reports any failure
+	///        that actually matters. Defaults to TRUE.
+	Bool init( UnsignedInt ip, UnsignedShort port, Bool logFailure = TRUE );
 	/// Initialize from an already-bound UDP socket FD instead of binding a new
 	/// one. Used by the online-coordinator handoff so ConnectionManager keeps
 	/// the same socket (and therefore the same NAT mapping) that was punched

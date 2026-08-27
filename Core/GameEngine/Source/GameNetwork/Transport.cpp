@@ -84,7 +84,7 @@ Bool Transport::init( AsciiString ip, UnsignedShort port )
 	return init(ResolveIP(ip), port);
 }
 
-Bool Transport::init( UnsignedInt ip, UnsignedShort port )
+Bool Transport::init( UnsignedInt ip, UnsignedShort port, Bool logFailure )
 {
 	// ----- Initialize Winsock -----
 	if (!m_winsockInit)
@@ -122,11 +122,20 @@ Bool Transport::init( UnsignedInt ip, UnsignedShort port )
 		DEBUG_LOG(("Transport::init - Failure to bind socket with error code %x", retval));
 		// Bind failures are invisible in release builds but leave this
 		// transport permanently dead (the caller may ignore our return
-		// value), so put the evidence in the uploadable log. status is
-		// UDP::sockStat, e.g. -6 = ADDRINUSE (another process owns the
-		// port, typically a zombie game instance).
-		ReleaseLog("Transport bind FAILED on %d.%d.%d.%d:%d status=%d",
-			(ip>>24)&0xff, (ip>>16)&0xff, (ip>>8)&0xff, ip&0xff, port, retval);
+		// value), so put the evidence in the uploadable log. status comes
+		// from UDP::GetStatus(), which passes the raw winsock error through
+		// when it has no sockStat for it -- 10048 is WSAEADDRINUSE (another
+		// process owns the port, typically a zombie game instance).
+		//
+		// Unless the caller told us this bind was speculative: see the
+		// logFailure note on the declaration. LANAPI::init()'s bind races the
+		// coordinator socket by design and is superseded a moment later, so
+		// logging it here just cries wolf in every online player's log.
+		if (logFailure)
+		{
+			ReleaseLog("Transport bind FAILED on %d.%d.%d.%d:%d status=%d",
+				(ip>>24)&0xff, (ip>>16)&0xff, (ip>>8)&0xff, ip&0xff, port, retval);
+		}
 		delete m_udpsock;
 		m_udpsock = nullptr;
 		return false;
