@@ -237,6 +237,14 @@ private:
 	Bool          m_stunOkLobby;
 	Bool          m_stunOkGame;
 
+	// STUN keepalive: once discovery is done the two UDP sockets go silent
+	// until a peer_info arrives, so a host sitting in an empty lobby lets
+	// both NAT mappings expire and then advertises dead ports. Re-probing on
+	// a timer refreshes the mappings and, because the coordinator restamps
+	// the session from every probe it receives, refreshes its cached address
+	// too. 0 = disarmed.
+	UnsignedInt   m_stunKeepaliveNextMs;
+
 	// Hole punch: per-socket success flags. STATE_PUNCH_OK is set only after
 	// inbound traffic has been observed on BOTH sockets.
 	UnsignedInt   m_punchStartMs;
@@ -295,6 +303,11 @@ private:
 	void  pumpUdpRecv();
 	void  pumpUdpRecvOne(Int fd, Bool isGame);
 	void  pumpStunDiscovery(UnsignedInt nowMs);
+	void  pumpStunKeepalive(UnsignedInt nowMs);
+	// TRUE in the idle lobby states where a STUN keepalive is both safe and
+	// needed: we still own the UDP sockets and nothing else is sending on
+	// them. Excludes PUNCHING, where pumpPunch is already blasting.
+	Bool  wantsStunKeepalive() const;
 	void  pumpPunch(UnsignedInt nowMs);
 	void  blastPunchPacketsOn(Int fd, const AsciiString& publicAddr, const AsciiString& localAddr);
 };

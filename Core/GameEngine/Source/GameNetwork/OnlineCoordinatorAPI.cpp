@@ -54,6 +54,15 @@ static const unsigned char STUN_PURPOSE_GAME  = 1;
 
 static const UnsignedInt  STUN_PROBE_INTERVAL_MS = 500;
 static const Int          STUN_PROBE_MAX_TRIES   = 6;
+// How often to re-probe STUN while parked in the lobby. Discovery runs once,
+// and between it and the first joiner the two UDP sockets send nothing at
+// all: the TCP heartbeat keeps the game listed but touches neither mapping.
+// A host that sat in an empty lobby for 17 minutes therefore advertised a
+// NAT mapping its router had already dropped, and every joiner punched a
+// dead port until the host quit and re-hosted. Same interval reasoning as
+// GAME_KEEPALIVE_INTERVAL_MS below: comfortably under the ~30s that the most
+// aggressive home routers use for idle UDP.
+static const UnsignedInt  STUN_KEEPALIVE_INTERVAL_MS = 15000;
 static const UnsignedInt  PUNCH_BLAST_INTERVAL_MS = 200;
 static const UnsignedInt  PUNCH_TIMEOUT_MS        = 8000;
 // How long to wait for the signaling TCP connect to complete. Windows retries
@@ -505,6 +514,7 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_stunProbesSentGame(0)
 	, m_stunOkLobby(FALSE)
 	, m_stunOkGame(FALSE)
+	, m_stunKeepaliveNextMs(0)
 	, m_punchStartMs(0)
 	, m_punchNextBlastMs(0)
 	, m_punchDeadlineMs(0)
@@ -1038,8 +1048,38 @@ void OnlineCoordinatorAPI::pumpStunDiscovery(UnsignedInt nowMs)
 	{
 		DEBUG_LOG(("OnlineCoordinatorAPI: STUN complete: lobby=%s game=%s",
 			m_publicAddrLobby.str(), m_publicAddrGame.str()));
+		m_stunKeepaliveNextMs = nowMs + STUN_KEEPALIVE_INTERVAL_MS;
 		setState(STATE_READY);
 	}
+}
+
+Bool OnlineCoordinatorAPI::wantsStunKeepalive() const
+{
+	// Only the idle lobby states. PUNCHING is excluded because pumpPunch is
+	// already blasting on both sockets, and a probe there would just add a
+	// STUN reply for pumpUdpRecvOne to filter back out. Post-handoff the
+	// sockets belong to TheLAN and the stash, which run their own
+	// keepalives, and sendStunProbe's fd == -1 guard covers that anyway.
+	if (m_postHandoff) return FALSE;
+	return (m_state == STATE_READY || m_state == STATE_HOSTING || m_state == STATE_JOINING);
+}
+
+void OnlineCoordinatorAPI::pumpStunKeepalive(UnsignedInt nowMs)
+{
+	if (!wantsStunKeepalive())
+	{
+		// Re-arm so the next spell of idling waits a full interval rather
+		// than firing the instant we land back in a lobby state.
+		m_stunKeepaliveNextMs = nowMs + STUN_KEEPALIVE_INTERVAL_MS;
+		return;
+	}
+	if (m_stunKeepaliveNextMs == 0 || nowMs < m_stunKeepaliveNextMs) return;
+	m_stunKeepaliveNextMs = nowMs + STUN_KEEPALIVE_INTERVAL_MS;
+
+	// Both sockets, every time: the game socket is the one that matters for
+	// in-game traffic and it is idle for even longer than the lobby socket.
+	sendStunProbe(m_udpFdLobby, STUN_PURPOSE_LOBBY);
+	sendStunProbe(m_udpFdGame,  STUN_PURPOSE_GAME);
 }
 
 void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& publicAddr, const AsciiString& localAddr)
@@ -1216,9 +1256,13 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 			break;
 		}
 
-		// STUN response: 10 bytes starting with our magic. Only consumed
-		// during discovery (otherwise we ignore stray late replies).
-		if (n == (Int)STUN_RESPONSE_SIZE && m_state == STATE_DISCOVERING)
+		// STUN response: 10 bytes starting with our magic. Always consumed
+		// when the magic matches, in any state -- a keepalive reply that
+		// landed while we are punching must not be counted as the peer's
+		// first inbound packet by the punch check below. What we do with it
+		// depends on the state: adopt it during discovery, and during the
+		// idle lobby states use it to notice that our mapping moved.
+		if (n == (Int)STUN_RESPONSE_SIZE)
 		{
 			UnsignedInt magicBE;
 			memcpy(&magicBE, buf, 4);
@@ -1231,17 +1275,37 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 				UnsignedShort port = ntohs(portBE);
 				AsciiString addr;
 				addr.format("%u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], port);
-				if (isGame)
+				if (m_state == STATE_DISCOVERING)
 				{
-					m_publicAddrGame = addr;
-					m_stunOkGame = TRUE;
-					DEBUG_LOG(("OnlineCoordinatorAPI: STUN(game) public=%s", addr.str()));
+					if (isGame)
+					{
+						m_publicAddrGame = addr;
+						m_stunOkGame = TRUE;
+						DEBUG_LOG(("OnlineCoordinatorAPI: STUN(game) public=%s", addr.str()));
+					}
+					else
+					{
+						m_publicAddrLobby = addr;
+						m_stunOkLobby = TRUE;
+						DEBUG_LOG(("OnlineCoordinatorAPI: STUN(lobby) public=%s", addr.str()));
+					}
 				}
-				else
+				else if (wantsStunKeepalive())
 				{
-					m_publicAddrLobby = addr;
-					m_stunOkLobby = TRUE;
-					DEBUG_LOG(("OnlineCoordinatorAPI: STUN(lobby) public=%s", addr.str()));
+					// A moved mapping means everything we already told the
+					// coordinator is stale. The server restamps the session
+					// from the probe itself, so a joiner arriving after this
+					// gets the new address; log it because it is the one
+					// event that explains an otherwise healthy punch failing.
+					// Pointer rather than a reference bound to a ternary:
+					// VC6 is unreliable about the latter.
+					AsciiString* tracked = isGame ? &m_publicAddrGame : &m_publicAddrLobby;
+					if (*tracked != addr)
+					{
+						ReleaseLog("Coordinator: %s public addr moved %s -> %s",
+							isGame ? "game" : "lobby", tracked->str(), addr.str());
+						*tracked = addr;
+					}
 				}
 				continue;
 			}
@@ -1384,6 +1448,7 @@ void OnlineCoordinatorAPI::update()
 	pumpTcpRecv();
 	pumpUdpRecv();
 	pumpStunDiscovery(nowMs);
+	pumpStunKeepalive(nowMs);
 	pumpPunch(nowMs);
 }
 
