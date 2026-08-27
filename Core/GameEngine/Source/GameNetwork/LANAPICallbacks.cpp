@@ -481,6 +481,7 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 				m_currentGame->getLANSlot(0)->setIP(playerIP);
 				if (m_directConnectRemoteGamePort != 0)
 					m_currentGame->getLANSlot(0)->setPort(m_directConnectRemoteGamePort);
+
 				if (preParseLocalSlotNum > 0)
 				{
 					m_currentGame->getLANSlot(preParseLocalSlotNum)->setIP(m_localIP);
@@ -500,6 +501,41 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 							namedSlot->setIP(m_localIP);
 							break;
 						}
+					}
+				}
+
+				// Same story for every OTHER guest, now that our own slot is
+				// identifiable again by m_localIP. The host's options string
+				// encodes each player's game-data port as its local
+				// NETWORK_BASE_PORT_NUMBER, so without this a guest sends
+				// in-game traffic to <peer external IP>:8088 -- correct only
+				// when that peer's NAT happens to preserve the port. The host
+				// gets this right because handleRequestJoin stamps the punched
+				// port when it builds the joiner's slot; a guest had no
+				// equivalent, so a single peer behind a port-rewriting NAT was
+				// unreachable from every other guest and the lockstep sim
+				// starved at the first frames (frame=8, desync=0) for all of
+				// them. The ports are already known here: the lobby pump feeds
+				// every coordinator peer_info, mesh peers included, to
+				// setDirectConnectGamePortForPeer. Re-runs on each options
+				// broadcast, so a peer that joins later is picked up by the
+				// next one.
+				Int dcSlot;
+				for (dcSlot = 1; dcSlot < MAX_SLOTS; ++dcSlot)
+				{
+					LANGameSlot *peerSlot = m_currentGame->getLANSlot(dcSlot);
+					if (!peerSlot || !peerSlot->isHuman())
+						continue;
+					if (peerSlot->getIP() == m_localIP)
+						continue;   // ourselves; our own slot port stays local
+					UnsignedShort peerGamePort =
+						lookupDirectConnectGamePort(peerSlot->getIP(), peerSlot->getLobbyPort());
+					if (peerGamePort != 0 && peerSlot->getPort() != peerGamePort)
+					{
+						ReleaseLog("LAN dc: peer slot %d game port %d -> %d (ip=%d.%d.%d.%d)",
+							dcSlot, (Int)peerSlot->getPort(), (Int)peerGamePort,
+							PRINTF_IP_AS_4_INTS(peerSlot->getIP()));
+						peerSlot->setPort(peerGamePort);
 					}
 				}
 
