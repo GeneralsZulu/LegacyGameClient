@@ -2002,6 +2002,7 @@ static Bool applyChosenMap(const AsciiString &chosenName, UnsignedInt mapCRC,
 	if (TheGlobalData != nullptr)
 	{
 		UploadAllMapAssetsIfMissing(TheGlobalData->m_mapCheckUrl,
+			TheGlobalData->m_mapAssetsUrl,
 			TheGlobalData->m_mapUploadUrl,
 			md->m_CRC,
 			md->m_fileName,

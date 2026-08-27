@@ -531,6 +531,16 @@ Int parseMapCheckUrl(char *args[], int num)
 	return 1;
 }
 
+Int parseMapAssetsUrl(char *args[], int num)
+{
+	if (num > 1)
+	{
+		TheWritableGlobalData->m_mapAssetsUrl = args[1];
+		return 2;
+	}
+	return 1;
+}
+
 Int parseMapUploadUrl(char *args[], int num)
 {
 	if (num > 1)
@@ -1482,6 +1492,12 @@ static CommandLineParam paramsForStartup[] =
 	// played map. Body "false" triggers a map upload to -mapUploadUrl.
 	// Pass an empty string ("") to skip the check (and the upload).
 	{ "-mapCheckUrl", parseMapCheckUrl },
+
+	// URL to GET ?crc=<dec> for the list of asset kinds the server already
+	// holds, so an upload can fill in only the missing sidecars instead of
+	// treating a present .map as "nothing to do". Pass an empty string ("")
+	// to fall back to the coarser -mapCheckUrl probe alone.
+	{ "-mapAssetsUrl", parseMapAssetsUrl },
 
 	// URL to POST the .map file when the check URL reports the server
 	// doesn't already have it. Pass an empty string ("") to skip the

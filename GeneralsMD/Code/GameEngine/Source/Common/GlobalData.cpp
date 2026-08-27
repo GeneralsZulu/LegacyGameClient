@@ -644,6 +644,7 @@ GlobalData::GlobalData()
 	m_replayUrl = "https://www.radarvan.com/api/upload_replay";
 	m_mapCheckUrl = "https://cncstats.computersrfun.org/map_exists";
 	m_mapUploadUrl = "https://cncstats.computersrfun.org/add_map";
+	m_mapAssetsUrl = "https://cncstats.computersrfun.org/list_map_assets";
 	m_mapDownloadUrl = "https://cncstats.computersrfun.org/get_map_file";
 	m_balanceTeamsUrl = "https://www.radarvan.com/api/balance_teams/";
 	m_mapSummaryUrl = "https://www.radarvan.com/api/map_summary/";

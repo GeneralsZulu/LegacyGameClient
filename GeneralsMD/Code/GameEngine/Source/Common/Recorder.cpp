@@ -1306,6 +1306,7 @@ void RecorderClass::stopRecording() {
 				else
 				{
 					up.mapCheckUrl = TheGlobalData->m_mapCheckUrl;
+					up.mapAssetsUrl = TheGlobalData->m_mapAssetsUrl;
 					up.mapUploadUrl = TheGlobalData->m_mapUploadUrl;
 					up.mapCRC = md->m_CRC;
 					up.mapFilePath = md->m_fileName;
