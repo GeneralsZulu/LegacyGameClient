@@ -118,7 +118,15 @@ void LANAPI::init()
 	m_gameStartTime = 0;
 	m_gameStartSeconds = 0;
 	m_transport->reset();
-	m_transport->init(m_localIP, lobbyPort);
+	// Speculative: every caller follows this with SetLocalIP() or
+	// SetLocalIPAdoptingSocket(), which binds or adopts the same port again
+	// and reports its own failure. On the coordinator handoff path the
+	// coordinator still owns the lobby socket right here, so this bind is
+	// *expected* to fail with WSAEADDRINUSE a heartbeat before we adopt that
+	// very socket by fd. Logging it produced a "Transport bind FAILED" line
+	// in front of the successful adoption in every online player's release
+	// log -- the loudest line in the file, and pure noise.
+	m_transport->init(m_localIP, lobbyPort, /*logFailure=*/FALSE);
 	m_transport->allowBroadcasts(true);
 
 	m_pendingAction = ACT_NONE;
