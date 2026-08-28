@@ -915,6 +915,12 @@ void LANAPI::sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortH
 		(destIPHost >> 8) & 0xff, destIPHost & 0xff, destPortHost));
 }
 
+Int LANAPI::getLobbyRawFD() const
+{
+	if (!m_transport) return -1;
+	return m_transport->getRawFD();
+}
+
 void LANAPI::RequestGameJoin( LANGameInfo *game, UnsignedInt ip /* = 0 */ )
 {
 	if ((m_pendingAction != ACT_NONE) && (m_pendingAction != ACT_JOINDIRECTCONNECT))

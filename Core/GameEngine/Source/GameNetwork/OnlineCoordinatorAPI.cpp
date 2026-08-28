@@ -508,6 +508,7 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_peerInfoArmed(FALSE)
 	, m_amIHost(FALSE)
 	, m_postHandoff(FALSE)
+	, m_gameStarted(FALSE)
 	, m_stunNextProbeMsLobby(0)
 	, m_stunNextProbeMsGame(0)
 	, m_stunProbesSentLobby(0)
@@ -609,6 +610,7 @@ void OnlineCoordinatorAPI::disconnect()
 	m_connectDeadlineMs = 0;
 	m_peerInfoArmed = FALSE;
 	m_postHandoff = FALSE;
+	m_gameStarted = FALSE;
 	m_newPeers.clear();
 }
 
@@ -847,6 +849,7 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	m_punchOkLobby = FALSE;
 	m_punchOkGame  = FALSE;
 	m_postHandoff  = FALSE;
+	m_gameStarted  = FALSE;
 	m_newPeers.clear();
 
 	if (!openUdpOnPort(lobbyBindPort, m_udpFdLobby, m_udpBoundPortLobby))
@@ -910,6 +913,7 @@ void OnlineCoordinatorAPI::requestUnhost()
 
 void OnlineCoordinatorAPI::sendGameStarted()
 {
+	m_gameStarted = TRUE;
 	if (m_tcpFd == -1) return;
 	sendJsonLine(AsciiString("{\"type\":\"game_started\",\"data\":{}}"));
 }
@@ -1057,10 +1061,20 @@ Bool OnlineCoordinatorAPI::wantsStunKeepalive() const
 {
 	// Only the idle lobby states. PUNCHING is excluded because pumpPunch is
 	// already blasting on both sockets, and a probe there would just add a
-	// STUN reply for pumpUdpRecvOne to filter back out. Post-handoff the
-	// sockets belong to TheLAN and the stash, which run their own
-	// keepalives, and sendStunProbe's fd == -1 guard covers that anyway.
-	if (m_postHandoff) return FALSE;
+	// STUN reply for pumpUdpRecvOne to filter back out.
+	//
+	// Post-handoff is explicitly INCLUDED, and is in fact the case this
+	// exists for. A host hands off as soon as the coordinator acks its
+	// listing -- before any joiner, see doCoordinatorHostHandoffToLAN -- so
+	// an empty lobby is spent entirely in post-handoff mode. Excluding it
+	// meant the one situation the keepalive was written for (2026-08-26: a
+	// host sat 17m17s in an empty lobby, then nobody could get in) was the
+	// one situation it did not cover. The other keepalives do not stand in
+	// for it: pumpStashedKeepalive returns early with no peers to send to,
+	// and the lobby-pump keepalives are per-peer, so both go quiet exactly
+	// when the lobby is empty. pumpStunKeepalive knows where the sockets
+	// went once they are no longer ours.
+	if (m_gameStarted) return FALSE;
 	return (m_state == STATE_READY || m_state == STATE_HOSTING || m_state == STATE_JOINING);
 }
 
@@ -1078,8 +1092,30 @@ void OnlineCoordinatorAPI::pumpStunKeepalive(UnsignedInt nowMs)
 
 	// Both sockets, every time: the game socket is the one that matters for
 	// in-game traffic and it is idle for even longer than the lobby socket.
-	sendStunProbe(m_udpFdLobby, STUN_PURPOSE_LOBBY);
-	sendStunProbe(m_udpFdGame,  STUN_PURPOSE_GAME);
+	//
+	// Before the handoff both are ours. After it the lobby socket belongs to
+	// TheLAN and the game socket sits in the stash, but they are the same two
+	// sockets, still bound to the same ports, and their NAT mappings are
+	// still the addresses the coordinator is handing to joiners -- so they
+	// are exactly the ones that have to stay open. Borrow the descriptors
+	// rather than the owners' send paths: a STUN probe is not a LAN packet,
+	// and the reply is meant to be ignored (TheLAN drops it as an unknown
+	// packet, nothing reads the stash until ConnectionManager adopts it).
+	//
+	// We cannot see those replies, so a mapping that moves post-handoff is
+	// not logged the way pumpUdpRecvOne logs it pre-handoff. It is still
+	// repaired: the coordinator restamps the session's public addresses from
+	// whatever source address the probe arrives from, so the next joiner is
+	// told the new one.
+	Int lobbyFd = m_udpFdLobby;
+	Int gameFd  = m_udpFdGame;
+	if (m_postHandoff)
+	{
+		lobbyFd = (TheLAN != nullptr) ? TheLAN->getLobbyRawFD() : -1;
+		gameFd  = s_stashGameFd;
+	}
+	sendStunProbe(lobbyFd, STUN_PURPOSE_LOBBY);
+	sendStunProbe(gameFd,  STUN_PURPOSE_GAME);
 }
 
 void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& publicAddr, const AsciiString& localAddr)

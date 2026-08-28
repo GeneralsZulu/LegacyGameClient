@@ -214,6 +214,13 @@ Bool Transport::sendNATProbe( UnsignedInt ip, UnsignedShort port, Int ttl )
 	return true;
 }
 
+Int Transport::getRawFD() const
+{
+	if (!m_udpsock)
+		return -1;
+	return m_udpsock->GetFD();
+}
+
 Bool Transport::finishInit( UnsignedShort port )
 {
 	// ------- Clear buffers --------
