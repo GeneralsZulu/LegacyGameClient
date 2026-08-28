@@ -62,6 +62,13 @@ public:
 	// transit before it can reach (and poison) the peer's NAT. Bypasses the
 	// normal queue/CRC framing; the payload is meant to be dropped.
 	Bool sendNATProbe( UnsignedInt ip, UnsignedShort port, Int ttl );
+	/// The raw socket, so code that owned this port before the coordinator
+	/// handoff can keep sending on it (the online coordinator's STUN
+	/// keepalive). Returns -1 when there is no socket. Anything written here
+	/// bypasses the queue and the CRC framing, and any reply lands in
+	/// doRecv()'s unknown-packet bucket, so only send traffic the peer is
+	/// meant to ignore.
+	Int getRawFD() const;
 	void reset();
 	Bool update();									///< Call this once a GameEngine tick, regardless of whether the frame advances.
 

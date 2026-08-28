@@ -226,6 +226,10 @@ private:
 	// reach us via the coordinator, but we no longer own UDP sockets so we
 	// can't punch. New peer_infos go into m_newPeers for the UI to drain.
 	Bool          m_postHandoff;
+	// Set when the host reports game_started. Past that point the sockets are
+	// carrying real traffic and ConnectionManager owns the game one, so the
+	// STUN keepalive has nothing left to hold open and stops.
+	Bool          m_gameStarted;
 	std::vector<PeerInfo> m_newPeers;
 
 	// STUN discovery: track per-socket so the transition to STATE_READY

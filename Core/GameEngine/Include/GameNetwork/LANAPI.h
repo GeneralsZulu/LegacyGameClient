@@ -404,6 +404,12 @@ public:
 	// the moment the coordinator reports a new joiner, then follow up with
 	// a full-TTL sendNATKeepalive once the joiner has started punching.
 	void sendNATProbeLowTTL( UnsignedInt destIPHost, UnsignedShort destPortHost );
+
+	/// Raw lobby socket, or -1. After the coordinator handoff this socket is
+	/// ours but its NAT mapping is still the address the coordinator hands to
+	/// joiners, so the coordinator keeps STUNning from it to hold that mapping
+	/// open. See OnlineCoordinatorAPI::pumpStunKeepalive.
+	Int getLobbyRawFD() const;
 	virtual void RequestGameLeave() override;																				///< Tell everyone we're leaving
 	virtual void RequestAccept() override;																						///< Indicate we're OK with the game options
 	virtual void RequestHasMap() override;																						///< Send our map status
