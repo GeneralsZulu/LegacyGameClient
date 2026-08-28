@@ -1073,6 +1073,24 @@ void UploadAllMapAssetsIfMissing(const AsciiString& checkUrl,
 	if (uploadUrl.isEmpty() || mapPath.isEmpty() || mapCRC == 0)
 		return;
 
+	// X-Map-Name identifies the map, so it must be the map's own name and not
+	// wherever this particular host happens to keep it. mapPath is a local
+	// path -- for a user map, an absolute one -- and the server overwrites
+	// meta.txt from it on every asset it stores. While an existing map could
+	// never be written to again that only mattered for the first uploader;
+	// backfilling sidecars means any later host restamps the name, and 22 of
+	// the 1437 stored maps ended up holding somebody's
+	// "c:\users\<account>\documents\..." instead of a map name, which
+	// /list_map_assets then hands back out.
+	//
+	// The stem of the .map file is what the server already derives for
+	// /get_map's zip entries (mapfile.BaseName), so sending it directly
+	// changes nothing downstream and leaves the name readable. Fall back to
+	// the raw path if the stem comes back empty (no extension to strip).
+	AsciiString mapName = GetBaseFileFromFile(GetFileFromPath(mapPath));
+	if (mapName.isEmpty())
+		mapName = mapPath;
+
 	// What the server already holds, as a contentsMask-shaped bitfield.
 	//
 	// Asking per kind (rather than the old "do you have this map at all")
@@ -1100,19 +1118,19 @@ void UploadAllMapAssetsIfMissing(const AsciiString& checkUrl,
 	// download) covers exactly the same set the legacy P2P transfer would
 	// have moved.
 	if ((have & 1) == 0)
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, mapPath, "map", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, mapPath, "map", seed);
 	if ((contentsMask & 2) && !(have & 2))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetPreviewFromMap(mapPath), "preview", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetPreviewFromMap(mapPath), "preview", seed);
 	if ((contentsMask & 4) && !(have & 4))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetINIFromMap(mapPath), "ini", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetINIFromMap(mapPath), "ini", seed);
 	if ((contentsMask & 8) && !(have & 8))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetStrFileFromMap(mapPath), "str", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetStrFileFromMap(mapPath), "str", seed);
 	if ((contentsMask & 16) && !(have & 16))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetSoloINIFromMap(mapPath), "solo", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetSoloINIFromMap(mapPath), "solo", seed);
 	if ((contentsMask & 32) && !(have & 32))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetAssetUsageFromMap(mapPath), "assets", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetAssetUsageFromMap(mapPath), "assets", seed);
 	if ((contentsMask & 64) && !(have & 64))
-		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapPath, GetReadmeFromMap(mapPath), "readme", seed);
+		uploadOneAssetIfPresent(uploadUrl, mapCRC, mapName, GetReadmeFromMap(mapPath), "readme", seed);
 }
 
 // ---------------------------------------------------------------------------
