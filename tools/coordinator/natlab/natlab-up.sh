@@ -67,6 +67,41 @@ for ((i=1; i<=NCLIENTS; i++)); do
   sudo ip route replace $WANNET.0/24 via 10.99.0.254
 done
 
+# Optional sibling client: a SECOND client netns hanging off an existing
+# router, on its own /30. It therefore shares that router's public IP while
+# keeping a DISTINCT private address -- the shape a household with two
+# subnets (guest wifi, VLANs, VM host-only nets) or a CGNAT block presents.
+# Distinct from FLEET_NETNS_OVERRIDE, which puts two clients in ONE netns and
+# so gives them the SAME private address.
+#
+#   SIBLING_ROUTER=A natlab-up.sh   ->  clientA2(10.99.101.2) - routerA
+#
+# The router already forwards and SNATs everything out wan0, so the sibling
+# reaches its neighbour directly over the LAN and the internet through the
+# same public address.
+if [ -n "${SIBLING_ROUTER:-}" ]; then
+  SL=$SIBLING_ROUTER
+  SR=router$SL
+  SC=client${SL}2
+  # Index of the parent router, to derive a non-colliding /30.
+  SI=1
+  for ((i=1; i<=8; i++)); do
+    [ "${LETTERS[$((i-1))]}" = "$SL" ] && SI=$i
+  done
+  SNET=10.99.$((100 + SI))
+
+  sudo ip netns add $SC 2>/dev/null || true
+  sudo ip netns exec $SC ip link set lo up
+  sudo ip -n $SR link del lan1 2>/dev/null || true
+  sudo ip -n $SR link add lan1 type veth peer name eth0 netns $SC
+  sudo ip netns exec $SR ip addr replace $SNET.1/30 dev lan1
+  sudo ip netns exec $SR ip link set lan1 up
+  sudo ip netns exec $SC ip addr replace $SNET.2/30 dev eth0
+  sudo ip netns exec $SC ip link set eth0 up
+  sudo ip netns exec $SC ip route replace default via $SNET.1
+  echo "  sibling: $SC ($SNET.2) behind $SR, shares its public IP"
+fi
+
 echo "natlab v4 up ($NCLIENTS clients):"
 echo "  coordinator addr: 10.99.0.1 (host); publics 10.99.<10*i>.2"
 echo "  run clients: sudo ip netns exec clientA|clientB|clientC <cmd>"

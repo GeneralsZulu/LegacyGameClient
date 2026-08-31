@@ -69,6 +69,7 @@ public:
 		AsciiString   publicAddr;       // lobby (8086) "ip:port" as told by the coordinator
 		AsciiString   gamePublicAddr;   // in-game (8088) "ip:port" as told by the coordinator
 		AsciiString   localAddr;        // "ip:port" of peer's LAN interface, if any (lobby side)
+		AsciiString   gameLocalAddr;    // same interface, peer's in-game (8088) bind port
 		Int           punchInMS;
 		AsciiString   role;             // "host" or "guest" relative to the peer (i.e. our role)
 
@@ -244,6 +245,7 @@ private:
 	AsciiString   m_publicAddrLobby;
 	AsciiString   m_publicAddrGame;
 	AsciiString   m_localAddr;
+	AsciiString   m_gameLocalAddr;
 	AsciiString   m_lastError;
 	AsciiString   m_hostedGameID;
 
