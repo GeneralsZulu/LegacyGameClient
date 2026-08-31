@@ -17,7 +17,7 @@
 set -euo pipefail
 
 NCLIENTS=${NCLIENTS:-3}
-LETTERS=(A B C D E F)
+LETTERS=(A B C D E F G H)
 
 sudo ip netns add inet 2>/dev/null || true
 sudo ip netns exec inet ip link set lo up
