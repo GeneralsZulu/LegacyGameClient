@@ -11,6 +11,13 @@
 # folded in the community balance patch and, with it, a wholesale restructure
 # of the object INI tree. Data from the wrong release desyncs the playback.
 #
+# 1.6.0 moved to community patch 1.0.1, which decomposes InstantDeathBehavior
+# back into CreateObjectDie / FXListDie / DestroyDie across 59 object files, so
+# 1.5.x replays need 1.5.x data. The 1.5.x line itself splits in two: 1.5.7
+# added FramesPerSecondLimit to GameData.ini, which is presentational but still
+# a different assets tree, so 1.5.5-1.5.6 and 1.5.7-1.5.10 get their own
+# archives rather than sharing one.
+#
 # So we ship every historical Zulu.big alongside the current one and mount the
 # matching one when watching an old replay. Data is chosen once at startup
 # (ArchiveFileSystem::loadMods runs before any INI is parsed), which is why
@@ -70,8 +77,13 @@ version,1.5.1,Zulu_v1.5.0.big,a47d59d63,same assets as 1.5.0
 version,1.5.2,Zulu_v1.5.2.big,00be2a558,verified against Zulu_Setup_v1.5.2.exe
 version,1.5.3,Zulu_v1.5.2.big,00be2a558,dev build (Jul 23 2026) handed out before 1.5.4; its Zulu.big is 1.5.2's -- same assets tree, same iniCRC AA7127D2 in real replays
 version,1.5.4,Zulu_v1.5.2.big,00be2a558,1.5.4 was cut at 9e68b663e; assets unchanged since 1.5.2.
-version,1.5.5,@default,,community balance patch data; same assets as 1.5.6
-version,1.5.6,@default,,
+version,1.5.5,Zulu_v1.5.5.big,ce0555474,community balance patch 1.0.0 data; same assets as 1.5.6
+version,1.5.6,Zulu_v1.5.5.big,ce0555474,1.5.5 had no APPVERSION bump of its own; ce0555474 is the 1.5.6 bump and carries the assets tree both shipped
+version,1.5.7,Zulu_v1.5.7.big,8f9f0c0ad,adds FramesPerSecondLimit to GameData.ini
+version,1.5.8,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
+version,1.5.9,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
+version,1.5.10,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
+version,1.6.0,@default,,community balance patch 1.0.1 data
 inicrc,FEAAE3F3,@none,,retail 1.04 base data
 inicrc,20D46EAB,@none,,retail "1.06" client base data
 inicrc,D78B2801,Zulu_v1.1.0.big,1cf50c255a6804d04301256bd587f03f45ca8db0,dev build with v1.1.0 assets (verified)
