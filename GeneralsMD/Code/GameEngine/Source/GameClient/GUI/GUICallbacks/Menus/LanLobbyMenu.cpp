@@ -965,9 +965,13 @@ static void rebuildGamesListbox()
 		}
 		else
 		{
-			row.format("%s   [%s]   %d/%d   %s",
+			row.format("%s   [%s]   %d/%d   %s%s",
 				g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
-				g.map.str());
+				g.map.str(),
+				// Set by the coordinator once any joiner could not punch
+				// this host: everyone connects through the relay, so the
+				// game runs with extra latency. Players can prefer another.
+				g.restrictedHost ? "   [relayed host]" : "");
 		}
 		UnicodeString u;
 		u.translate(row);
@@ -1251,6 +1255,30 @@ static void pumpCoordinator()
 					mapLeaf = leaf + 1;
 			}
 			s_coord->requestHost(u, mapLeaf, maxPlayers);
+			// NAT self-check verdict: a symmetric/CGNAT connection means no
+			// one can punch us and every joiner rides the relay. Warn once
+			// per session; hosting still proceeds (the relay carries it,
+			// just with more latency for everyone). Suppressed for the
+			// unattended -coordautohost flows, which must never block on a
+			// dialog.
+			static Bool s_warnedRestrictiveNat = FALSE;
+			if (!s_warnedRestrictiveNat && s_coord->natLooksSymmetric() &&
+				TheGlobalData->m_coordAutoHostName.isEmpty())
+			{
+				s_warnedRestrictiveNat = TRUE;
+				ReleaseLog("NATCHECK host warning shown (symmetric NAT)");
+				UnicodeString title, body;
+				title.translate(AsciiString("Restrictive Connection"));
+				body.translate(AsciiString(
+					"Your internet connection does not accept direct connections from other players, "
+					"so everyone will connect through the relay server.\n\n"
+					"You can host, but games may run smoother if another player hosts."));
+				MessageBoxOk(title, body, nullptr);
+			}
+			else if (s_coord->natLooksSymmetric())
+			{
+				ReleaseLog("NATCHECK symmetric host (warning suppressed: auto flow or already shown)");
+			}
 			s_coordPendingHostName.clear();
 			// Arm the listing-ack watchdog (never 0, which means "not armed").
 			s_coordHostRequestMs = timeGetTime();

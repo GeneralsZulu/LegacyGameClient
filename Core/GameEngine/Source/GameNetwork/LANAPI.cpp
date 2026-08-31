@@ -31,6 +31,7 @@
 #include "Common/Registry.h"
 #include "Common/ReleaseLog.h"
 #include "GameNetwork/LANAPI.h"
+#include "GameNetwork/RelayRegistry.h"
 #include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/networkutil.h"
 #include "Common/GlobalData.h"
@@ -1655,6 +1656,10 @@ Bool LANAPI::SetLocalIPAdoptingSocket( UnsignedInt localIP, Int fd )
 	{
 		ReleaseLog("LAN: adopted the punched coordinator lobby socket (port %u)", (unsigned)lobbyPort);
 	}
+	// This transport now carries the coordinator lobby channel: relay-flipped
+	// peers get their packets wrapped to the coordinator, and the periodic
+	// relay keepalive keeps our lobby return address fresh at the server.
+	m_transport->setRelayChannel(RelayRegistry::CHANNEL_LOBBY);
 	m_transport->allowBroadcasts(true);
 	return retval;
 }

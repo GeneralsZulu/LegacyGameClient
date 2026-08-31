@@ -542,6 +542,7 @@ set(GAMEENGINE_SRC
     Include/GameNetwork/LANObserverStream.h
     Include/GameNetwork/LANPlayer.h
     Include/GameNetwork/OnlineCoordinatorAPI.h
+    Include/GameNetwork/RelayRegistry.h
     Include/GameNetwork/MapDownloadHook.h
     Include/GameNetwork/NAT.h
     Include/GameNetwork/NetCommandList.h
@@ -1139,6 +1140,7 @@ set(GAMEENGINE_SRC
     Source/GameNetwork/MapDownloadHook.cpp
     Source/GameNetwork/NAT.cpp
     Source/GameNetwork/OnlineCoordinatorAPI.cpp
+    Source/GameNetwork/RelayRegistry.cpp
     Source/GameNetwork/NetCommandList.cpp
     Source/GameNetwork/NetCommandMsg.cpp
     Source/GameNetwork/NetCommandRef.cpp

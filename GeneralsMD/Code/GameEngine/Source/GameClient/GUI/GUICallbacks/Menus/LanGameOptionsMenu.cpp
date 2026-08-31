@@ -92,6 +92,11 @@ extern void LanLobbyMenuShutdownCoordinatorKeepStash();
 struct PendingLobbyKeepalive { UnsignedInt ipHost; UnsignedShort portHost; UnsignedInt dueMs; UnsignedInt intervalMs; };
 static std::vector<PendingLobbyKeepalive> s_pendingLobbyKeepalives;
 
+// One-time host-side hint when a joiner could only reach us via the relay
+// (we received a relay_grant): suggests letting someone else host. Reset
+// per lobby session in InitLanGameGadgets.
+static Bool s_relayHostNoticeShown = FALSE;
+
 static void schedulePendingLobbyKeepalive(UnsignedInt ipHost, UnsignedShort portHost,
 	UnsignedInt firstDelayMs, UnsignedInt intervalMs)
 {
@@ -1248,6 +1253,7 @@ void LanGameOptionsMenuInit( WindowLayout *layout, void *userData )
 	// Stale NAT keepalive senders from a previous lobby session must not
 	// keep pinging old peers.
 	s_pendingLobbyKeepalives.clear();
+	s_relayHostNoticeShown = FALSE;
 
 	//initialize the gadgets
 	EnableSlotListUpdates(FALSE);
@@ -1621,6 +1627,20 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 	if (coord)
 	{
 		coord->update();
+		// Host hint, once per lobby: a relay_grant means a joiner could not
+		// punch us and is connected through the relay server. The match will
+		// work, but every relayed player pays the relay round trip, so
+		// suggest the obvious improvement.
+		if (!s_relayHostNoticeShown && coord->amIHost() &&
+			coord->relayGrantsReceived() > 0 && TheLAN)
+		{
+			s_relayHostNoticeShown = TRUE;
+			ReleaseLog("Relay host notice shown (grants=%d)", coord->relayGrantsReceived());
+			UnicodeString text = UnicodeString(
+				L"Players are connecting through the relay server. "
+				L"The game may run smoother if another player hosts.");
+			TheLAN->OnChat(UnicodeString(L"SYSTEM"), TheLAN->GetLocalIP(), text, LANAPI::LANCHAT_SYSTEM);
+		}
 		OnlineCoordinatorAPI::PeerInfo p;
 		while (coord->consumeNewPeer(&p))
 		{

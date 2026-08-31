@@ -69,6 +69,15 @@ public:
 	/// doRecv()'s unknown-packet bucket, so only send traffic the peer is
 	/// meant to ignore.
 	Int getRawFD() const;
+	/// Which relay channel this socket carries (RelayRegistry::CHANNEL_*).
+	/// Set by the coordinator handoff paths (LANAPI adopts the lobby socket,
+	/// ConnectionManager adopts the game socket); -1 (default) for pure-LAN
+	/// transports. With a channel set and relay-capable peers registered,
+	/// doSend also emits a periodic relay keepalive to the coordinator so
+	/// the server always has a fresh return address for this socket even
+	/// when all links are currently direct (a mid-game silence-trigger flip
+	/// needs the very first relayed frame to be deliverable).
+	void setRelayChannel(Int channel) { m_relayChannel = channel; }
 	void reset();
 	Bool update();									///< Call this once a GameEngine tick, regardless of whether the frame advances.
 
@@ -103,6 +112,11 @@ public:
 private:
 	Bool m_winsockInit;
 	UDP *m_udpsock;
+
+	// Relay fallback plumbing (see RelayRegistry.h). -1 = not a coordinator
+	// socket, no relay work at all.
+	Int m_relayChannel;
+	UnsignedInt m_relayKeepaliveNextMs;
 
 	Bool finishInit( UnsignedShort port );  // shared tail of init() / initFromFD()
 

@@ -397,6 +397,7 @@ public:
 	AsciiString m_coordAutoJoinName;		///< nonempty: auto-enter online lobby and join first game with this name
 	Int m_coordAutoStart;					///< >0: host auto-starts at N players; joiners auto-accept
 	Int m_coordPunchTTL;					///< IP TTL for the low-TTL first punch volley (default 4; lab uses 2)
+	Bool m_coordNoRelay;					///< -norelay: don't advertise relay support (test old-client behavior)
 
 	UnsignedInt m_defaultIP;			///< preferred IP address for LAN
 	UnsignedInt m_firewallBehavior;	///< Last detected firewall behavior
