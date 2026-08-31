@@ -12,11 +12,13 @@
 //     (see GeneralsMD/Code/Main/ZuluVersion.rc.in), so we don't need a
 //     sidecar version file to know what's on disk.
 //
-// "Don't downgrade" rule:
-//   We only update when latest > installed (component-wise major.minor.build).
-//   That keeps dev builds (which can be ahead of any released installer) from
-//   being rolled back to the latest released installer when they run the
-//   launcher.
+// "Manifest is authoritative" rule:
+//   We prompt whenever latest != installed (component-wise major.minor.build),
+//   in either direction. Publishing an older version in latest.json is how we
+//   roll the whole player base back off a bad release: the next launch offers
+//   the older installer instead of silently staying on the broken build.
+//   Dev builds are unaffected -- they read their own latest-dev.json and gate
+//   on the game exe hash, so a release rollback never drags them anywhere.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -842,7 +844,9 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     // rebuilds. A manifest without "exe_sha256" (published before that field
     // existed) leaves the gate closed rather than prompting on every launch --
     // the next dev build republishes the manifest and it starts working.
-    // Release gate: strict ">" semver comparison so we never downgrade.
+    // Release gate: any semver difference, up or down. A rollback is published
+    // by pointing latest.json at an older installer, so "!=" rather than ">"
+    // is what makes that reach players who already took the bad build.
     char installedSha[80]; installedSha[0] = 0;
     bool needUpdate = false;
     if (devBuild) {
@@ -851,7 +855,7 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                      (_stricmp(latestExeSha, installedSha) != 0);
     } else {
         needUpdate = haveInstalled && haveLatest && urlOk &&
-                     semVerCompare(latest, installed) > 0;
+                     semVerCompare(latest, installed) != 0;
     }
 
     if (needUpdate) {
@@ -864,11 +868,15 @@ int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 "Download and install the update now?",
                 installedSha, latestExeSha);
         } else {
+            const bool rollback = semVerCompare(latest, installed) < 0;
             _snprintf(msg, sizeof(msg) - 1,
-                "A newer Zulu release is available.\n\n"
+                "%s\n\n"
                 "Installed:  %u.%u.%u\n"
-                "Latest:     %s\n\n"
-                "Download and install the update now?",
+                "Published:  %s\n\n"
+                "Download and install it now?",
+                rollback
+                    ? "Zulu has been rolled back to an earlier release."
+                    : "A newer Zulu release is available.",
                 installed.major, installed.minor, installed.build,
                 latestVersion);
         }

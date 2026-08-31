@@ -10,13 +10,34 @@ target. On every cold start it:
    currently installed Zulu version.
 2. Fetches `https://storage.googleapis.com/zulu-installer/latest.json`
    to see what's been published.
-3. If the published version is strictly greater than what's
-   installed (so dev builds never get rolled back), prompts the
-   user, downloads the new installer to `%TEMP%`, runs it silently
-   (`/S /D=<install dir>`), waits for it to finish, then continues
-   into `launchGame()` with the original launcher argv intact.
-4. If versions match or the user declines, hands off directly to
-   `generalszh.exe` with the launcher's argv.
+3. If the published version differs from what's installed — in
+   **either** direction — prompts the user, downloads that installer
+   to `%TEMP%`, runs it silently (`/S /D=<install dir>`), waits for
+   it to finish, then continues into `launchGame()` with the original
+   launcher argv intact.
+4. If versions match, the fetch fails, or the user declines, hands
+   off directly to `generalszh.exe` with the launcher's argv.
+
+## Rolling back a bad release
+
+`latest.json` is authoritative, not a high-water mark. To pull
+everyone off a broken build, republish `latest.json` pointing
+`version` and `url` at the previous installer. The next launch of
+every client that already took the bad build sees a version
+mismatch and offers the older installer, with the prompt reading
+"Zulu has been rolled back to an earlier release." instead of "A
+newer Zulu release is available."
+
+The installer has no version gate of its own — it overwrites in
+place and rewrites the `DisplayVersion` uninstall key — so a
+downgrade install is the same operation as an upgrade.
+
+Two things this costs us. A release-variant build made locally that
+is ahead of `latest.json` now gets a downgrade prompt on every
+launch instead of being silently left alone; decline it, or use a
+dev build, which reads `latest-dev.json` and gates on the exe hash
+(below). And a rollback only reaches players who actually run the
+launcher, so it is not instant.
 
 ## Dev builds gate on a hash, not a version
 
