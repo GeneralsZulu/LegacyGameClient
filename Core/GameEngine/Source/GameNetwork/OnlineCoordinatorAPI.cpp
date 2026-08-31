@@ -38,6 +38,7 @@
 
 #include "GameNetwork/networkutil.h"   // ResolveIP
 #include "GameNetwork/LANAPICallbacks.h"	// TheLAN (mesh probes after the lobby socket handoff)
+#include "GameNetwork/RelayRegistry.h" // relay fallback for unpunchable pairs
 #include "Common/GlobalData.h"         // m_coordPunchTTL override
 #include "Common/ReleaseLog.h"
 
@@ -417,6 +418,36 @@ void OnlineCoordinatorAPI::addStashedGamePeer(UnsignedInt ipHost, UnsignedShort 
 		(ipHost >> 8) & 0xff, ipHost & 0xff, portHost));
 }
 
+// Keepalive send to one stash peer: direct, or wrapped through the relay
+// when that peer's game channel has been flipped (wrapIfRelayed, NOT
+// wrapForSend: nothing reads this socket during the lobby phase, so a
+// silence-based flip decision here would be meaningless). A relayed
+// keepalive also refreshes our game-channel return address at the server.
+static void stashKeepaliveSendTo(UnsignedInt ipHost, UnsignedShort portHost,
+	const char* msg, Int msgLen)
+{
+	struct sockaddr_in dst;
+	memset(&dst, 0, sizeof(dst));
+	dst.sin_family = AF_INET;
+
+	unsigned char frame[128];
+	Int frameLen = 0;
+	UnsignedInt coordIP = 0;
+	UnsignedShort coordPort = 0;
+	if (RelayRegistry::wrapIfRelayed(ipHost, portHost,
+			(const unsigned char*)msg, msgLen,
+			frame, sizeof(frame), &frameLen, &coordIP, &coordPort))
+	{
+		dst.sin_addr.s_addr = htonl(coordIP);
+		dst.sin_port        = htons(coordPort);
+		sendto(s_stashGameFd, (const char*)frame, frameLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+		return;
+	}
+	dst.sin_addr.s_addr = htonl(ipHost);
+	dst.sin_port        = htons(portHost);
+	sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+}
+
 void OnlineCoordinatorAPI::pumpStashedKeepalive()
 {
 	if (s_stashGameFd == -1) return;
@@ -441,13 +472,22 @@ void OnlineCoordinatorAPI::pumpStashedKeepalive()
 	dst.sin_family = AF_INET;
 	if (hasPrimary)
 	{
-		dst.sin_addr.s_addr = htonl(s_stashGamePeerIPHost);
-		dst.sin_port        = htons(s_stashGamePeerPortHost);
-		sendto(s_stashGameFd, msg, msgLen, 0, (struct sockaddr*)&dst, sizeof(dst));
+		stashKeepaliveSendTo(s_stashGamePeerIPHost, s_stashGamePeerPortHost, msg, msgLen);
 	}
 	Bool sentLowTtlProbe = FALSE;
 	for (size_t i = 0; i < s_stashGameExtraPeers.size(); ++i)
 	{
+		// A peer already flipped to relay never needs NAT-opening tricks;
+		// its keepalives ride the relay (and refresh our server-side return
+		// address as a side effect).
+		if (RelayRegistry::isRelayedAddr(s_stashGameExtraPeers[i].ipHost,
+				s_stashGameExtraPeers[i].portHost))
+		{
+			stashKeepaliveSendTo(s_stashGameExtraPeers[i].ipHost,
+				s_stashGameExtraPeers[i].portHost, msg, msgLen);
+			s_stashGameExtraPeers[i].lowTtlProbeSent = TRUE;
+			continue;
+		}
 		dst.sin_addr.s_addr = htonl(s_stashGameExtraPeers[i].ipHost);
 		dst.sin_port        = htons(s_stashGameExtraPeers[i].portHost);
 		if (!s_stashGameExtraPeers[i].lowTtlProbeSent)
@@ -502,6 +542,12 @@ OnlineCoordinatorAPI::OnlineCoordinatorAPI()
 	, m_udpFdGame(-1)
 	, m_udpBoundPortLobby(0)
 	, m_udpBoundPortGame(0)
+	, m_relayID(0)
+	, m_punchRelayed(FALSE)
+	, m_coordUdpPort2(0)
+	, m_altProbesSent(0)
+	, m_natSymmetric(-1)
+	, m_relayGrantsReceived(0)
 	, m_stunMagic(0)
 	, m_coordUdpPort(0)
 	, m_coordIPNet(0)
@@ -840,6 +886,16 @@ Bool OnlineCoordinatorAPI::connect(const AsciiString& coordHost,
 	m_localAddr.clear();
 	m_hostedGameID.clear();
 	m_sessionToken.clear();
+	m_relayID = 0;
+	m_punchRelayed = FALSE;
+	m_coordUdpPort2 = 0;
+	m_publicAddrLobbyAlt.clear();
+	m_altProbesSent = 0;
+	m_natSymmetric = -1;
+	m_relayGrantsReceived = 0;
+	// A fresh session invalidates every previous relay decision; the server
+	// will mint new relay ids for everyone involved.
+	RelayRegistry::clear();
 	m_stunProbesSentLobby = 0;
 	m_stunProbesSentGame  = 0;
 	m_stunNextProbeMsLobby = 0;
@@ -1000,7 +1056,12 @@ void OnlineCoordinatorAPI::requestJoin(const AsciiString& gameID)
 
 void OnlineCoordinatorAPI::sendStunProbe(Int fd, unsigned char purpose)
 {
-	if (fd == -1 || m_sessionToken.isEmpty()) return;
+	sendStunProbeToPort(fd, purpose, m_coordUdpPort);
+}
+
+void OnlineCoordinatorAPI::sendStunProbeToPort(Int fd, unsigned char purpose, UnsignedShort dstPort)
+{
+	if (fd == -1 || dstPort == 0 || m_sessionToken.isEmpty()) return;
 	unsigned char buf[STUN_REQUEST_SIZE];
 	UnsignedInt magicBE = htonl(m_stunMagic);
 	memcpy(buf, &magicBE, 4);
@@ -1014,7 +1075,7 @@ void OnlineCoordinatorAPI::sendStunProbe(Int fd, unsigned char purpose)
 	memset(&dst, 0, sizeof(dst));
 	dst.sin_family      = AF_INET;
 	dst.sin_addr.s_addr = m_coordIPNet;
-	dst.sin_port        = htons(m_coordUdpPort);
+	dst.sin_port        = htons(dstPort);
 	sendto(fd, (const char*)buf, (Int)sizeof(buf), 0, (struct sockaddr*)&dst, sizeof(dst));
 }
 
@@ -1053,8 +1114,23 @@ void OnlineCoordinatorAPI::pumpStunDiscovery(UnsignedInt nowMs)
 		DEBUG_LOG(("OnlineCoordinatorAPI: STUN complete: lobby=%s game=%s",
 			m_publicAddrLobby.str(), m_publicAddrGame.str()));
 		m_stunKeepaliveNextMs = nowMs + STUN_KEEPALIVE_INTERVAL_MS;
+		pumpNatCheck(nowMs);
 		setState(STATE_READY);
 	}
+}
+
+void OnlineCoordinatorAPI::pumpNatCheck(UnsignedInt nowMs)
+{
+	// One probe per STUN tick until the alt response lands. Runs from the
+	// lobby socket so the comparison is apples to apples; never blocks
+	// readiness (an unanswered check just leaves the result unknown).
+	static const Int NAT_CHECK_MAX_PROBES = 6;
+	if (m_coordUdpPort2 == 0 || m_natSymmetric != -1) return;
+	if (m_udpFdLobby == -1 || !m_stunOkLobby) return;
+	if (m_altProbesSent >= NAT_CHECK_MAX_PROBES) return;
+	// Reuse the discovery pacing field: fire alongside probes/keepalives.
+	sendStunProbeToPort(m_udpFdLobby, STUN_PURPOSE_LOBBY, m_coordUdpPort2);
+	++m_altProbesSent;
 }
 
 Bool OnlineCoordinatorAPI::wantsStunKeepalive() const
@@ -1116,6 +1192,8 @@ void OnlineCoordinatorAPI::pumpStunKeepalive(UnsignedInt nowMs)
 	}
 	sendStunProbe(lobbyFd, STUN_PURPOSE_LOBBY);
 	sendStunProbe(gameFd,  STUN_PURPOSE_GAME);
+	if (lobbyFd == m_udpFdLobby)
+		pumpNatCheck(nowMs);   // retry while unanswered (packet loss)
 }
 
 void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& publicAddr, const AsciiString& localAddr)
@@ -1151,7 +1229,25 @@ void OnlineCoordinatorAPI::blastPunchPacketsOn(Int fd, const AsciiString& public
 	// Local address candidate (for same-LAN play). Only the lobby side has
 	// a local_addr exchanged through the coordinator; the game side reuses
 	// the same LAN IP at the local game port if both peers share a LAN.
+	//
+	// NEVER when the peer's local IP equals OUR local IP: private ranges
+	// collide constantly across different homes (everyone is 192.168.1.100
+	// somewhere), and a punch packet aimed at our own address loops back
+	// into our own socket. Combined with the ACK reply below, that
+	// self-delivery became an infinite ACK-to-self ping-pong that froze the
+	// client hard (reproduced live in the cloud lab: the two victims were
+	// exactly the clients whose local IP matched the host's advertised
+	// local_addr).
+	Bool localIsSelf = FALSE;
 	if (!localAddr.isEmpty())
+	{
+		UnsignedInt peerLocalIP = 0;
+		UnsignedInt myLocalIP = 0;
+		parseHostOrderIpPort(localAddr, &peerLocalIP, NULL);
+		parseHostOrderIpPort(m_localAddr, &myLocalIP, NULL);
+		localIsSelf = (peerLocalIP != 0 && peerLocalIP == myLocalIP);
+	}
+	if (!localAddr.isEmpty() && !localIsSelf)
 	{
 		const char* s = localAddr.str();
 		const char* colon = strchr(s, ':');
@@ -1196,12 +1292,14 @@ void OnlineCoordinatorAPI::sendPunchOutcome(Bool ok)
 	UnsignedInt nowMs = timeGetTime();
 	UnsignedInt tookMs = (nowMs > m_punchStartMs) ? (nowMs - m_punchStartMs) : 0;
 	AsciiString line;
-	line.format("{\"type\":\"punch_outcome\",\"data\":{\"ok\":%s,\"lobby_ok\":%s,\"game_ok\":%s,\"ms\":%u,\"role\":\"%s\"}}",
+	line.format("{\"type\":\"punch_outcome\",\"data\":{\"ok\":%s,\"lobby_ok\":%s,\"game_ok\":%s,\"ms\":%u,\"role\":\"%s\",\"relayed\":%s,\"peer_relay_id\":%u}}",
 		ok ? "true" : "false",
 		m_punchOkLobby ? "true" : "false",
 		m_punchOkGame  ? "true" : "false",
 		tookMs,
-		m_amIHost ? "host" : "guest");
+		m_amIHost ? "host" : "guest",
+		m_punchRelayed ? "true" : "false",
+		m_peerInfo.relayID);
 	sendJsonLine(line);
 }
 
@@ -1211,6 +1309,31 @@ void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 	if (!m_peerInfoArmed) return;
 	if (nowMs >= m_punchDeadlineMs)
 	{
+		// Relay fallback: when both sides advertised relay support, a failed
+		// punch flips the pair to the coordinator relay instead of failing
+		// the whole join. Only the channels that never saw inbound traffic
+		// flip; a half-punched pair keeps its working direct leg. The server
+		// sees our punch_outcome (relayed=true, peer_relay_id) and grants
+		// the flip to the OTHER side too, so both ends converge.
+		if (m_relayID != 0 && m_peerInfo.relayID != 0 &&
+		    RelayRegistry::hasPeer(m_peerInfo.relayID))
+		{
+			if (!m_punchOkLobby)
+				RelayRegistry::forceRelayChannel(m_peerInfo.relayID, RelayRegistry::CHANNEL_LOBBY);
+			if (!m_punchOkGame)
+				RelayRegistry::forceRelayChannel(m_peerInfo.relayID, RelayRegistry::CHANNEL_GAME);
+			m_punchRelayed = TRUE;
+			ReleaseLog("Coordinator: punch with %s timed out (lobby=%d game=%d); using relay",
+				m_peerInfo.nick.str(), (Int)m_punchOkLobby, (Int)m_punchOkGame);
+			sendPunchOutcome(FALSE);   // carries relayed=true; server grants the peer
+			// Proceed exactly as a successful punch: the peerInfo addrs are
+			// already the advertised (logical) ones for any unpunched
+			// channel, and the registry reroutes traffic to them.
+			m_punchOkLobby = TRUE;
+			m_punchOkGame  = TRUE;
+			setState(STATE_PUNCH_OK);
+			return;
+		}
 		sendPunchOutcome(FALSE);
 		if (m_amIHost && !m_postHandoff && !m_newPeers.empty())
 		{
@@ -1235,6 +1358,11 @@ void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 	}
 	if (nowMs >= m_punchNextBlastMs)
 	{
+		// One breadcrumb at the first blast: a hung client whose log ends at
+		// "state 6 -> 7" without this line froze in the pre-blast window
+		// (T2-HOST-BAD: two joiners went silent right after arming).
+		if (m_punchNextBlastMs == m_punchStartMs)
+			ReleaseLog("Coordinator: punch blasting to %s", m_peerInfo.nick.str());
 		Int wantTtl = (nowMs < m_punchStartMs + PUNCH_LOW_TTL_MS) ? punchLowTTL() : PUNCH_FULL_TTL;
 		if (wantTtl != m_punchTtl)
 		{
@@ -1279,7 +1407,13 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 {
 	if (fd == -1) return;
 	unsigned char buf[1500];
-	for (;;)
+	// Bounded drain: this loop must NEVER be able to starve the main
+	// thread. The self-ACK loop below is fixed at its sources, but any
+	// future path that makes receiving trigger a send back to ourselves
+	// would recreate an unbounded drain; the cap turns that worst case
+	// into a per-frame trickle instead of a freeze.
+	Int packetsThisPump = 0;
+	for (; packetsThisPump < 64; ++packetsThisPump)
 	{
 		struct sockaddr_in src;
 		int srcLen = sizeof(src);
@@ -1311,6 +1445,30 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 				UnsignedShort port = ntohs(portBE);
 				AsciiString addr;
 				addr.format("%u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], port);
+				// NAT-check response: attributed by SOURCE port (the second
+				// STUN listener). Compare the externally observed ports for
+				// the same local socket toward two destinations: equal =
+				// endpoint-independent mapping (cone), different = symmetric.
+				if (m_coordUdpPort2 != 0 && ntohs(src.sin_port) == m_coordUdpPort2)
+				{
+					if (m_natSymmetric == -1 && !isGame)
+					{
+						m_publicAddrLobbyAlt = addr;
+						UnsignedShort mainPort = 0;
+						parseHostOrderIpPort(m_publicAddrLobby, NULL, &mainPort);
+						m_natSymmetric = (mainPort != 0 && port != mainPort) ? 1 : 0;
+						ReleaseLog("NATCHECK primary=%s alt=%s symmetric=%d",
+							m_publicAddrLobby.str(), addr.str(), m_natSymmetric);
+						// The verdict can arrive AFTER a fast host request
+						// (auto-host flows request the instant we go READY).
+						// The host-time dialog missed its moment then; leave
+						// the breadcrumb and let the reactive lobby notice
+						// carry the user-visible half.
+						if (m_natSymmetric == 1 && m_amIHost)
+							ReleaseLog("NATCHECK symmetric detected after hosting");
+					}
+					continue;
+				}
 				if (m_state == STATE_DISCOVERING)
 				{
 					if (isGame)
@@ -1353,11 +1511,61 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 		{
 			UnsignedInt   srcIPHost   = ntohl(src.sin_addr.s_addr);
 			UnsignedShort srcPortHost = ntohs(src.sin_port);
+			// Self-loop guard: a packet from our own local IP is our own
+			// punch/ACK reflected back (colliding private local_addr, see
+			// blastPunchPacketsOn). Not punch evidence, and absolutely not
+			// something to ACK.
+			{
+				UnsignedInt myLocalIP = 0;
+				parseHostOrderIpPort(m_localAddr, &myLocalIP, NULL);
+				if (myLocalIP != 0 && srcIPHost == myLocalIP)
+					continue;
+			}
+			// Traffic FROM the coordinator (a relayed frame from a peer that
+			// already flipped, or an unmatched STUN-sized packet) must never
+			// count as punch evidence: the punched addr would then be the
+			// coordinator itself.
+			if (srcIPHost == (UnsignedInt)ntohl(m_coordIPNet) && srcPortHost == m_coordUdpPort)
+				continue;
+			// Only the punch PEER's traffic is punch evidence. A mesh peer's
+			// keepalive can land on the game socket mid-punch (host stash
+			// keepalives fire the moment a joiner is announced), and counting
+			// it would rekey this peer's punched addr to the WRONG machine
+			// (seen live in T1-MIDGAME-DEATH: the host's registry entry ended
+			// up carrying a mesh guest's address). Ports may legitimately
+			// drift, so match on IP only, against the advertised public and
+			// local addrs.
+			{
+				UnsignedInt expectPub = 0;
+				UnsignedInt expectLoc = 0;
+				parseHostOrderIpPort(isGame ? m_peerInfo.gamePublicAddr : m_peerInfo.publicAddr, &expectPub, NULL);
+				parseHostOrderIpPort(m_peerInfo.localAddr, &expectLoc, NULL);
+				if (srcIPHost != expectPub && (expectLoc == 0 || srcIPHost != expectLoc))
+				{
+					DEBUG_LOG(("OnlineCoordinatorAPI: ignoring punch-phase packet from %u.%u.%u.%u:%u (not the punch peer)",
+						(srcIPHost >> 24) & 0xff, (srcIPHost >> 16) & 0xff,
+						(srcIPHost >> 8) & 0xff, srcIPHost & 0xff, srcPortHost));
+					continue;
+				}
+				// Same-IP sibling guard: two players behind one NAT share the
+				// IP, so also reject a packet whose exact (ip, port) is a
+				// DIFFERENT registered peer's advertised address (its cone
+				// NAT preserves the port, so its keepalives are exactly
+				// identifiable). Without this, a sibling's keepalive rekeys
+				// this punch to the wrong machine.
+				if (RelayRegistry::isOtherPeerAddr(m_peerInfo.relayID, srcIPHost, srcPortHost))
+				{
+					DEBUG_LOG(("OnlineCoordinatorAPI: ignoring punch-phase packet from another registered peer's addr"));
+					continue;
+				}
+			}
 			if (isGame && !m_punchOkGame)
 			{
 				m_peerInfo.gamePunchedIP   = srcIPHost;
 				m_peerInfo.gamePunchedPort = srcPortHost;
 				m_punchOkGame = TRUE;
+				RelayRegistry::rekeyPeer(m_peerInfo.relayID, RelayRegistry::CHANNEL_GAME,
+					srcIPHost, srcPortHost);
 				DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH(game) OK from %u.%u.%u.%u:%u",
 					(srcIPHost >> 24) & 0xff, (srcIPHost >> 16) & 0xff,
 					(srcIPHost >> 8) & 0xff, (srcIPHost) & 0xff, srcPortHost));
@@ -1367,14 +1575,20 @@ void OnlineCoordinatorAPI::pumpUdpRecvOne(Int fd, Bool isGame)
 				m_peerInfo.punchedIP   = srcIPHost;
 				m_peerInfo.punchedPort = srcPortHost;
 				m_punchOkLobby = TRUE;
+				RelayRegistry::rekeyPeer(m_peerInfo.relayID, RelayRegistry::CHANNEL_LOBBY,
+					srcIPHost, srcPortHost);
 				DEBUG_LOG(("OnlineCoordinatorAPI: PUNCH(lobby) OK from %u.%u.%u.%u:%u",
 					(srcIPHost >> 24) & 0xff, (srcIPHost >> 16) & 0xff,
 					(srcIPHost >> 8) & 0xff, (srcIPHost) & 0xff, srcPortHost));
 			}
 			// Send one acknowledgement so the peer also sees inbound traffic
-			// quickly even if its first blast was lost. Inbound traffic means
-			// both NAT mappings are settled, so the low-TTL phase (if still
-			// active) is over: the ACK must survive the full path.
+			// quickly even if its first blast was lost. NEVER in response to
+			// an ACK: ACKing an ACK is an amplification loop waiting for a
+			// reflector. Inbound traffic means both NAT mappings are
+			// settled, so the low-TTL phase (if still active) is over: the
+			// ACK must survive the full path.
+			if (n >= 3 && memcmp(buf, "ACK", 3) == 0)
+				continue;
 			if (m_punchTtl != PUNCH_FULL_TTL)
 			{
 				setPunchTTL(m_udpFdLobby, PUNCH_FULL_TTL);
@@ -1459,6 +1673,11 @@ void OnlineCoordinatorAPI::update()
 		appendEscaped(hello, m_nick.str());
 		hello.concat(",\"version\":");
 		appendEscaped(hello, m_version.str());
+		// Advertise relay support so the server mints us a relay id and
+		// includes peers' ids in peer_info. -norelay suppresses it for
+		// testing old-client behavior against a relay-capable server.
+		if (!(TheGlobalData && TheGlobalData->m_coordNoRelay))
+			hello.concat(",\"relay\":1");
 		hello.concat("}}");
 		sendJsonLine(hello);
 		setState(STATE_HANDSHAKING);
@@ -1584,6 +1803,8 @@ static void gamesParseCb(const char* objStart, Int objLen, void* user)
 	parseIntField(obj, "max_players", &e.maxPlayers);
 	e.inProgress = 0;
 	parseIntField(obj, "in_progress", &e.inProgress);
+	e.restrictedHost = 0;
+	parseIntField(obj, "restricted_host", &e.restrictedHost);
 	ctx->out->push_back(e);
 }
 }
@@ -1605,6 +1826,28 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		m_sessionToken = tok;
 		m_stunMagic    = magic;
 		m_coordUdpPort = (UnsignedShort)udpPort;
+		// Relay support: a nonzero relay_id means the server can forward UDP
+		// between us and any unpunchable peer. Absent (old server, or we sent
+		// no relay flag) leaves the registry inactive and behavior identical
+		// to pre-relay builds.
+		m_relayID = 0;
+		parseUInt32Field(obj, "relay_id", &m_relayID);
+		Int udpPort2 = 0;
+		parseIntField(obj, "udp_port2", &udpPort2);
+		m_coordUdpPort2 = (UnsignedShort)udpPort2;
+		if (m_relayID != 0)
+		{
+			unsigned char tokenBytes[16];
+			if (hexDecode(m_sessionToken.str(), (Int)strlen(m_sessionToken.str()), tokenBytes, 16))
+			{
+				RelayRegistry::configure(ntohl(m_coordIPNet), m_coordUdpPort,
+					m_stunMagic, tokenBytes, m_relayID);
+			}
+			else
+			{
+				m_relayID = 0;
+			}
+		}
 		// Capture our local IP for the local_addr hint. The advertised port
 		// is the lobby socket (LAN games look it up here for same-LAN play).
 		struct sockaddr_in self;
@@ -1662,6 +1905,24 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		// any more so these are the values the lobby UI plumbs into TheLAN.
 		parseHostOrderIpPort(p.publicAddr,     &p.punchedIP,     &p.punchedPort);
 		parseHostOrderIpPort(p.gamePublicAddr, &p.gamePunchedIP, &p.gamePunchedPort);
+		parseUInt32Field(obj, "relay_id", &p.relayID);
+
+		// Register the peer with the relay registry (starting direct), so a
+		// grant, sticky flip, or silence trigger can later reroute the pair.
+		// A peer behind OUR public IP is same-household or same-LAN: the
+		// direct/local path always works there and must never relay.
+		if (m_relayID != 0 && p.relayID != 0)
+		{
+			UnsignedInt myPublicIP = 0;
+			parseHostOrderIpPort(m_publicAddrLobby, &myPublicIP, NULL);
+			if (p.punchedIP != myPublicIP)
+			{
+				RelayRegistry::addPeer(p.relayID, RelayRegistry::CHANNEL_LOBBY,
+					p.punchedIP, p.punchedPort, p.nick);
+				RelayRegistry::addPeer(p.relayID, RelayRegistry::CHANNEL_GAME,
+					p.gamePunchedIP, p.gamePunchedPort, p.nick);
+			}
+		}
 
 		// Guest<->guest mesh notification: another guest in the game we
 		// joined. This NEVER arms the synchronized punch machinery (that is
@@ -1698,12 +1959,39 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		m_peerInfoArmed = TRUE;
 		m_punchOkLobby = FALSE;
 		m_punchOkGame  = FALSE;
+		m_punchRelayed = FALSE;
 		m_punchTtl     = 0;   // force TTL (re)apply on the first blast
 		UnsignedInt nowMs = timeGetTime();
 		m_punchStartMs     = nowMs + (UnsignedInt)m_peerInfo.punchInMS;
 		m_punchNextBlastMs = m_punchStartMs;
 		m_punchDeadlineMs  = m_punchStartMs + PUNCH_TIMEOUT_MS;
 		setState(STATE_PUNCHING);
+		return;
+	}
+
+	if (strcmp(msgType, "relay_grant") == 0)
+	{
+		// The other side of a punch pair reported failure; the server tells
+		// both of us to route that pair through the relay. Idempotent.
+		UnsignedInt pid = 0;
+		parseUInt32Field(obj, "peer_relay_id", &pid);
+		if (pid != 0 && RelayRegistry::hasPeer(pid))
+		{
+			m_relayGrantsReceived++;
+			RelayRegistry::forceRelay(pid);
+			// If that peer is the punch currently in flight, resolve it now
+			// rather than blasting out the rest of the deadline.
+			if (m_state == STATE_PUNCHING && m_peerInfoArmed && m_peerInfo.relayID == pid)
+			{
+				m_punchRelayed = TRUE;
+				ReleaseLog("Coordinator: relay granted for %s mid-punch; using relay",
+					m_peerInfo.nick.str());
+				sendPunchOutcome(FALSE);
+				m_punchOkLobby = TRUE;
+				m_punchOkGame  = TRUE;
+				setState(STATE_PUNCH_OK);
+			}
+		}
 		return;
 	}
 

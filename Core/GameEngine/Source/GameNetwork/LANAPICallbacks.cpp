@@ -60,6 +60,14 @@
 LANAPI *TheLAN = nullptr;
 extern Bool LANbuttonPushed;
 
+#if RTS_ZEROHOUR
+// Zero Hour only: the online coordinator (and the LAN lobby's coordinator
+// mode) live in the Zero Hour tree. Defined in LanLobbyMenu.cpp; a no-op
+// unless a join was refused after the coordinator handed its punched sockets
+// to TheLAN. See OnGameJoin below.
+extern void LanLobbyMenuCoordinatorJoinFailed( void );
+#endif
+
 
 //Colors used for the chat dialogs
 const Color playerColor =  GameMakeColor(255,255,255,255);
@@ -919,6 +927,12 @@ static void lanDeclineObserveCallback()
 {
 	s_pendingObserveHostIP = 0;
 	s_pendingObservePort   = 0;
+#if RTS_ZEROHOUR
+	// Declining leaves us in the lobby with nothing to show for the join, so
+	// it needs the same session rebuild as any other refusal. (Accepting does
+	// not: RequestObserve is about to use TheLAN.)
+	LanLobbyMenuCoordinatorJoinFailed();
+#endif
 }
 
 void LANAPI::OnGameJoin( ReturnType ret, LANGameInfo *theGame )
@@ -972,6 +986,14 @@ void LANAPI::OnGameJoin( ReturnType ret, LANGameInfo *theGame )
 		MessageBoxOk(title, body, nullptr);
 		s_pendingObserveHostIP = 0;
 		s_pendingObservePort   = 0;
+#if RTS_ZEROHOUR
+		// Online mode: this refusal arrived after the coordinator already
+		// handed off to us, which leaves the lobby unable to dispatch another
+		// join. Tell it to rebuild the session so the player can fix what the
+		// host objected to (a duplicate name, most often) and try again
+		// without backing out of online play. No-op for LAN games.
+		LanLobbyMenuCoordinatorJoinFailed();
+#endif
 	}
 }
 

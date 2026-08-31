@@ -45,6 +45,7 @@
 #include "GameClient/GameText.h"
 #include "GameClient/MessageBox.h"
 #include "GameNetwork/ConnectionManager.h"
+#include "GameNetwork/RelayRegistry.h"
 #include "GameNetwork/LANAPICallbacks.h"
 #include "GameNetwork/OnlineCoordinatorAPI.h"
 #include "GameNetwork/NAT.h"
@@ -212,6 +213,10 @@ ConnectionManager::~ConnectionManager()
 	// Network will delete transports; we just forget them
 	delete m_transport;
 	m_transport = nullptr;
+
+	// End of the network game: stale relay decisions must never leak into a
+	// later match (a fresh coordinator session reconfigures from scratch).
+	RelayRegistry::clear();
 
 	Int i = 0;
 	for (; i < MAX_SLOTS; ++i) {
@@ -1686,6 +1691,11 @@ void ConnectionManager::initTransport() {
 				m_localPort = localPort;
 			if (m_transport->initFromFD(fd, m_localAddr, m_localPort)) {
 				ReleaseLog("Game transport adopted punched coordinator socket on port %d", m_localPort);
+				// In-game relay channel: wraps sends to relay-flipped peers,
+				// owns the mid-game silence trigger, and keeps our game
+				// return address fresh at the coordinator.
+				m_transport->setRelayChannel(RelayRegistry::CHANNEL_GAME);
+				RelayRegistry::noteGameTransportAdopted();
 				return;
 			}
 			// Adoption failed (initFromFD closed the fd and left its own

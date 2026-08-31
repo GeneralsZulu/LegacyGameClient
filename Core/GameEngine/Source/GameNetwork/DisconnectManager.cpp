@@ -26,6 +26,7 @@
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
 #include "Common/Recorder.h"
+#include "Common/ReleaseLog.h"
 #include "GameClient/DisconnectMenu.h"
 #include "GameClient/InGameUI.h"
 #include "GameLogic/GameLogic.h"
@@ -564,6 +565,10 @@ void DisconnectManager::turnOnScreen(ConnectionManager *conMgr) {
 
 void DisconnectManager::disconnectPlayer(Int slot, ConnectionManager *conMgr) {
 	DEBUG_LOG(("DisconnectManager::disconnectPlayer - Disconnecting slot number %d on frame %d", slot, TheGameLogic->getFrame()));
+	// Grep-able breadcrumb for the network test harness: a mid-game drop is
+	// a hard failure signal there ("zero disconnects" is a pass criterion),
+	// and in the field it marks exactly when a player was given up on.
+	ReleaseLog("DISCONNECT dropped slot=%d frame=%d", slot, TheGameLogic->getFrame());
 	DEBUG_ASSERTCRASH((slot >= 0) && (slot < MAX_SLOTS), ("Attempting to disconnect an invalid slot number"));
 	if ((slot < 0) || (slot >= (MAX_SLOTS))) {
 		return;

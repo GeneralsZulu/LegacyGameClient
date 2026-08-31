@@ -35,6 +35,21 @@ func setTTL(u *net.UDPConn, ttl int) {
 	})
 }
 
+// finish prints the machine-readable verdict and applies -expect.
+// Exit codes: 0 = matched (or no expectation), 2 = fail verdict with no
+// expectation, 3 = expectation mismatch.
+func finish(verdict, expect string) {
+	fmt.Printf("VERDICT %s\n", verdict)
+	if expect != "" && verdict != expect {
+		log.Printf("EXPECT MISMATCH: wanted %s, got %s", expect, verdict)
+		os.Exit(3)
+	}
+	if expect == "" && verdict == "fail" {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
 func envInt(name string, def int) int {
 	if v := os.Getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -53,11 +68,13 @@ type client struct {
 	udpLocal     *net.UDPAddr
 	coordUDPAddr *net.UDPAddr
 	sessionToken string
+	tokenBytes   []byte
 	stunMagic    uint32
+	relayID      uint32
 	publicAddr   string
 }
 
-func newClient(coordAddr, nick string) (*client, error) {
+func newClient(coordAddr, nick string, relay bool) (*client, error) {
 	c := &client{coordAddr: coordAddr, nick: nick}
 
 	tcp, err := net.Dial("tcp", coordAddr)
@@ -67,9 +84,14 @@ func newClient(coordAddr, nick string) (*client, error) {
 	c.tcp = tcp
 	c.reader = bufio.NewReader(tcp)
 
+	relayFlag := 0
+	if relay {
+		relayFlag = 1
+	}
 	if err := c.send(coordinator.MsgHello, coordinator.Hello{
 		Nick:    nick,
 		Version: "stuntest/1",
+		Relay:   relayFlag,
 	}); err != nil {
 		return nil, err
 	}
@@ -79,7 +101,9 @@ func newClient(coordAddr, nick string) (*client, error) {
 		return nil, err
 	}
 	c.sessionToken = helloOK.SessionToken
+	c.tokenBytes, _ = hex.DecodeString(helloOK.SessionToken)
 	c.stunMagic = helloOK.STUNMagic
+	c.relayID = helloOK.RelayID
 
 	host, _, err := net.SplitHostPort(coordAddr)
 	if err != nil {
@@ -255,10 +279,111 @@ func (c *client) waitPeerInfo() (*coordinator.PeerInfo, error) {
 	}
 }
 
-func (c *client) punch(pi *coordinator.PeerInfo) error {
+// relayDataFrame builds a client->server RelayData frame (channel 0; the
+// stuntest uses a single socket, so everything rides the lobby channel).
+func (c *client) relayDataFrame(dest uint32, payload []byte) []byte {
+	frame := make([]byte, coordinator.RelayDataHeaderSize+len(payload))
+	binary.BigEndian.PutUint32(frame[0:4], c.stunMagic)
+	copy(frame[4:20], c.tokenBytes)
+	frame[20] = coordinator.RelayPurposeData
+	frame[21] = coordinator.RelayChannelLobby
+	binary.BigEndian.PutUint32(frame[22:26], dest)
+	copy(frame[coordinator.RelayDataHeaderSize:], payload)
+	return frame
+}
+
+// converge is a miniature of the real client's path rules, run after the
+// punch phase: send PINGs to the peer every 200ms on whichever path we
+// currently believe in (direct if the punch delivered, otherwise the relay),
+// flip to the relay on receiving a relayed frame from the peer (the sticky
+// rule), and report the path we ended on. Success is having heard the peer
+// at all. One-way punch pairs converge to the relay on both sides through
+// exactly the mechanism the game uses.
+func (c *client) converge(pi *coordinator.PeerInfo, punched bool, punchedFrom *net.UDPAddr, window time.Duration) (string, error) {
 	pubAddr, err := net.ResolveUDPAddr("udp", pi.PublicAddr)
 	if err != nil {
-		return fmt.Errorf("resolve public: %w", err)
+		return "fail", fmt.Errorf("resolve public: %w", err)
+	}
+	directAddr := pubAddr
+	if punchedFrom != nil {
+		directAddr = punchedFrom
+	}
+	viaRelay := !punched
+	if viaRelay && (c.relayID == 0 || pi.RelayID == 0) {
+		return "fail", fmt.Errorf("punch failed and no relay available")
+	}
+	gotPeer := false
+	deadline := time.Now().Add(window)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	buf := make([]byte, 2048)
+	ping := fmt.Appendf(nil, "PING from %s", c.nick)
+	// Keep going a short while after first contact so the PEER also gets a
+	// stream of our pings on the converged path.
+	var settleUntil time.Time
+
+	for time.Now().Before(deadline) {
+		if gotPeer && !settleUntil.IsZero() && time.Now().After(settleUntil) {
+			break
+		}
+		if viaRelay {
+			c.udp.WriteToUDP(c.relayDataFrame(pi.RelayID, ping), c.coordUDPAddr)
+		} else {
+			c.udp.WriteToUDP(ping, directAddr)
+		}
+		c.udp.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		for {
+			n, from, err := c.udp.ReadFromUDP(buf)
+			if err != nil {
+				break
+			}
+			if from.IP.Equal(c.coordUDPAddr.IP) && from.Port == c.coordUDPAddr.Port {
+				// From the coordinator: STUN reply (drop) or RelayDeliver.
+				if n > coordinator.RelayDeliverHeaderSize &&
+					binary.BigEndian.Uint32(buf[0:4]) == c.stunMagic &&
+					buf[4] == coordinator.RelayPurposeDeliver {
+					src := binary.BigEndian.Uint32(buf[6:10])
+					if src == pi.RelayID {
+						if !viaRelay {
+							log.Printf("sticky flip: peer reached us via relay")
+							viaRelay = true
+						}
+						if !gotPeer {
+							gotPeer = true
+							settleUntil = time.Now().Add(2 * time.Second)
+							log.Printf("heard peer via RELAY: %q", string(buf[coordinator.RelayDeliverHeaderSize:n]))
+						}
+					}
+				}
+				continue
+			}
+			// Direct packet from the peer.
+			if !gotPeer {
+				gotPeer = true
+				settleUntil = time.Now().Add(2 * time.Second)
+				log.Printf("heard peer DIRECT from %s: %q", from, string(buf[:n]))
+			}
+		}
+	}
+	if !gotPeer {
+		return "fail", fmt.Errorf("no peer contact within %v", window)
+	}
+	if viaRelay {
+		return "relay", nil
+	}
+	return "direct", nil
+}
+
+// punch blasts the synchronized hole punch and reports whether any peer
+// packet arrived, plus the source address it arrived from (which on a
+// port-drifting NAT differs from the advertised addr). It does NOT send
+// punch_outcome; the caller does, because with the relay in play the
+// outcome message depends on what happens next.
+func (c *client) punch(pi *coordinator.PeerInfo) (bool, *net.UDPAddr) {
+	pubAddr, err := net.ResolveUDPAddr("udp", pi.PublicAddr)
+	if err != nil {
+		log.Printf("resolve public: %v", err)
+		return false, nil
 	}
 	var locAddr *net.UDPAddr
 	if pi.LocalAddr != "" {
@@ -270,25 +395,6 @@ func (c *client) punch(pi *coordinator.PeerInfo) error {
 	time.Sleep(delay)
 
 	msg := fmt.Appendf(nil, "PUNCH from %s", c.nick)
-	rx := make(chan string, 4)
-	stop := make(chan struct{})
-
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			c.udp.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-			n, from, err := c.udp.ReadFromUDP(buf)
-			if err != nil {
-				continue
-			}
-			rx <- fmt.Sprintf("%d bytes from %s: %q", n, from, string(buf[:n]))
-		}
-	}()
 
 	// Low-TTL first phase; see setTTL. PUNCH_LOW_TTL=0 disables.
 	lowTTL := envInt("PUNCH_LOW_TTL", 4)
@@ -308,9 +414,7 @@ func (c *client) punch(pi *coordinator.PeerInfo) error {
 	defer restoreTTL()
 
 	deadline := time.Now().Add(8 * time.Second)
-	tick := time.NewTicker(200 * time.Millisecond)
-	defer tick.Stop()
-
+	buf := make([]byte, 1500)
 	for time.Now().Before(deadline) {
 		if !ttlRestored && time.Since(start) >= time.Duration(lowTTLMs)*time.Millisecond {
 			restoreTTL()
@@ -319,26 +423,55 @@ func (c *client) punch(pi *coordinator.PeerInfo) error {
 		if locAddr != nil {
 			c.udp.WriteToUDP(msg, locAddr)
 		}
-		select {
-		case got := <-rx:
-			close(stop)
-			restoreTTL()
-			log.Printf("PUNCH OK: %s", got)
-			c.udp.WriteToUDP(fmt.Appendf(nil, "ACK from %s", c.nick), pubAddr)
-			c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
-				OK: true, LobbyOK: true, GameOK: true,
-				MS:   int(time.Since(start).Milliseconds()),
-				Role: pi.Role,
-			})
-			return nil
-		case <-tick.C:
+		c.udp.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, from, err := c.udp.ReadFromUDP(buf)
+		if err != nil {
+			continue
 		}
+		// Anything from the coordinator (relay deliver from an
+		// already-flipped peer, stray STUN reply) is NOT punch evidence.
+		if from.IP.Equal(c.coordUDPAddr.IP) && from.Port == c.coordUDPAddr.Port {
+			continue
+		}
+		restoreTTL()
+		log.Printf("PUNCH OK: %d bytes from %s: %q", n, from, string(buf[:n]))
+		c.udp.WriteToUDP(fmt.Appendf(nil, "ACK from %s", c.nick), from)
+		return true, from
 	}
-	close(stop)
-	c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
-		OK: false, MS: int(time.Since(start).Milliseconds()), Role: pi.Role,
-	})
-	return fmt.Errorf("no packet received within 8s")
+	return false, nil
+}
+
+// runPair drives the full post-peer_info flow: punch, punch_outcome (with
+// relayed=true when the relay saves a failed punch, so the server issues
+// grants exactly as it would for the real client), then converge. Returns
+// the verdict: direct, relay, or fail.
+func (c *client) runPair(pi *coordinator.PeerInfo) string {
+	start := time.Now()
+	punched, punchedFrom := c.punch(pi)
+	relayAvailable := c.relayID != 0 && pi.RelayID != 0
+	switch {
+	case punched:
+		c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
+			OK: true, LobbyOK: true, GameOK: true,
+			MS: int(time.Since(start).Milliseconds()), Role: pi.Role,
+		})
+	case relayAvailable:
+		log.Printf("punch failed; flipping to relay (peer id %d)", pi.RelayID)
+		c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
+			OK: false, MS: int(time.Since(start).Milliseconds()), Role: pi.Role,
+			Relayed: true, PeerRelayID: pi.RelayID,
+		})
+	default:
+		c.send(coordinator.MsgPunchOutcome, coordinator.PunchOutcome{
+			OK: false, MS: int(time.Since(start).Milliseconds()), Role: pi.Role,
+		})
+		return "fail"
+	}
+	verdict, err := c.converge(pi, punched, punchedFrom, 14*time.Second)
+	if err != nil {
+		log.Printf("converge: %v", err)
+	}
+	return verdict
 }
 
 func main() {
@@ -347,10 +480,13 @@ func main() {
 	doList := flag.Bool("list", false, "list games and exit")
 	doHost := flag.Bool("host", false, "host a game and wait for joiner")
 	doJoin := flag.String("join", "", "join game by ID")
+	joinName := flag.String("join-name", "", "poll the game list and join the game with this name (lab automation)")
 	gameName := flag.String("game-name", "stuntest", "game name when hosting")
+	relay := flag.Bool("relay", true, "advertise relay support in hello")
+	expect := flag.String("expect", "", "assert the final path: direct|relay|fail (exit 3 on mismatch)")
 	flag.Parse()
 
-	c, err := newClient(*addr, *nick)
+	c, err := newClient(*addr, *nick, *relay)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
@@ -388,26 +524,43 @@ func main() {
 		if err != nil {
 			log.Fatalf("wait peer: %v", err)
 		}
-		log.Printf("peer info: nick=%s public=%s local=%s role=%s punch_in_ms=%d",
-			pi.Nick, pi.PublicAddr, pi.LocalAddr, pi.Role, pi.PunchInMS)
-		if err := c.punch(pi); err != nil {
-			log.Fatalf("punch: %v", err)
+		log.Printf("peer info: nick=%s public=%s local=%s role=%s punch_in_ms=%d relay_id=%d",
+			pi.Nick, pi.PublicAddr, pi.LocalAddr, pi.Role, pi.PunchInMS, pi.RelayID)
+		finish(c.runPair(pi), *expect)
+	case *doJoin != "" || *joinName != "":
+		gameID := *doJoin
+		if gameID == "" {
+			deadline := time.Now().Add(15 * time.Second)
+			for gameID == "" {
+				if time.Now().After(deadline) {
+					log.Fatalf("join-name: game %q never appeared in the list", *joinName)
+				}
+				games, err := c.list()
+				if err != nil {
+					log.Fatalf("list: %v", err)
+				}
+				for _, g := range games {
+					if g.Name == *joinName {
+						gameID = g.ID
+						break
+					}
+				}
+				if gameID == "" {
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+			log.Printf("join-name: found %q as %s", *joinName, gameID)
 		}
-		log.Printf("DONE")
-	case *doJoin != "":
-		if err := c.join(*doJoin); err != nil {
+		if err := c.join(gameID); err != nil {
 			log.Fatalf("join: %v", err)
 		}
 		pi, err := c.waitPeerInfo()
 		if err != nil {
 			log.Fatalf("wait peer: %v", err)
 		}
-		log.Printf("peer info: nick=%s public=%s local=%s role=%s punch_in_ms=%d",
-			pi.Nick, pi.PublicAddr, pi.LocalAddr, pi.Role, pi.PunchInMS)
-		if err := c.punch(pi); err != nil {
-			log.Fatalf("punch: %v", err)
-		}
-		log.Printf("DONE")
+		log.Printf("peer info: nick=%s public=%s local=%s role=%s punch_in_ms=%d relay_id=%d",
+			pi.Nick, pi.PublicAddr, pi.LocalAddr, pi.Role, pi.PunchInMS, pi.RelayID)
+		finish(c.runPair(pi), *expect)
 	default:
 		log.Printf("no -list, -host, or -join specified; exiting after discovery")
 		os.Exit(0)

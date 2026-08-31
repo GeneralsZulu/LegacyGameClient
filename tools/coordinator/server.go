@@ -35,9 +35,53 @@ type Session struct {
 	LocalAddr      string
 	HostingGame    string
 	JoiningGame    string // game id of the last join attempt (player-count bookkeeping)
+	RelayID        uint32 // nonzero when the client advertised relay support
 	Started        time.Time
 	LastSeen       time.Time
 	writeMu        sync.Mutex
+}
+
+// relayPeer is the UDP relay's routing state for one client. Deliberately
+// decoupled from Session: joiners tear their signaling TCP down at game
+// start, but their relayed in-game traffic must keep flowing, so routing is
+// keyed by the session token carried in every RelayData frame and refreshed
+// by that traffic (and by STUN keepalive probes, which arrive from the same
+// sockets and double as return-address updates).
+type relayPeer struct {
+	relayID   uint32
+	token     string
+	nick      string
+	lobbyAddr *net.UDPAddr // return addr for channel 0
+	gameAddr  *net.UDPAddr // return addr for channel 1
+	lastSeen  time.Time
+	// Cheap per-second rate limit.
+	rateSec   int64
+	ratePkts  int
+	rateBytes int
+}
+
+// relayPairState marks two relay ids as introduced to each other via
+// peer_info; the relay only ever forwards between introduced pairs.
+type relayPairState struct {
+	lastSeen time.Time
+	logged   bool // first forwarded frame for this pair logged
+}
+
+const (
+	// A relayed match refreshes these continuously; anything idle this long
+	// is dead.
+	relayPeerTTL = 15 * time.Minute
+	relayPairTTL = 15 * time.Minute
+	// Per-sender caps, far above the lockstep traffic of one 8-player game.
+	relayMaxPktsPerSec  = 800
+	relayMaxBytesPerSec = 400 * 1024
+)
+
+func relayPairKey(a, b uint32) uint64 {
+	if a > b {
+		a, b = b, a
+	}
+	return uint64(a)<<32 | uint64(b)
 }
 
 func (sess *Session) send(msgType string, payload any) error {
@@ -90,6 +134,8 @@ const RelayAttachTTL = 60 * time.Second
 type Server struct {
 	Magic   uint32
 	UDPPort int
+	// Second STUN listener for NAT self-classification; 0 when disabled.
+	UDPPort2 int
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -98,18 +144,43 @@ type Server struct {
 	// Lifetime punch telemetry counters (see MsgPunchOutcome).
 	punchOK   int
 	punchFail int
+
+	// UDP relay fallback state.
+	nextRelayID  uint32
+	relayPeers   map[uint32]*relayPeer
+	relayByToken map[string]*relayPeer
+	relayPairs   map[uint64]*relayPairState
+	// Lifetime relay telemetry counters.
+	punchRelayed    int
+	relayForwarded  int64 // packets forwarded
+	relayBytes      int64 // payload bytes forwarded
+	relayDropped    int64 // frames dropped (unknown dest, unpaired, no addr, rate limit)
+	relayGrantsSent int
 }
 
 func NewServer() *Server {
 	return &Server{
-		Magic:    DefaultSTUNMagic,
-		sessions: make(map[string]*Session),
-		games:    make(map[string]*gameState),
-		relays:   make(map[string]*relayState),
+		Magic:        DefaultSTUNMagic,
+		sessions:     make(map[string]*Session),
+		games:        make(map[string]*gameState),
+		relays:       make(map[string]*relayState),
+		nextRelayID:  1,
+		relayPeers:   make(map[uint32]*relayPeer),
+		relayByToken: make(map[string]*relayPeer),
+		relayPairs:   make(map[uint64]*relayPairState),
 	}
 }
 
 func (s *Server) Run(tcpAddr, udpAddr string) error {
+	return s.RunWithAltSTUN(tcpAddr, udpAddr, "")
+}
+
+// RunWithAltSTUN also opens a second STUN-only UDP listener when udp2Addr
+// is nonempty. Clients probe both from one socket; differing observed
+// ports reveal an endpoint-dependent (symmetric) NAT, which the client
+// uses to warn would-be hosts. The second port serves STUN replies only
+// (relay frames on it are ignored).
+func (s *Server) RunWithAltSTUN(tcpAddr, udpAddr, udp2Addr string) error {
 	tcpL, err := net.Listen("tcp", tcpAddr)
 	if err != nil {
 		return fmt.Errorf("listen tcp: %w", err)
@@ -128,6 +199,21 @@ func (s *Server) Run(tcpAddr, udpAddr string) error {
 	defer udpL.Close()
 	log.Printf("UDP STUN listening on %s", udpL.LocalAddr())
 	s.UDPPort = udpL.LocalAddr().(*net.UDPAddr).Port
+
+	if udp2Addr != "" {
+		udp2ResAddr, err := net.ResolveUDPAddr("udp", udp2Addr)
+		if err != nil {
+			return fmt.Errorf("resolve udp2: %w", err)
+		}
+		udp2L, err := net.ListenUDP("udp", udp2ResAddr)
+		if err != nil {
+			return fmt.Errorf("listen udp2: %w", err)
+		}
+		defer udp2L.Close()
+		log.Printf("UDP STUN (alt, NAT check) listening on %s", udp2L.LocalAddr())
+		s.UDPPort2 = udp2L.LocalAddr().(*net.UDPAddr).Port
+		go s.handleUDPOn(udp2L, true)
+	}
 
 	go s.handleUDP(udpL)
 	go s.reapLoop()
@@ -209,6 +295,21 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 
 	s.mu.Lock()
 	s.sessions[token] = sess
+	if hello.Relay > 0 {
+		sess.RelayID = s.nextRelayID
+		s.nextRelayID++
+		if s.nextRelayID == 0 { // wrapped; 0 is "no relay"
+			s.nextRelayID = 1
+		}
+		rp := &relayPeer{
+			relayID:  sess.RelayID,
+			token:    token,
+			nick:     sess.Nick,
+			lastSeen: time.Now(),
+		}
+		s.relayPeers[sess.RelayID] = rp
+		s.relayByToken[token] = rp
+	}
 	s.mu.Unlock()
 	defer s.dropSession(sess)
 
@@ -216,10 +317,12 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		SessionToken: token,
 		STUNMagic:    s.Magic,
 		UDPPort:      s.UDPPort,
+		RelayID:      sess.RelayID,
+		UDPPort2:     s.UDPPort2,
 	}); err != nil {
 		return
 	}
-	log.Printf("session %s nick=%q version=%s from %s", token[:8], sess.Nick, sess.Version, sess.RemoteAddr)
+	log.Printf("session %s nick=%q version=%s relay=%d from %s", token[:8], sess.Nick, sess.Version, sess.RelayID, sess.RemoteAddr)
 
 	for {
 		line, err := r.ReadBytes('\n')
@@ -341,9 +444,24 @@ func (s *Server) handleMessage(sess *Session, env *Envelope) error {
 		if err := json.Unmarshal(env.Data, &m); err != nil {
 			return err
 		}
+		// A relayed outcome means the join is proceeding over the relay:
+		// count it separately and leave the game bookkeeping alone.
+		var grantTo []*Session
 		s.mu.Lock()
+		// Any guest that could not punch this host marks the game listing:
+		// the lobby browser shows "restricted host" so players can prefer a
+		// different host, and the host's own client can surface the hint.
+		if m.Role == "guest" && (!m.OK || m.Relayed) && sess.JoiningGame != "" {
+			if g, ok := s.games[sess.JoiningGame]; ok && g.info.RestrictedHost == 0 {
+				g.info.RestrictedHost = 1
+				log.Printf("game %s marked restricted_host (guest %q ok=%v relayed=%v)",
+					sess.JoiningGame, sess.Nick, m.OK, m.Relayed)
+			}
+		}
 		if m.OK {
 			s.punchOK++
+		} else if m.Relayed {
+			s.punchRelayed++
 		} else {
 			s.punchFail++
 			// Roll back the optimistic player count from handleJoin so a
@@ -364,12 +482,32 @@ func (s *Server) handleMessage(sess *Session, env *Envelope) error {
 				}
 			}
 		}
-		if m.Role == "guest" {
+		if m.Role == "guest" && !m.Relayed {
 			sess.JoiningGame = ""
 		}
+		// Failed or relayed punch with a relay-capable peer: grant the relay
+		// to BOTH sides (idempotent client-side) so they converge on it. The
+		// pair must have been introduced via peer_info.
+		if (!m.OK || m.Relayed) && m.PeerRelayID != 0 && sess.RelayID != 0 {
+			if _, paired := s.relayPairs[relayPairKey(sess.RelayID, m.PeerRelayID)]; paired {
+				if peerRP, ok := s.relayPeers[m.PeerRelayID]; ok {
+					if peerSess, ok := s.sessions[peerRP.token]; ok {
+						grantTo = []*Session{sess, peerSess}
+						s.relayGrantsSent += 2
+					}
+				}
+			}
+		}
 		s.mu.Unlock()
-		log.Printf("punch outcome session=%s nick=%q role=%s ok=%v lobby=%v game=%v ms=%d",
-			sess.Token[:8], sess.Nick, m.Role, m.OK, m.LobbyOK, m.GameOK, m.MS)
+		if grantTo != nil {
+			// Sends run unlocked (they can block on a slow client).
+			grantTo[0].send(MsgRelayGrant, RelayGrant{PeerRelayID: m.PeerRelayID, PeerNick: grantTo[1].Nick})
+			grantTo[1].send(MsgRelayGrant, RelayGrant{PeerRelayID: sess.RelayID, PeerNick: sess.Nick})
+			log.Printf("relay grant: %s(id %d) <-> %s(id %d)",
+				grantTo[0].Nick, sess.RelayID, grantTo[1].Nick, m.PeerRelayID)
+		}
+		log.Printf("punch outcome session=%s nick=%q role=%s ok=%v lobby=%v game=%v relayed=%v ms=%d",
+			sess.Token[:8], sess.Nick, m.Role, m.OK, m.LobbyOK, m.GameOK, m.Relayed, m.MS)
 		return nil
 	case MsgHost:
 		var m Host
@@ -537,6 +675,16 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	sess.JoiningGame = m.GameID
 	// Snapshot both peers' fields while holding the lock; sends below run
 	// unlocked and must not touch shared Session state.
+	// Relay ids ride along only when BOTH sides support relaying; recording
+	// the pair is what later authorizes grants and forwarding for it.
+	pairRelayID := func(a, b *Session) (uint32, uint32) {
+		if a.RelayID == 0 || b.RelayID == 0 {
+			return 0, 0
+		}
+		s.relayPairs[relayPairKey(a.RelayID, b.RelayID)] = &relayPairState{lastSeen: time.Now()}
+		return a.RelayID, b.RelayID
+	}
+	guestRelayID, hostRelayID := pairRelayID(sess, host)
 	guestInfo := PeerInfo{
 		Nick:           sess.Nick,
 		PublicAddr:     sess.PublicAddr,
@@ -544,6 +692,7 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 		LocalAddr:      sess.LocalAddr,
 		PunchInMS:      PunchDelayMS,
 		Role:           "host",
+		RelayID:        guestRelayID,
 	}
 	hostInfo := PeerInfo{
 		Nick:           host.Nick,
@@ -552,6 +701,7 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 		LocalAddr:      host.LocalAddr,
 		PunchInMS:      PunchDelayMS,
 		Role:           "guest",
+		RelayID:        hostRelayID,
 	}
 	// Guest<->guest mesh: pair the new guest with every guest already in
 	// the game. Role "peer" tells both sides this is a mesh notification,
@@ -561,10 +711,14 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	s.removeGuestFromOtherGamesLocked(sess, m.GameID)
 	meshPeers := make([]*Session, 0, len(g.guests))
 	meshInfos := make([]PeerInfo, 0, len(g.guests))
+	// The new guest's relay id as seen by each existing guest (0 when that
+	// particular pair lacks mutual relay support).
+	meshNewGuestIDs := make([]uint32, 0, len(g.guests))
 	for _, other := range g.guests {
 		if other == sess {
 			continue
 		}
+		newGuestID, otherID := pairRelayID(sess, other)
 		meshPeers = append(meshPeers, other)
 		meshInfos = append(meshInfos, PeerInfo{
 			Nick:           other.Nick,
@@ -573,7 +727,9 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 			LocalAddr:      other.LocalAddr,
 			PunchInMS:      0,
 			Role:           "peer",
+			RelayID:        otherID,
 		})
+		meshNewGuestIDs = append(meshNewGuestIDs, newGuestID)
 	}
 	newGuestInfo := PeerInfo{
 		Nick:           sess.Nick,
@@ -609,7 +765,9 @@ func (s *Server) handleJoin(sess *Session, m *Join) error {
 	// A send error to an existing guest is logged, not fatal: that session
 	// is likely dying and will be reaped from the roster on disconnect.
 	for i, other := range meshPeers {
-		if err := other.send(MsgPeerInfo, newGuestInfo); err != nil {
+		infoForOther := newGuestInfo
+		infoForOther.RelayID = meshNewGuestIDs[i]
+		if err := other.send(MsgPeerInfo, infoForOther); err != nil {
 			log.Printf("mesh send to %s failed: %v", other.Nick, err)
 		}
 		if err := sess.send(MsgPeerInfo, meshInfos[i]); err != nil {
@@ -656,6 +814,14 @@ func (s *Server) dropSession(sess *Session) {
 }
 
 func (s *Server) handleUDP(udpL *net.UDPConn) {
+	s.handleUDPOn(udpL, false)
+}
+
+// handleUDPOn: alt=true is the NAT-check listener: it answers STUN probes
+// with the observed address but NEVER restamps session/relay state (a
+// symmetric NAT maps this destination differently, and adopting that
+// mapping would corrupt the addresses handed to peers) and never relays.
+func (s *Server) handleUDPOn(udpL *net.UDPConn, alt bool) {
 	buf := make([]byte, 2048)
 	for {
 		n, src, err := udpL.ReadFromUDP(buf)
@@ -684,16 +850,60 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 		if n >= STUNRequestSize {
 			purpose = buf[4+SessionTokenBytes]
 		}
+		// Relay data frames share the socket and header; everything after
+		// the purpose byte is relay routing plus opaque payload.
+		if purpose == RelayPurposeData {
+			if !alt && n >= RelayDataHeaderSize {
+				s.handleRelayData(udpL, buf[:n], src, token)
+			}
+			continue
+		}
+		if purpose != STUNPurposeLobby && purpose != STUNPurposeGame {
+			continue
+		}
 		public := fmt.Sprintf("%s:%d", ip4.String(), src.Port)
+		if alt {
+			// Reply-only: the observed addr is the whole point of the probe.
+			s.mu.Lock()
+			_, known := s.sessions[token]
+			s.mu.Unlock()
+			if !known {
+				continue
+			}
+			resp := make([]byte, STUNResponseSize)
+			binary.BigEndian.PutUint32(resp[0:4], s.Magic)
+			copy(resp[4:8], ip4)
+			binary.BigEndian.PutUint16(resp[8:10], uint16(src.Port))
+			udpL.WriteToUDP(resp, src)
+			continue
+		}
+		changed := false
 		s.mu.Lock()
 		sess, ok := s.sessions[token]
 		if ok {
 			switch purpose {
 			case STUNPurposeGame:
+				changed = sess.GamePublicAddr != public
 				sess.GamePublicAddr = public
 			default:
+				changed = sess.PublicAddr != public
 				sess.PublicAddr = public
 			}
+		}
+		// STUN probes double as relay return-address updates: they come from
+		// the exact sockets relayed traffic must be delivered to, and they
+		// keep flowing (as keepalives) while a client idles in a lobby. This
+		// also outlives the TCP session, which joiners close at game start.
+		if rp, rok := s.relayByToken[token]; rok {
+			rp.lastSeen = time.Now()
+			srcCopy := *src
+			switch purpose {
+			case STUNPurposeGame:
+				rp.gameAddr = &srcCopy
+			default:
+				rp.lobbyAddr = &srcCopy
+			}
+			ok = true
 		}
 		s.mu.Unlock()
 		if !ok {
@@ -707,7 +917,110 @@ func (s *Server) handleUDP(udpL *net.UDPConn) {
 		binary.BigEndian.PutUint16(resp[8:10], uint16(src.Port))
 		udpL.WriteToUDP(resp, src)
 
-		log.Printf("session %s STUN purpose=%d public=%s", token[:8], purpose, public)
+		// Only when it moves. Clients re-probe on a timer now to keep the
+		// NAT mapping from expiring under an idle lobby, so logging every
+		// probe would bury the diagnostics in this file under a steady few
+		// lines per player per minute. A change is the interesting event
+		// anyway: it is what invalidates the address already handed to a
+		// peer, and the first probe of a session always counts as one.
+		if changed {
+			log.Printf("session %s STUN purpose=%d public=%s", token[:8], purpose, public)
+		}
+	}
+}
+
+// handleRelayData routes one client relay frame: refresh the sender's
+// return address for the frame's channel, then (unless it is a keepalive
+// with dest 0) rewrite the header to a RelayDeliver and forward it to the
+// destination peer's return address. Only pairs introduced via peer_info
+// are forwarded, payloads are size- and rate-capped, and every drop reason
+// is counted.
+func (s *Server) handleRelayData(udpL *net.UDPConn, pkt []byte, src *net.UDPAddr, token string) {
+	channel := pkt[4+SessionTokenBytes+1]
+	dest := binary.BigEndian.Uint32(pkt[4+SessionTokenBytes+2 : 4+SessionTokenBytes+6])
+	payload := pkt[RelayDataHeaderSize:]
+	now := time.Now()
+
+	s.mu.Lock()
+	rp, ok := s.relayByToken[token]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	rp.lastSeen = now
+	srcCopy := *src
+	if channel == RelayChannelGame {
+		rp.gameAddr = &srcCopy
+	} else {
+		rp.lobbyAddr = &srcCopy
+	}
+	if dest == 0 || len(payload) == 0 {
+		// Keepalive / return-address registration only.
+		s.mu.Unlock()
+		return
+	}
+	if len(payload) > RelayMaxPayload {
+		s.relayDropped++
+		s.mu.Unlock()
+		return
+	}
+	// Per-sender rate cap.
+	if sec := now.Unix(); sec != rp.rateSec {
+		rp.rateSec = sec
+		rp.ratePkts = 0
+		rp.rateBytes = 0
+	}
+	rp.ratePkts++
+	rp.rateBytes += len(payload)
+	if rp.ratePkts > relayMaxPktsPerSec || rp.rateBytes > relayMaxBytesPerSec {
+		s.relayDropped++
+		s.mu.Unlock()
+		return
+	}
+	target, ok := s.relayPeers[dest]
+	if !ok {
+		s.relayDropped++
+		s.mu.Unlock()
+		return
+	}
+	pair, ok := s.relayPairs[relayPairKey(rp.relayID, dest)]
+	if !ok {
+		s.relayDropped++
+		s.mu.Unlock()
+		return
+	}
+	pair.lastSeen = now
+	var dst *net.UDPAddr
+	if channel == RelayChannelGame {
+		dst = target.gameAddr
+	} else {
+		dst = target.lobbyAddr
+	}
+	if dst == nil {
+		s.relayDropped++
+		s.mu.Unlock()
+		return
+	}
+	firstForward := !pair.logged
+	pair.logged = true
+	s.relayForwarded++
+	s.relayBytes += int64(len(payload))
+	srcID := rp.relayID
+	srcNick := rp.nick
+	dstNick := target.nick
+	s.mu.Unlock()
+
+	out := make([]byte, RelayDeliverHeaderSize+len(payload))
+	binary.BigEndian.PutUint32(out[0:4], s.Magic)
+	out[4] = RelayPurposeDeliver
+	out[5] = channel
+	binary.BigEndian.PutUint32(out[6:10], srcID)
+	copy(out[RelayDeliverHeaderSize:], payload)
+	udpL.WriteToUDP(out, dst)
+
+	if firstForward {
+		log.Printf("relay: first frame %s(id %d) -> %s(id %d) ch=%d len=%d",
+			srcNick, srcID, dstNick, dest, channel, len(payload))
 	}
 }
 
@@ -725,6 +1038,22 @@ func (s *Server) reapLoop() {
 				if sess.HostingGame != "" {
 					delete(s.games, sess.HostingGame)
 				}
+			}
+		}
+		// UDP relay routing state. Kept independent of sessions on purpose
+		// (in-game relayed traffic outlives the joiners' TCP sessions) and
+		// refreshed by every frame/probe, so idle really means dead.
+		peerCutoff := time.Now().Add(-relayPeerTTL)
+		for id, rp := range s.relayPeers {
+			if rp.lastSeen.Before(peerCutoff) {
+				delete(s.relayPeers, id)
+				delete(s.relayByToken, rp.token)
+			}
+		}
+		pairCutoff := time.Now().Add(-relayPairTTL)
+		for k, p := range s.relayPairs {
+			if p.lastSeen.Before(pairCutoff) {
+				delete(s.relayPairs, k)
 			}
 		}
 		// Observer relay slots that never got both attach connections.

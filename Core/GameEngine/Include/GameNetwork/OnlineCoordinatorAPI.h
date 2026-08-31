@@ -59,7 +59,8 @@ public:
 		AsciiString   map;
 		Int           players;
 		Int           maxPlayers;
-		Int           inProgress;   // 1 once the host reported game_started
+		Int           inProgress;     // 1 once the host reported game_started
+		Int           restrictedHost; // 1 once any guest failed to punch this host
 	};
 
 	struct PeerInfo
@@ -82,6 +83,11 @@ public:
 		// the peer here once the game starts.
 		UnsignedInt   gamePunchedIP;
 		UnsignedShort gamePunchedPort;
+
+		// Nonzero when the coordinator can relay traffic for this peer (both
+		// sides advertised relay support). Registered in the RelayRegistry;
+		// a failed punch flips the pair to the relay instead of failing.
+		UnsignedInt   relayID;
 	};
 
 	OnlineCoordinatorAPI();
@@ -190,6 +196,14 @@ public:
 	// "am I hosting this match?" so the caller does not have to interpret
 	// the peer_info.role string (which has cost us a debugging session).
 	Bool                             amIHost()         const { return m_amIHost; }
+	// NAT self-classification: TRUE when probes to the coordinator's two
+	// STUN ports observed different external ports (endpoint-dependent
+	// mapping = symmetric/CGNAT). Such a player is a poor host: nobody can
+	// punch them. FALSE also covers "unknown" (old server, probe lost).
+	Bool                             natLooksSymmetric() const { return m_natSymmetric == 1; }
+	// relay_grants received this session; nonzero on a host means at least
+	// one joiner could only reach us through the relay.
+	Int                              relayGrantsReceived() const { return m_relayGrantsReceived; }
 
 private:
 	State         m_state;
@@ -208,6 +222,21 @@ private:
 	AsciiString   m_version;
 
 	AsciiString   m_sessionToken;     // hex, 32 chars
+	// NAT self-check plumbing: second STUN port from hello_ok (0 = server
+	// has none), the alt-observed lobby addr, probe pacing, and the result
+	// (-1 unknown, 0 cone-like, 1 symmetric).
+	UnsignedShort m_coordUdpPort2;
+	AsciiString   m_publicAddrLobbyAlt;
+	Int           m_altProbesSent;
+	Int           m_natSymmetric;
+	Int           m_relayGrantsReceived;
+	// Our relay id from hello_ok (0 = server has no relay support, or relay
+	// disabled locally; either way the registry stays inactive and behavior
+	// is identical to pre-relay builds).
+	UnsignedInt   m_relayID;
+	// TRUE when the current punch was resolved by flipping to the relay
+	// (deadline or relay_grant) rather than by real inbound packets.
+	Bool          m_punchRelayed;
 	UnsignedInt   m_stunMagic;
 	UnsignedShort m_coordUdpPort;
 	UnsignedInt   m_coordIPNet;       // network-order, for UDP sendto
@@ -298,6 +327,12 @@ private:
 
 	// purpose: 0 = lobby, 1 = game (matches STUNPurpose* in protocol.go).
 	void  sendStunProbe(Int fd, unsigned char purpose);
+	// Same probe aimed at an arbitrary coordinator UDP port (the NAT-check
+	// second STUN port).
+	void  sendStunProbeToPort(Int fd, unsigned char purpose, UnsignedShort dstPort);
+	// NAT self-check: probe the second STUN port until answered (or give
+	// up); a different observed port than the primary means symmetric.
+	void  pumpNatCheck(UnsignedInt nowMs);
 	// Guest-to-guest mesh: fire immediate low-TTL probes at a "peer" role
 	// peer_info's lobby/game addrs from whichever sockets we still own (or
 	// via TheLAN / the game-socket stash after handoff). Outbound-first

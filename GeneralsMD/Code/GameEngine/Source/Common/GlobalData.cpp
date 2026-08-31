@@ -892,6 +892,7 @@ GlobalData::GlobalData()
 	m_coordAutoJoinName.clear();
 	m_coordAutoStart = 0;
 	m_coordPunchTTL = 4;
+	m_coordNoRelay = FALSE;
 
 	m_defaultIP = 0;
 

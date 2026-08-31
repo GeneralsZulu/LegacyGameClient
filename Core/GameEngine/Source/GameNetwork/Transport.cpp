@@ -29,6 +29,12 @@
 #include "Common/ReleaseLog.h"
 #include "GameNetwork/Transport.h"
 #include "GameNetwork/NetworkInterface.h"
+#include "GameNetwork/RelayRegistry.h"
+
+// Keep the coordinator's relay return-address for this socket fresh (and the
+// NAT mapping toward the coordinator open) while any relay-capable peer is
+// registered on our channel. Comfortably under common 30s UDP idle TTLs.
+static const UnsignedInt RELAY_KEEPALIVE_MS = 20000;
 
 
 //--------------------------------------------------------------------------
@@ -72,6 +78,8 @@ Transport::Transport()
 {
 	m_winsockInit = false;
 	m_udpsock = nullptr;
+	m_relayChannel = -1;
+	m_relayKeepaliveNextMs = 0;
 }
 
 Transport::~Transport()
@@ -262,6 +270,8 @@ void Transport::reset()
 {
 	delete m_udpsock;
 	m_udpsock = nullptr;
+	m_relayChannel = -1;
+	m_relayKeepaliveNextMs = 0;
 
 	if (m_winsockInit)
 	{
@@ -309,6 +319,37 @@ Bool Transport::doSend() {
 		m_unknownBytes[m_statisticsSlot] = 0;
 	}
 
+	// Relay keepalive: while this socket has relay-capable peers, the
+	// coordinator must always hold a fresh return address for it, or the
+	// first relayed frame of a mid-game failover has nowhere to land.
+	if (m_relayChannel >= 0 && RelayRegistry::isActive() &&
+	    RelayRegistry::anyPeerOnChannel(m_relayChannel))
+	{
+		if (m_relayKeepaliveNextMs == 0 || now >= m_relayKeepaliveNextMs)
+		{
+			unsigned char kaBuf[RelayRegistry::RELAY_DATA_HEADER_SIZE];
+			Int kaLen = 0;
+			UnsignedInt coordIP = 0;
+			UnsignedShort coordPort = 0;
+			if (RelayRegistry::buildKeepalive(m_relayChannel, kaBuf, sizeof(kaBuf), &kaLen, &coordIP, &coordPort))
+				m_udpsock->Write(kaBuf, kaLen, coordIP, coordPort);
+			m_relayKeepaliveNextMs = now + RELAY_KEEPALIVE_MS;
+			// NETPATH heartbeat: one greppable line per keepalive tick tells
+			// the test harness (and a post-mortem) which path each channel is
+			// on without decoding packets.
+			Int totalPeers = 0;
+			Int relayedPeers = 0;
+			RelayRegistry::countPeers(m_relayChannel, &totalPeers, &relayedPeers);
+			ReleaseLog("NETPATH ch=%s peers=%d relayed=%d out_pps=%d in_pps=%d",
+				m_relayChannel == RelayRegistry::CHANNEL_GAME ? "game" : "lobby",
+				totalPeers, relayedPeers,
+				(Int)getOutgoingPacketsPerSecond(), (Int)getIncomingPacketsPerSecond());
+		}
+	}
+
+	// Scratch space for relay-wrapped sends (header + encrypted packet).
+	unsigned char relayBuf[MAX_NETWORK_MESSAGE_LEN + RelayRegistry::RELAY_DATA_HEADER_SIZE];
+
 	// Send all messages
 	int i;
 	for (i=0; i<MAX_MESSAGES; ++i)
@@ -321,8 +362,38 @@ Bool Transport::doSend() {
 			// But the max network message size needs to include the bytes of the transport message header and equal the max udp payload
 			// Therefore, transmitted data needs to add the extra bytes of the network header to the payloads length
 			int bytesToSend = m_outBuffer[i].length + sizeof(TransportMessageHeader);
-			// Send this message
-			if ((bytesSent = m_udpsock->Write((unsigned char *)(&m_outBuffer[i]), bytesToSend, m_outBuffer[i].addr, m_outBuffer[i].port)) > 0)
+			// A peer flipped to relay gets the identical (encrypted) packet
+			// wrapped in a relay header and sent to the coordinator instead;
+			// the peer's shim unwraps it and sees the same bytes from our
+			// logical address. wrapForSend also owns the silence-trigger
+			// flip decision for direct peers.
+			Int relayLen = 0;
+			UnsignedInt relayIP = 0;
+			UnsignedShort relayPort = 0;
+			Bool probeDirect = FALSE;
+			if (RelayRegistry::isActive() &&
+			    RelayRegistry::wrapForSend(m_outBuffer[i].addr, m_outBuffer[i].port,
+			        (unsigned char *)(&m_outBuffer[i]), bytesToSend,
+			        relayBuf, sizeof(relayBuf), &relayLen, &relayIP, &relayPort, &probeDirect))
+			{
+				bytesSent = m_udpsock->Write(relayBuf, relayLen, relayIP, relayPort);
+				// Direct-upgrade probe: also send the plain packet to the
+				// peer. A duplicate datagram is harmless to lockstep; a
+				// delivered one is the evidence that unflips the pair.
+				if (probeDirect)
+					m_udpsock->Write((unsigned char *)(&m_outBuffer[i]), bytesToSend,
+						m_outBuffer[i].addr, m_outBuffer[i].port);
+				// Normalize for the queue/statistics logic below, which
+				// compares against the unwrapped size.
+				if (bytesSent == relayLen)
+					bytesSent = bytesToSend;
+			}
+			else
+			{
+				// Send this message
+				bytesSent = m_udpsock->Write((unsigned char *)(&m_outBuffer[i]), bytesToSend, m_outBuffer[i].addr, m_outBuffer[i].port);
+			}
+			if (bytesSent > 0)
 			{
 				m_outgoingPackets[m_statisticsSlot]++;
 				m_outgoingBytes[m_statisticsSlot] += m_outBuffer[i].length + sizeof(TransportMessageHeader);
@@ -403,6 +474,39 @@ Bool Transport::doRecv()
 			}
 		}
 #endif
+
+		// Relay shim. Frames from the coordinator's UDP port are either
+		// relayed peer packets (unwrap in place and present them as coming
+		// from the peer's logical address, so everything downstream matches
+		// the direct path) or STUN keepalive replies (drop). Any other
+		// source is a normal packet; note it so the silence trigger knows
+		// the direct path from that peer is alive.
+		if (RelayRegistry::isActive())
+		{
+			UnsignedInt   srcIPHost   = ntohl(from.sin_addr.S_un.S_addr);
+			UnsignedShort srcPortHost = ntohs(from.sin_port);
+			Int newLen = 0;
+			UnsignedInt logicalIP = 0;
+			UnsignedShort logicalPort = 0;
+			Bool dropIt = FALSE;
+			if (RelayRegistry::handleIncoming(srcIPHost, srcPortHost, buf, len,
+					&newLen, &logicalIP, &logicalPort, &dropIt))
+			{
+				if (dropIt)
+				{
+					m_unknownPackets[m_statisticsSlot]++;
+					m_unknownBytes[m_statisticsSlot] += len;
+					continue;
+				}
+				len = newLen;
+				from.sin_addr.S_un.S_addr = htonl(logicalIP);
+				from.sin_port = htons(logicalPort);
+			}
+			else
+			{
+				RelayRegistry::noteDirectRecv(srcIPHost, srcPortHost);
+			}
+		}
 
 //		DEBUG_LOG(("Transport::doRecv - Got something! len = %d", len));
 		// Decrypt the packet

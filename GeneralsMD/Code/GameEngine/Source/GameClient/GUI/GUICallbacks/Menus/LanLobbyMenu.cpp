@@ -105,6 +105,11 @@ static const Int                COORD_MAX_FAILURE_UPLOADS = 4;
 // Time requestHost() was sent, for the listing-ack watchdog below. 0 = no
 // host request outstanding.
 static UnsignedInt              s_coordHostRequestMs = 0;
+// Set from LANAPI::OnGameJoin when the host refuses a join that arrived
+// through the coordinator handoff. Drained one tick later by
+// LanLobbyMenuUpdate: the refusal is delivered from inside TheLAN->update(),
+// and the recovery deletes TheLAN.
+static Bool                     s_coordJoinRefused  = FALSE;
 
 static const char* COORD_HOST_DEFAULT = "cncstats.computersrfun.org";
 static const UnsignedShort COORD_TCP_PORT_DEFAULT = 27500;
@@ -180,6 +185,23 @@ OnlineCoordinatorAPI* LanLobbyMenuReleaseCoordinator()
 	OnlineCoordinatorAPI* c = s_coord;
 	s_coord = nullptr;
 	return c;
+}
+
+// Called from LANAPI::OnGameJoin (Core) when a join fails after the
+// coordinator already handed off to the LAN layer -- the host refused us for a
+// duplicate name, a CRC mismatch, a full game, and so on. The player is left
+// standing on this menu, but the handoff has already put the session past the
+// point where another join can be dispatched (see coordinatorRecoverFromRefusedJoin).
+// Only the actual reset is deferred; recording it is safe to do inline.
+void LanLobbyMenuCoordinatorJoinFailed( void )
+{
+	if (!s_useCoordinator || !s_coordHandoffDone || !s_coord)
+		return;
+	// Hosts never take the join path, and their handoff has already pushed
+	// the game-options screen, so this menu is not even up for them.
+	if (s_coord->amIHost())
+		return;
+	s_coordJoinRefused = TRUE;
 }
 
 // Forward declarations for the coordinator helpers; the definitions live
@@ -546,6 +568,7 @@ void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 	s_coordLastListMs = 0;
 	s_coordFailureUploads = 0;
 	s_coordHostRequestMs = 0;
+	s_coordJoinRefused = FALSE;
 	if (s_useCoordinator)
 	{
 		if (TheLAN)
@@ -948,6 +971,58 @@ static void connectCoordinatorIfNeeded()
 	}
 }
 
+// The host refused our join AFTER the coordinator handed off to TheLAN, so we
+// are back on this menu with the session wedged: s_coordHandoffDone stops
+// LanLobbyMenuUpdate from pumping the coordinator, and the pending-join
+// dispatch lives inside that pump. Clicking Join again would only queue an id
+// nobody drains, which is why the only way out used to be leaving online play
+// and coming back (LanLobbyMenuInit is the one place that clears the flag).
+//
+// Put the session back where it was before the join. The punched sockets are
+// spent either way -- the lobby one now belongs to TheLAN, the in-game one
+// sits in the static stash -- so drop both and re-run the handshake for a
+// fresh punch. This is the same shape as the join-retry and host-ack watchdog
+// paths above, which also reconnect rather than try to reuse a used session.
+static void coordinatorRecoverFromRefusedJoin()
+{
+	if (!s_coord)
+		return;
+
+	ReleaseLog("Coordinator: join refused after handoff; rebuilding the session");
+
+	// Frees UDP 8086, adopted by TheLAN at handoff; connect() below has to
+	// bind it again. Safe here (and only here): the refusal was delivered
+	// from inside TheLAN->update(), so this runs a tick later. connect()
+	// discards the stashed game socket on 8088 for us.
+	if (TheLAN)
+	{
+		delete TheLAN;
+		TheLAN = nullptr;
+	}
+
+	s_coordHandoffDone = FALSE;
+	s_coordPendingHostName.clear();
+	s_coordPendingJoinID.clear();
+	s_coordPendingObserveID.clear();
+	s_coordLastJoinID.clear();
+	s_coordJoinRetries = 0;
+	s_coordHostRequestMs = 0;
+
+	// Posted before the reconnect so a connect() that fails synchronously
+	// gets to have the last word in the chat window.
+	coordinatorPostStatus("Could not join that game. Reconnecting - you can try again in a moment.");
+
+	// disconnect() lands in STATE_IDLE, which is the state
+	// connectCoordinatorIfNeeded acts on; reaching READY again refreshes the
+	// games list, so the player can fix whatever the host objected to (their
+	// name, most often) and pick the game a second time. The new session's
+	// HELLO nick comes from the name box as it reads right now; a name typed
+	// after this point still reaches the host, which takes it from the box
+	// again at handoff time.
+	s_coord->disconnect();
+	connectCoordinatorIfNeeded();
+}
+
 static void rebuildGamesListbox()
 {
 	const std::vector<OnlineCoordinatorAPI::GameListEntry>& games = s_coord->games();
@@ -965,9 +1040,13 @@ static void rebuildGamesListbox()
 		}
 		else
 		{
-			row.format("%s   [%s]   %d/%d   %s",
+			row.format("%s   [%s]   %d/%d   %s%s",
 				g.name.str(), g.hostNick.str(), g.players, g.maxPlayers,
-				g.map.str());
+				g.map.str(),
+				// Set by the coordinator once any joiner could not punch
+				// this host: everyone connects through the relay, so the
+				// game runs with extra latency. Players can prefer another.
+				g.restrictedHost ? "   [relayed host]" : "");
 		}
 		UnicodeString u;
 		u.translate(row);
@@ -1251,6 +1330,30 @@ static void pumpCoordinator()
 					mapLeaf = leaf + 1;
 			}
 			s_coord->requestHost(u, mapLeaf, maxPlayers);
+			// NAT self-check verdict: a symmetric/CGNAT connection means no
+			// one can punch us and every joiner rides the relay. Warn once
+			// per session; hosting still proceeds (the relay carries it,
+			// just with more latency for everyone). Suppressed for the
+			// unattended -coordautohost flows, which must never block on a
+			// dialog.
+			static Bool s_warnedRestrictiveNat = FALSE;
+			if (!s_warnedRestrictiveNat && s_coord->natLooksSymmetric() &&
+				TheGlobalData->m_coordAutoHostName.isEmpty())
+			{
+				s_warnedRestrictiveNat = TRUE;
+				ReleaseLog("NATCHECK host warning shown (symmetric NAT)");
+				UnicodeString title, body;
+				title.translate(AsciiString("Restrictive Connection"));
+				body.translate(AsciiString(
+					"Your internet connection does not accept direct connections from other players, "
+					"so everyone will connect through the relay server.\n\n"
+					"You can host, but games may run smoother if another player hosts."));
+				MessageBoxOk(title, body, nullptr);
+			}
+			else if (s_coord->natLooksSymmetric())
+			{
+				ReleaseLog("NATCHECK symmetric host (warning suppressed: auto flow or already shown)");
+			}
 			s_coordPendingHostName.clear();
 			// Arm the listing-ack watchdog (never 0, which means "not armed").
 			s_coordHostRequestMs = timeGetTime();
@@ -1517,6 +1620,15 @@ void LanLobbyMenuUpdate( WindowLayout * layout, void *userData)
 
 	if (TheShell->isAnimFinished() && !LANbuttonPushed && TheLAN)
 		TheLAN->update();
+
+	// Drained here, outside TheLAN->update(), because the recovery deletes
+	// TheLAN -- which is the object whose callback raised the flag.
+	if (s_coordJoinRefused)
+	{
+		s_coordJoinRefused = FALSE;
+		coordinatorRecoverFromRefusedJoin();
+		return;
+	}
 
 	if (s_useCoordinator && s_coord && !LANbuttonPushed && !s_coordHandoffDone)
 	{

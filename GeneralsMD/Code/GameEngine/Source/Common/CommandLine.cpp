@@ -1196,6 +1196,12 @@ Int parseCoordPunchTTL(char *args[], int num)
 	return 2;
 }
 
+Int parseCoordNoRelay(char *args[], int num)
+{
+	TheWritableGlobalData->m_coordNoRelay = TRUE;
+	return 1;
+}
+
 Int parsePlayStats(char *args[], int num)
 {
 	if (num > 1)
@@ -1559,6 +1565,7 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-coordautojoin", parseCoordAutoJoin },
 	{ "-coordautostart", parseCoordAutoStart },
 	{ "-coordpunchttl", parseCoordPunchTTL },
+	{ "-norelay", parseCoordNoRelay },
 	{ "-useWaveEditor", parseUseWaveEditor },
 
 	// TheSuperHackers @feature xezon 03/08/2025 Force full viewport for 'Control Bar Pro' Addons like GenTool did it.
