@@ -17,7 +17,9 @@
 ;   Desktop and Start Menu shortcuts that launch:
 ;     <install dir>\ZuluLauncher.exe -mod Zulu.big
 ;   The launcher fetches https://storage.googleapis.com/zulu-installer/latest.json
-;   on every start, downloads a new installer if version > installed, runs it
+;   on every start, downloads the published installer whenever its version
+;   differs from the installed one (either direction, so a rollback is just an
+;   older version in latest.json), runs it
 ;   with /S /D=<install dir>, then exits. The installer's Section calls the
 ;   launcher again at the end when run silently, so an update completes with
 ;   one UAC click and no extra shortcut clicks.
