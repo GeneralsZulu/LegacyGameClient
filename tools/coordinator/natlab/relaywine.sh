@@ -23,10 +23,21 @@
 #                      and no hairpin, so only the relay can carry it.
 #                      Regression cover for the same-public-IP registry
 #                      skip that broke same-network online play.
+#   T1-HOUSE4          The 4-player game that broke on 2026-08-31: three
+#                      clients behind ONE public IP (host + a same-subnet
+#                      neighbour + one on a second subnet) plus a fourth on
+#                      its own ISP. The outsider got the countdown and then
+#                      never got MSG_GAME_START. Pass = all four in-game.
+#   T1-MIXED-WAN       A smaller cut of the same idea: a same-NAT pair (host + a
+#                      guest on a second subnet behind one router) PLUS a
+#                      third client on its own ISP. The host publishes each
+#                      joiner's slot address to everyone, so an address that
+#                      only works inside the shared NAT strands the outside
+#                      player at game start. Pass = ALL THREE in-game with
+#                      traffic flowing.
 #   T1-SAMELAN-HOSTPAIR 2 clients behind one router on separate subnets:
-#                      one public IP, distinct private IPs. Must play
-#                      fully DIRECT on both channels: cover for the
-#                      same-NAT peer rewrite and game_local_addr.
+#                      one public IP, distinct private IPs. Must connect
+#                      and play, carried by the relay.
 #
 # Artifacts land in scratchpad/relaylab-runs/<stamp>-<scenario>/.
 set -uo pipefail
@@ -93,10 +104,16 @@ case "$SCEN" in
   # worth holding the netcode to.
   T1-SAMEWAN-ISOLATED) N=2; NATTYPES=(prc);;
   # Same public IP, DIFFERENT private IPs: bob sits on a second subnet
-  # behind alice's router (two-subnet household / CGNAT block). Must play
-  # fully DIRECT on both channels -- cover for the same-NAT peer address
-  # rewrite plus the game channel's own LAN address (game_local_addr).
+  # behind alice's router (two-subnet household / CGNAT block). Plays over
+  # the relay; see the verifier note for why direct is not attempted.
   T1-SAMELAN-HOSTPAIR) N=2; NATTYPES=(prc);;
+  # Same-NAT pair + an outsider. Every other same-NAT scenario has only
+  # the pair in it, so nothing is ever there to receive a peer address
+  # that is meaningless outside the shared NAT.
+  T1-MIXED-WAN)       N=3; NATTYPES=(prc prc);;
+  # alice(host) + bob share routerA's LAN; carol is on a second subnet
+  # behind the same router; dave is on routerB, another ISP entirely.
+  T1-HOUSE4)          N=4; NATTYPES=(prc prc);;
   *) echo "unknown scenario $SCEN"; exit 1;;
 esac
 
@@ -110,8 +127,17 @@ NROUTERS=$N
 # there is exactly one router. SAMEIP puts them in one netns (same private
 # IP); SAMELAN gives the joiner its own subnet off the same router.
 [ "$SCEN" = T1-SAMEWAN-ISOLATED ] && NROUTERS=1
+[ "$SCEN" = T1-MIXED-WAN ] && NROUTERS=2
+[ "$SCEN" = T1-HOUSE4 ] && NROUTERS=2
 [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] && NROUTERS=1
-if [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] || [ "$SCEN" = T1-SAMEWAN-ISOLATED ]; then
+if [ "$SCEN" = T1-HOUSE4 ]; then
+  # SIBLING_SNAT reproduces VMware's inter-vmnet NAT: carol's packets reach
+  # alice wearing the gateway's address, not carol's. That is what turned a
+  # LAN-address rewrite into a poisoned slot in production.
+  SAMENET_ROUTER=A SIBLING_ROUTER=A SIBLING_SNAT=1 NCLIENTS=$NROUTERS \
+    "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
+elif [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] || [ "$SCEN" = T1-SAMEWAN-ISOLATED ] \
+   || [ "$SCEN" = T1-MIXED-WAN ]; then
   SIBLING_ROUTER=A NCLIENTS=$NROUTERS "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
 else
   NCLIENTS=$NROUTERS "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
@@ -144,6 +170,23 @@ for ((i=2; i<=N; i++)); do
     # bob is the sibling netns off the host's router, with the LAN path
     # between them cut: one public IP, its own private subnet, no route.
     FLEET_NETNS_OVERRIDE=A2 fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-HOUSE4 ] && [ $i -eq 2 ]; then
+    # bob shares the host's LAN segment (same subnet, same public IP).
+    FLEET_NETNS_OVERRIDE=Ab fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-HOUSE4 ] && [ $i -eq 3 ]; then
+    # carol: second subnet behind the same router, still one public IP.
+    FLEET_NETNS_OVERRIDE=A2 fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-HOUSE4 ] && [ $i -eq 4 ]; then
+    # dave: the outsider, own ISP.
+    FLEET_NETNS_OVERRIDE=B fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-MIXED-WAN ] && [ $i -eq 2 ]; then
+    # bob shares alice's public IP on his own subnet.
+    FLEET_NETNS_OVERRIDE=A2 fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-MIXED-WAN ] && [ $i -eq 3 ]; then
+    # carol is the outsider on routerB, a different ISP. Explicit override
+    # because this scenario brings up only two routers, so the default
+    # netns for client 3 (clientC) is not part of this lab.
+    FLEET_NETNS_OVERRIDE=B fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
   elif [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] && [ $i -eq 2 ]; then
     # bob is the sibling netns off the host's router: one public IP, its
     # own private subnet, so a local candidate genuinely routes.
@@ -291,38 +334,70 @@ elif scen == "T1-SAMEWAN-ISOLATED":
     for i in (1, 2):
         if "punch: no inbound packet within timeout" in logs[i]:
             fails.append(f"client{i}: punch failed outright instead of falling back to relay")
-    # The rewrite must still have fired: they share a public IP and each
-    # has a distinct LAN addr, so the peer is addressed by it even though
-    # it turns out not to route.
-    for i in (1, 2):
-        if "shares our public IP" not in logs[i]:
-            fails.append(f"client{i}: never rewrote the same-NAT peer to its LAN addr")
+    # No LAN-address assertion here on purpose: peers are addressed by
+    # their PUBLIC addrs even when they share one, because any LAN address
+    # that reaches punchedIP/gamePunchedPort ends up in the slot the host
+    # publishes to every player (production 2026-08-31: a host addressing
+    # 172.16.232.135 got replies from the gateway 172.16.28.1, stamped that
+    # into the slot, and the match died at frame 8).
+
+elif scen == "T1-HOUSE4":
+    # The outsider (client4) is the one that broke. It reached the lobby
+    # fine and took every MSG_GAME_START_TIMER, then never saw
+    # MSG_GAME_START: the other three entered the game, its inbound went to
+    # zero, and nothing recovered it (the silence trigger is game-channel
+    # only, so a dead LOBBY path has no fallback). Pass = all four actually
+    # in-game and still exchanging traffic.
+    for i in range(1, 5):
+        np = netpath(i)
+        if not np:
+            fails.append(f"client{i}: no NETPATH game lines (never reached the game)")
+        elif np[-1][3] == 0:
+            fails.append(f"client{i}: final NETPATH in_pps=0 (traffic dead)")
+    if "Match start" not in logs[4]:
+        fails.append("client4 (other ISP) never started the match")
+
+elif scen == "T1-MIXED-WAN":
+    # The whole point is the OUTSIDER. alice and bob share a public IP and
+    # can reach each other's LAN addresses; carol is on another ISP and
+    # cannot. Whatever address the host publishes for bob has to be one
+    # carol can also use, or carol never links to bob and sits at the
+    # countdown while the other two connect. The generic checks above
+    # already fail any client whose traffic is dead at soak end; this adds
+    # the specific breadcrumb.
+    for i in (1, 2, 3):
+        np = netpath(i)
+        if not np:
+            fails.append(f"client{i}: no NETPATH game lines at all (never got in-game)")
+        elif np[-1][0] < 2:
+            fails.append(f"client{i}: only {np[-1][0]} game peers (want 2)")
+    # carol must not be told to reach anyone at a private address.
+    import re as _re
+    for m in _re.finditer(r"LAN dc: peer slot \d+ game port \d+ -> \d+ \(ip=(\d+\.\d+\.\d+\.\d+)\)", logs[3]):
+        ip = m.group(1)
+        if ip.startswith("10.99.1.") or ip.startswith("10.99.101."):
+            fails.append(f"client3 (other ISP) was given a peer address inside the shared NAT: {ip}")
 
 elif scen == "T1-SAMELAN-HOSTPAIR":
-    # Two players on one network must play DIRECTLY, not pay a round trip
-    # to the relay to reach the machine next to them.
+    # Two players on one network must be able to play. They do it over the
+    # relay, and that is the deliberate contract, not a shortfall.
     #
-    # Both halves of that are load-bearing. The host hands off to TheLAN
-    # before any joiner exists, so it never punches: it only ever sends to
-    # whatever peer address it was handed, and a shared public address
-    # needs hairpin. Rewriting a same-NAT peer's punched addrs to its LAN
-    # addrs at peer_info time is what lets the host reach it, and the
-    # joiner then rekeys onto that source. The game leg needs its own LAN
-    # address (game_local_addr) or 8088 stays stuck on the public one and
-    # this pair would lobby fine and then relay in-game.
-    if fwd != 0:
-        fails.append(f"relay forwarded {fwd} packets; a same-LAN pair must be fully direct")
+    # Reaching each other directly would mean addressing a peer by its LAN
+    # address, and a peer's address does not stay local: the host stamps a
+    # joiner's slot from the join request's source and broadcasts that slot
+    # to every player (LANAPIhandlers newSlot.setIP/setPort). A LAN address
+    # published that way strands anyone outside the NAT -- see T1-MIXED-WAN,
+    # which is the regression that taught us this. Until "where I send" can
+    # be separated from "this peer's published identity", a same-NAT pair
+    # relays.
+    if fwd <= 100:
+        fails.append(f"relay forwarded only {fwd} packets (same-LAN pair should be relay-carried)")
     for i in (1, 2):
-        if relay_lines(i):
-            fails.append(f"client{i}: unexpected relay engagement: {relay_lines(i)[:2]}")
-        if any(r for (_, r, _, _) in netpath(i)):
-            fails.append(f"client{i}: NETPATH shows relayed>0 on a same-LAN pair")
-    # The rewrite must actually be what carried it, on BOTH channels.
+        if not relay_lines(i):
+            fails.append(f"client{i}: no relay engagement breadcrumb")
     for i in (1, 2):
-        if "shares our public IP" not in logs[i]:
-            fails.append(f"client{i}: never rewrote the same-NAT peer to its LAN addr")
-        if "for game" not in logs[i]:
-            fails.append(f"client{i}: game channel never took the peer's LAN addr")
+        if "punch: no inbound packet within timeout" in logs[i]:
+            fails.append(f"client{i}: punch failed outright instead of falling back to relay")
 
 elif scen == "T1-HB6":
     # Hang detector: the pass signal is simply that EVERY client got

@@ -69,7 +69,9 @@ public:
 		AsciiString   publicAddr;       // lobby (8086) "ip:port" as told by the coordinator
 		AsciiString   gamePublicAddr;   // in-game (8088) "ip:port" as told by the coordinator
 		AsciiString   localAddr;        // "ip:port" of peer's LAN interface, if any (lobby side)
-		AsciiString   gameLocalAddr;    // same interface, peer's in-game (8088) bind port
+		// Same interface, peer's in-game (8088) bind port. Exchanged but
+		// deliberately NOT punched or adopted: see the note in pumpPunch.
+		AsciiString   gameLocalAddr;
 		Int           punchInMS;
 		AsciiString   role;             // "host" or "guest" relative to the peer (i.e. our role)
 

@@ -1375,13 +1375,17 @@ void OnlineCoordinatorAPI::pumpPunch(UnsignedInt nowMs)
 		if (!m_punchOkLobby)
 			blastPunchPacketsOn(m_udpFdLobby, m_peerInfo.publicAddr, m_peerInfo.localAddr);
 		if (!m_punchOkGame)
-			// The game channel gets a local candidate too. Without one it
-			// could only ever reach a same-NAT peer by hairpinning off the
-			// shared public address, so a pair that punched the lobby fine
-			// over the LAN still lost 8088 and died at game start. Peers on
-			// an older build send no game_local_addr; this is then empty and
-			// the helper fires the public candidate alone, as before.
-			blastPunchPacketsOn(m_udpFdGame, m_peerInfo.gamePublicAddr, m_peerInfo.gameLocalAddr);
+			// Public candidate only, deliberately. A LAN candidate here
+			// would work, and that is the problem: punch evidence rekeys
+			// gamePunchedPort to whatever answered, the host stamps that
+			// into the joiner's slot (LANAPIhandlers, newSlot.setPort) and
+			// then broadcasts the slot to EVERY player. A LAN port is
+			// meaningless to anyone outside that NAT, so a third player on
+			// another network is handed an address it can never reach and
+			// hangs at game start. Same reason the peer's punched addrs are
+			// not rewritten to its LAN addrs on arrival. A same-NAT pair
+			// reaches each other through the relay instead.
+			blastPunchPacketsOn(m_udpFdGame, m_peerInfo.gamePublicAddr, AsciiString::TheEmptyString);
 		m_punchNextBlastMs = nowMs + PUNCH_BLAST_INTERVAL_MS;
 	}
 }
@@ -1925,66 +1929,6 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 		parseHostOrderIpPort(p.publicAddr,     &p.punchedIP,     &p.punchedPort);
 		parseHostOrderIpPort(p.gamePublicAddr, &p.gamePunchedIP, &p.gamePunchedPort);
 		parseUInt32Field(obj, "relay_id", &p.relayID);
-
-		// Same-NAT peer: address it by its LAN address, not the shared
-		// public one.
-		//
-		// punchedIP/punchedPort are what everything downstream treats as
-		// "where this peer is": the host plumbs them into TheLAN
-		// (setDirectConnectGamePortForPeer, sendNATProbeLowTTL, the lobby
-		// keepalives, addStashedGamePeer), the joiner hands them to
-		// RequestGameJoinDirectConnect, and they key the relay registry.
-		// When they carry OUR OWN public address, every one of those sends
-		// needs NAT hairpin, which is why a same-network pair could never
-		// reach each other directly: the host never punches (it hands off
-		// to TheLAN before a joiner exists), so the joiner heard nothing
-		// back and timed out. Rewriting here fixes all of those consumers
-		// at once, and keeps the LAN layer's (IP, port) identity coherent
-		// with the registry rather than splitting it across two addresses.
-		//
-		// The punch itself is unaffected: it blasts the publicAddr and
-		// localAddr STRINGS, and rekeys punchedIP to whatever source
-		// actually answers. Per channel, because a peer on an older build
-		// sends no game_local_addr and its game leg must stay public.
-		// Never when the peer's private IP is our own -- that is the same
-		// machine or same netns, where the local candidate is self (see
-		// blastPunchPacketsOn) and only the relay can carry the pair.
-		// If the LAN address turns out not to route either (split subnets
-		// that cannot reach each other), the punch still fails and the
-		// relay grant flips this same entry: delivery goes by relay id, so
-		// a registry keyed on the LAN address relays perfectly well.
-		{
-			UnsignedInt myPublicIP = 0;
-			UnsignedInt myLocalIP  = 0;
-			parseHostOrderIpPort(m_publicAddrLobby, &myPublicIP, NULL);
-			parseHostOrderIpPort(m_localAddr,       &myLocalIP,  NULL);
-
-			UnsignedInt   locIP = 0, gLocIP = 0;
-			UnsignedShort locPt = 0, gLocPt = 0;
-			parseHostOrderIpPort(p.localAddr,     &locIP,  &locPt);
-			parseHostOrderIpPort(p.gameLocalAddr, &gLocIP, &gLocPt);
-
-			const Bool sameNat  = (myPublicIP != 0 && p.punchedIP == myPublicIP);
-			const Bool locUsable = (locIP != 0 && locIP != myLocalIP);
-
-			if (sameNat && locUsable)
-			{
-				if (locPt != 0)
-				{
-					ReleaseLog("Coordinator: %s shares our public IP; using its LAN addr %u.%u.%u.%u:%u for lobby",
-						p.nick.str(), PRINTF_IP_AS_4_INTS(locIP), locPt);
-					p.punchedIP   = locIP;
-					p.punchedPort = locPt;
-				}
-				if (gLocIP != 0 && gLocPt != 0 && gLocIP == locIP)
-				{
-					ReleaseLog("Coordinator: %s shares our public IP; using its LAN addr %u.%u.%u.%u:%u for game",
-						p.nick.str(), PRINTF_IP_AS_4_INTS(gLocIP), gLocPt);
-					p.gamePunchedIP   = gLocIP;
-					p.gamePunchedPort = gLocPt;
-				}
-			}
-		}
 
 		// Register the peer with the relay registry (starting direct), so a
 		// grant, sticky flip, or silence trigger can later reroute the pair.
