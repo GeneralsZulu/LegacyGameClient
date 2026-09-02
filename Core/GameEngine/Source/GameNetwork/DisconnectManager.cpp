@@ -33,6 +33,7 @@
 #include "GameNetwork/DisconnectManager.h"
 #include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/networkutil.h"
+#include "GameNetwork/RelayRegistry.h"
 #include "GameNetwork/GameSpy/PingThread.h"
 #include "GameNetwork/GameSpy/GSConfig.h"
 
@@ -580,6 +581,9 @@ void DisconnectManager::disconnectPlayer(Int slot, ConnectionManager *conMgr) {
 		if (gSlot)
 		{
 			gSlot->markAsDisconnected();
+			// Gone for good: stop the relay layer from flipping to, or
+			// keeping alive, a peer who has left (T1-PEER-LEAVE).
+			RelayRegistry::forgetPeerByAddr(gSlot->getIP(), gSlot->getPort());
 		}
 	}
 

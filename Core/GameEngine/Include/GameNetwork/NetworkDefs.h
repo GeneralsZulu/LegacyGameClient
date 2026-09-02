@@ -45,6 +45,22 @@ extern Int CATCHUP_FRAME_RATE;
 extern Int FRAME_DATA_LENGTH;
 extern Int FRAMES_TO_KEEP;
 
+// --- Lockstep resilience tuning ----------------------------------------------
+// Defaults and rationale live in NetworkUtil.cpp. -netlegacy restores the
+// retail timing (fixed 2s retry, mean-latency run-ahead, no hysteresis) so a
+// lab run can A/B the two on the same network shape.
+extern Bool NET_LEGACY_TIMING;
+extern Int NET_RETRY_MIN_MS;
+extern Int NET_RETRY_MAX_MS;
+extern Int NET_RETRY_DEFAULT_MS;
+extern Int NET_SEND_INTERVAL_MAX_MS;
+extern Int NET_RUNAHEAD_LAT_PERCENTILE;
+extern Int NET_RUNAHEAD_JITTER_CAP_MS;
+extern Int NET_RUNAHEAD_DECAY_TICKS;
+extern Int NET_STATS_INTERVAL_MS;
+extern Int NET_HITCH_MS;
+extern Int NET_STALL_LOG_MS;
+
 // This is the connection numbering: 1-8 are for players
 enum ConnectionNumbers CPP_11(: Int)
 {

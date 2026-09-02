@@ -45,6 +45,7 @@ public:
 	UnsignedInt getFrame();
 	void setFrame(UnsignedInt frame);
 	FrameDataReturnType allCommandsReady(Bool debugSpewage);
+	Bool isReady() const { return m_frameCommandCount == m_commandCount; }	///< Side-effect-free readiness, for telemetry.
 	NetCommandList * getCommandList();
 	void setFrameCommandCount(UnsignedInt totalCommandCount);
 	UnsignedInt getFrameCommandCount();

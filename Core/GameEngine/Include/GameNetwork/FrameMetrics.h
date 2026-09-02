@@ -42,6 +42,8 @@ public:
 	void addCushion(Int cushion);
 
 	Real getAverageLatency();
+	Real getRunAheadLatency(Real batchSec);	///< Latency to size run-ahead from: mean plus jitter beyond what packet batching explains, capped (seconds).
+	Real getLatencyPercentile(Int pct);	///< Percentile of the latency history, in seconds.
 	Int getAverageFPS();
 	Int getMinimumCushion();
 
@@ -56,6 +58,7 @@ protected:
 	// round trip time to packet router variables.
 	// The lists are indexed off the frame number of the frame info packet they are associated with.
 	// The index used should be the frame number mod the array length.
+	Real *m_latencyScratch;		///< Sort scratch for getLatencyPercentile, same length as m_latencyList.
 	Real *m_latencyList;				///< A record of the round trip latencies of the frame info packets to the packet router.  Values in seconds.
 	time_t *m_pendingLatencies;																///< The latencies of frame info packets that are "in the air."
 	Real m_averageLatency;																		///< The current average latency, this is used to save calculation time.

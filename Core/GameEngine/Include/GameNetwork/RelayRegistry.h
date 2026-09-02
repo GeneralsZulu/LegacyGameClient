@@ -162,4 +162,9 @@ public:
 	// and rekeys the punch peer's entry to the sibling's port (seen live in
 	// T2-FULL8, c1/c2 behind one Cloud NAT IP).
 	static Bool isOtherPeerAddr(UnsignedInt relayID, UnsignedInt ipHost, UnsignedShort portHost);
+
+	// A player has been dropped for good (DisconnectManager): remove every
+	// entry for that peer so the silence trigger stops flipping, and the
+	// keepalive stops chasing, someone who will never answer.
+	static void forgetPeerByAddr(UnsignedInt ipHost, UnsignedShort portHost);
 };

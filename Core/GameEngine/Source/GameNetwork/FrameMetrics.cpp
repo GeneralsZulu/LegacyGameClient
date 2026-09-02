@@ -32,6 +32,7 @@
 #include "Common/Recorder.h"
 #include "GameClient/Display.h"
 #include "GameNetwork/networkutil.h"
+#include <algorithm>
 
 FrameMetrics::FrameMetrics()
 {
@@ -47,6 +48,7 @@ FrameMetrics::FrameMetrics()
 		m_pendingLatencies[i] = 0;
 	m_fpsList = NEW Real[TheGlobalData->m_networkFPSHistoryLength];
 	m_latencyList = NEW Real[TheGlobalData->m_networkLatencyHistoryLength];
+	m_latencyScratch = NEW Real[TheGlobalData->m_networkLatencyHistoryLength];
 }
 
 FrameMetrics::~FrameMetrics() {
@@ -55,6 +57,9 @@ FrameMetrics::~FrameMetrics() {
 
 	delete m_latencyList;
 	m_latencyList = nullptr;
+
+	delete[] m_latencyScratch;
+	m_latencyScratch = nullptr;
 
 	delete[] m_pendingLatencies;
 	m_pendingLatencies = nullptr;
@@ -147,6 +152,52 @@ Int FrameMetrics::getAverageFPS() {
 
 Real FrameMetrics::getAverageLatency() {
 	return m_averageLatency;
+}
+
+Real FrameMetrics::getLatencyPercentile(Int pct) {
+	const Int n = TheGlobalData->m_networkLatencyHistoryLength;
+	if (n <= 0) {
+		return m_averageLatency;
+	}
+	memcpy(m_latencyScratch, m_latencyList, n * sizeof(Real));
+	std::sort(m_latencyScratch, m_latencyScratch + n);
+	Int idx = (n * pct) / 100;
+	if (idx < 0) {
+		idx = 0;
+	}
+	if (idx > n - 1) {
+		idx = n - 1;
+	}
+	return m_latencyScratch[idx];
+}
+
+/**
+ * The mean is blind to jitter: a link that averages 80ms but spikes to 300ms
+ * every few seconds gets a window sized for 80ms and stalls on every spike.
+ * So add the spread between the mean and a high percentile of the history.
+ *
+ * Two guards keep this from feeding on itself. Packets go out every
+ * batchSec (the frame grouping, itself derived from run-ahead), so every
+ * sample already carries up to a batch interval of random wait at each end;
+ * that spread is subtracted before it counts as jitter, otherwise a bigger
+ * window makes bigger "jitter" and run-ahead ratchets to its cap even on a
+ * perfect LAN (T1-BASELINE went to 18 frames). And the allowance is capped
+ * at NET_RUNAHEAD_JITTER_CAP_MS so a few retry-inflated samples cannot buy
+ * the whole game a second of input lag.
+ */
+Real FrameMetrics::getRunAheadLatency(Real batchSec) {
+	if (NET_LEGACY_TIMING) {
+		return m_averageLatency;
+	}
+	Real spread = getLatencyPercentile(NET_RUNAHEAD_LAT_PERCENTILE) - m_averageLatency - batchSec;
+	if (spread < 0.0f) {
+		spread = 0.0f;
+	}
+	const Real cap = (Real)NET_RUNAHEAD_JITTER_CAP_MS / 1000.0f;
+	if (spread > cap) {
+		spread = cap;
+	}
+	return m_averageLatency + spread;
 }
 
 Int FrameMetrics::getMinimumCushion() {
