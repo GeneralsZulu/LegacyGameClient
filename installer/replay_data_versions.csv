@@ -84,6 +84,7 @@ version,1.5.8,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
 version,1.5.9,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
 version,1.5.10,Zulu_v1.5.7.big,8f9f0c0ad,same assets as 1.5.7
 version,1.6.0,@default,,community balance patch 1.0.1 data
+version,1.6.1,@default,,same assets as 1.6.0
 inicrc,FEAAE3F3,@none,,retail 1.04 base data
 inicrc,20D46EAB,@none,,retail "1.06" client base data
 inicrc,D78B2801,Zulu_v1.1.0.big,1cf50c255a6804d04301256bd587f03f45ca8db0,dev build with v1.1.0 assets (verified)
