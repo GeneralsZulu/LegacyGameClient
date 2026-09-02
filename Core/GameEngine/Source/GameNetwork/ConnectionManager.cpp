@@ -324,6 +324,11 @@ void ConnectionManager::init()
 		m_latencyAverages[i] = 0.0; // using zero since all floating point standards should be able to specify 0.0 accurately.
 	}
 	m_smallestPacketArrivalCushion = -1;
+	m_lastSentRunAhead = 0;
+	m_runAheadLowerTicks = 0;
+	m_frameGroupingMs = 0;
+	m_lastStallLogMs = 0;
+	resetNetStats();
 
 	m_frameMetrics.init();
 
@@ -665,11 +670,15 @@ Bool ConnectionManager::processNetCommand(NetCommandRef *ref) {
 }
 
 void ConnectionManager::processFrameResendRequest(NetFrameResendRequestCommandMsg *msg) {
+	++m_netStats.resendReqRx;
 	// first make sure this is a valid slot
 	const UnsignedInt playerID = msg->getPlayerID();
 	if (playerID >= MAX_SLOTS) {
 		return;
 	}
+	// Rare by design, so no rate limit: a resend request means a peer's copy
+	// of a frame was inconsistent and it is waiting on us to rebuild it.
+	ReleaseLog("NETRESEND serving slot=%u frames %u..%u", playerID, msg->getFrameToResend(), TheGameLogic->getFrame());
 
 	// make sure this player is still in our game.
 	if ((m_connections[playerID] == nullptr) || (m_connections[playerID]->isQuitting() == TRUE)) {
@@ -1411,7 +1420,7 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 	if ((lasttimesent == 0) || ((curTime - lasttimesent) > (UnsignedInt)TheGlobalData->m_networkRunAheadMetricsTime)) {
 		if (m_localSlot == m_packetRouterSlot) {
 			// We are the packet router, time to compute a new run ahead for this game.
-			m_latencyAverages[m_localSlot] = m_frameMetrics.getAverageLatency();
+			m_latencyAverages[m_localSlot] = m_frameMetrics.getRunAheadLatency((Real)m_frameGroupingMs / 1000.0f);
 
 			// since we are now using the display frame rate rather than the logic frame rate to get our average FPS,
 			// it doesn't make sense to send the desired logic frame rate if we "slugged" ourself.
@@ -1477,6 +1486,26 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 			if (pinCatchupRates) {
 				newRunAhead = CATCHUP_RUNAHEAD;
 				minFps      = CATCHUP_FRAME_RATE; // -> (1000*32)/(1000*2) = 16ms send interval
+				m_lastSentRunAhead = 0;
+				m_runAheadLowerTicks = 0;
+			} else if (!NET_LEGACY_TIMING) {
+				// Hysteresis: go up at once, come down only after the lower value
+				// has held for NET_RUNAHEAD_DECAY_TICKS ticks, then all the way
+				// to it. Without this a link that hovers around a frame boundary
+				// flips the whole game's window every 500ms; with a slower decay
+				// a transient stall's inflated samples cost input lag for minutes.
+				if (m_lastSentRunAhead > 0) {
+					if (newRunAhead < m_lastSentRunAhead) {
+						if (++m_runAheadLowerTicks >= NET_RUNAHEAD_DECAY_TICKS) {
+							m_runAheadLowerTicks = 0;
+						} else {
+							newRunAhead = m_lastSentRunAhead;
+						}
+					} else {
+						m_runAheadLowerTicks = 0;
+					}
+				}
+				m_lastSentRunAhead = newRunAhead;
 			}
 
 			NetRunAheadCommandMsg *msg = newInstance(NetRunAheadCommandMsg);
@@ -1562,7 +1591,9 @@ void ConnectionManager::updateRunAhead(Int oldRunAhead, Int frameRate, Bool didS
 			if (DoesCommandRequireACommandID(msg->getNetCommandType())) {
 				msg->setID(GenerateNextCommandID());
 			}
-			msg->setAverageLatency(m_frameMetrics.getAverageLatency());
+			// Reported in the retail "average" field: a jitter-aware value on
+			// purpose, so an old router simply sees a slightly higher average.
+			msg->setAverageLatency(m_frameMetrics.getRunAheadLatency((Real)m_frameGroupingMs / 1000.0f));
 
 			// see above for explanation.
 //			if (didSelfSlug) {
@@ -1906,6 +1937,7 @@ NetCommandList *ConnectionManager::getFrameCommandList(UnsignedInt frame)
 }
 
 void ConnectionManager::setFrameGrouping(time_t frameGrouping) {
+	m_frameGroupingMs = (Int)frameGrouping;
 	// Since we are the packet router, we should send more packets per second since we
 	// may become the latency bottleneck for sending packets from one player to the next.
 	// This is probably ok since the packet router should have the fastest connection of all
@@ -2703,6 +2735,8 @@ UnsignedInt ConnectionManager::getNextPacketRouterSlot(UnsignedInt playerID) {
 }
 
 void ConnectionManager::requestFrameDataResend(Int playerID, UnsignedInt frame) {
+	++m_netStats.resendReqTx;
+	ReleaseLog("NETRESEND requesting frame=%u from slot=%d (frame data inconsistent)", frame, playerID);
 	NetFrameResendRequestCommandMsg *msg = newInstance(NetFrameResendRequestCommandMsg);
 	msg->setPlayerID(m_localSlot);
 	msg->setFrameToResend(frame);
@@ -2722,4 +2756,107 @@ void ConnectionManager::requestFrameDataResend(Int playerID, UnsignedInt frame) 
 	}
 
 	msg->detach();
+}
+
+// -----------------------------------------------------------------------------
+// Lockstep health telemetry.
+//
+// Nothing in the lockstep layer wrote to ReleaseLog before this, so a match
+// that "felt choppy" left no trace: no stall, no retry, no run-ahead change.
+// One NETSTAT line every NET_STATS_INTERVAL_MS while in-game, plus a NETSTALL
+// line for any single wait past NET_STALL_LOG_MS. Kept deliberately small.
+// -----------------------------------------------------------------------------
+void ConnectionManager::resetNetStats() {
+	memset(&m_netStats, 0, sizeof(m_netStats));
+}
+
+UnsignedInt ConnectionManager::getNotReadyMask(UnsignedInt frame) {
+	UnsignedInt mask = 0;
+	for (Int i = 0; i < MAX_SLOTS; ++i) {
+		if ((m_frameData[i] != nullptr) && (m_frameData[i]->getIsQuitting() == FALSE)) {
+			if (!m_frameData[i]->isFrameReady(frame)) {
+				mask |= (1 << i);
+			}
+		}
+	}
+	return mask;
+}
+
+void ConnectionManager::noteStall(UnsignedInt frame, UnsignedInt durationMs, UnsignedInt notReadyMask) {
+	++m_netStats.stallCount;
+	m_netStats.stallMs += durationMs;
+	if (durationMs > m_netStats.stallMaxMs) {
+		m_netStats.stallMaxMs = durationMs;
+	}
+	for (Int i = 0; i < MAX_SLOTS; ++i) {
+		if (notReadyMask & (1 << i)) {
+			++m_netStats.stallOn[i];
+		}
+	}
+	if (durationMs >= (UnsignedInt)NET_STALL_LOG_MS) {
+		const UnsignedInt now = timeGetTime();
+		if ((m_lastStallLogMs == 0) || ((now - m_lastStallLogMs) >= 5000)) {
+			m_lastStallLogMs = now;
+			ReleaseLog("NETSTALL frame=%u waited=%ums on=0x%02x", frame, durationMs, notReadyMask);
+		}
+	}
+}
+
+void ConnectionManager::noteHitch(UnsignedInt gapMs) {
+	++m_netStats.hitchCount;
+	if (gapMs > m_netStats.hitchMaxMs) {
+		m_netStats.hitchMaxMs = gapMs;
+	}
+}
+
+void ConnectionManager::emitNetStats(UnsignedInt frame, Int runAhead, Int frameRate) {
+	// links=[slot:resends/srttms ...] one entry per live connection.
+	char links[160];
+	Int len = 0;
+	links[0] = 0;
+	Int i;
+	for (i = 0; i < MAX_SLOTS && len < (Int)sizeof(links) - 16; ++i) {
+		if (m_connections[i] == nullptr) {
+			continue;
+		}
+		// slot:retries+repeats/srttms. Retries fired the adaptive timer
+		// (probable loss); repeats are the deliberate per-packet frame-info
+		// redundancy and are normal whenever the RTT exceeds the send interval.
+		len += snprintf(links + len, sizeof(links) - len, "%s%d:%d+%d/%d",
+			len ? " " : "", i, m_connections[i]->takeResendCount(), m_connections[i]->takeRedundantCount(),
+			m_connections[i]->getSmoothedRttMs());
+	}
+	// on=[slot:stalls ...] which peers we were waiting on when a stall began.
+	char on[96];
+	len = 0;
+	on[0] = 0;
+	for (i = 0; i < MAX_SLOTS && len < (Int)sizeof(on) - 12; ++i) {
+		if (m_netStats.stallOn[i] == 0) {
+			continue;
+		}
+		len += snprintf(on + len, sizeof(on) - len, "%s%d:%u", len ? " " : "", i, m_netStats.stallOn[i]);
+	}
+	// peers=[slot:reportedms ...] only the packet router knows these.
+	char peers[128];
+	len = 0;
+	peers[0] = 0;
+	if (m_localSlot == m_packetRouterSlot) {
+		for (i = 0; i < MAX_SLOTS && len < (Int)sizeof(peers) - 12; ++i) {
+			if ((i == (Int)m_localSlot) || !isPlayerConnected(i)) {
+				continue;
+			}
+			len += snprintf(peers + len, sizeof(peers) - len, "%s%d:%d", len ? " " : "", i, (Int)(m_latencyAverages[i] * 1000.0f));
+		}
+	}
+	ReleaseLog("NETSTAT frame=%u ra=%d fps=%d router=%d lat=%d/%d links=[%s] stall=%u/%ums/max%u on=[%s] hitch=%u/max%u rreq=%u/%u peers=[%s]",
+		frame, runAhead, frameRate, (Int)m_packetRouterSlot,
+		(Int)(m_frameMetrics.getAverageLatency() * 1000.0f),
+		(Int)(m_frameMetrics.getRunAheadLatency((Real)m_frameGroupingMs / 1000.0f) * 1000.0f),
+		links,
+		m_netStats.stallCount, m_netStats.stallMs, m_netStats.stallMaxMs,
+		on,
+		m_netStats.hitchCount, m_netStats.hitchMaxMs,
+		m_netStats.resendReqTx, m_netStats.resendReqRx,
+		peers);
+	resetNetStats();
 }

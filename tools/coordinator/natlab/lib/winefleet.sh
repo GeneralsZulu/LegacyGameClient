@@ -83,6 +83,8 @@ fleet_releaselog_i() {
 
 # fleet_launch <index> <nick> <extra flags...>  (extra: -coordautohost NAME
 # -coordautostart N | -coordautojoin NAME -coordautostart N, -norelay, ...)
+# FLEET_EXTRA (a string) is appended to every launch: scenario-wide flags
+# such as -netlegacy.
 # FLEET_NETNS_OVERRIDE (a letter) launches this client inside ANOTHER
 # client's netns: the same-public-IP household pattern (ephemeral-port
 # fallback handles the port clash, per WINE-CLIENTS.md's eve).
@@ -98,8 +100,18 @@ fleet_launch() {
     DISPLAY=:9$i WINEPREFIX="$FLEET_BASE/pref$L" WINEDEBUG=-all WINEDLLOVERRIDES=d3d8=b \
     sh -c "cd $FLEET_BASE/game$L && nohup wine explorer /desktop=nat$L,1024x768 ./generalszh.exe \
       -win -quickstart -noaudio -mod 'Z:\\tmp\\natlab\\game$L\\Zulu.big' \
-      -coordhost $COORD_ADDR -coordnick $NICK -coordpunchttl 2 $* \
+      -coordhost $COORD_ADDR -coordnick $NICK -coordpunchttl 2 $* ${FLEET_EXTRA:-} \
       > $FLEET_BASE/$NICK.log 2>&1 &"
+}
+
+# fleet_kill_one <index>  -- terminate exactly one client, leaving the rest
+# running. Models a player quitting or alt-F4'ing mid match: the process
+# disappears without any leave message, which is the case survivors have to
+# cope with. Kills that prefix's wineserver, which takes the game with it.
+fleet_kill_one() {
+  local L
+  L=$(fleet_letter $1)
+  WINEPREFIX="$FLEET_BASE/pref$L" wineserver -k >/dev/null 2>&1 || true
 }
 
 fleet_kill() {

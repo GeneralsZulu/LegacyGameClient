@@ -61,6 +61,8 @@ public:
 
 	time_t getTimeLastSent() const;
 	void setTimeLastSent(time_t timeLastSent);
+	time_t getTimeFirstSent() const;
+	void setTimeFirstSent(time_t timeFirstSent);
 
 protected:
 	NetCommandMsg *m_msg;
@@ -68,6 +70,7 @@ protected:
 	NetCommandRef *m_prev;
 	UnsignedByte m_relay; ///< Need this in the command reference since the relay value will be different depending on where this particular reference is being sent.
 	time_t m_timeLastSent;
+	time_t m_timeFirstSent;	///< -1 until the first send; RTT samples measure from here so a retry can never shrink the estimate.
 
 #ifdef DEBUG_NETCOMMANDREF
 	UnsignedInt m_id;
@@ -136,6 +139,16 @@ inline time_t NetCommandRef::getTimeLastSent() const
 inline void NetCommandRef::setTimeLastSent(time_t timeLastSent)
 {
 	m_timeLastSent = timeLastSent;
+}
+
+inline time_t NetCommandRef::getTimeFirstSent() const
+{
+	return m_timeFirstSent;
+}
+
+inline void NetCommandRef::setTimeFirstSent(time_t timeFirstSent)
+{
+	m_timeFirstSent = timeFirstSent;
 }
 
 /**

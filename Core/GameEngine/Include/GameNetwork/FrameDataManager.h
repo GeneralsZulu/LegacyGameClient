@@ -41,6 +41,7 @@ public:
 	void addNetCommandMsg(NetCommandMsg *msg);
 	void setIsLocal(Bool isLocal);
 	FrameDataReturnType allCommandsReady(UnsignedInt frame, Bool debugSpewage);
+	Bool isFrameReady(UnsignedInt frame);	///< Side-effect-free readiness, for telemetry.
 	NetCommandList * getFrameCommandList(UnsignedInt frame);
 	UnsignedInt getCommandCount(UnsignedInt frame);
 	void setFrameCommandCount(UnsignedInt frame, UnsignedInt commandCount);

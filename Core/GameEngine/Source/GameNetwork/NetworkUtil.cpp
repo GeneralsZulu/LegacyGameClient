@@ -44,6 +44,50 @@ Int FRAMES_TO_KEEP = (MAX_FRAMES_AHEAD/2) + 1;
 Int CATCHUP_RUNAHEAD = 32;
 Int CATCHUP_FRAME_RATE = 1000;
 
+// --- Lockstep resilience tuning ----------------------------------------------
+// Every command that needs an ack used to be retried on a fixed 2s timer, so
+// one lost packet carrying frame data froze the whole lockstep game for up to
+// two seconds. Retries now follow a per-connection RTT estimate (TCP-style
+// SRTT + 4*RTTVAR, clamped), and frame-info commands, which gate every frame
+// and repeat-code down to a couple of bytes, ride in every packet until acked.
+Bool NET_LEGACY_TIMING = FALSE;
+Int NET_RETRY_MIN_MS = 60;
+Int NET_RETRY_MAX_MS = 2000;      // the retail value; also the ceiling now
+Int NET_RETRY_DEFAULT_MS = 300;   // until the first ack sample arrives
+
+// The packet send interval is derived from run-ahead (Network::
+// processRunAheadCommand: 1000*runAhead/frameRate/2, retail cap 500ms), a
+// dial-up era bandwidth economy. It is also the floor on how fast a lost
+// packet's frame info can be repeated, and every sample of measured latency
+// carries up to one interval of batching wait at each end, so a large
+// run-ahead makes a long interval makes a high latency makes a larger
+// run-ahead (T1-LOSSY: 35 frames, 583ms interval, 928ms worst stall). Cap
+// it. At ~100-300 bytes per packet 10 pps per link is nothing.
+Int NET_SEND_INTERVAL_MAX_MS = 100;
+
+// Run-ahead used to be sized from MEAN round-trip latency, which is blind to
+// jitter: a link averaging 80ms with 300ms spikes got a 133ms window and
+// stalled on every spike. Each client now reports a high percentile of its
+// latency history (capped at mean + JITTER_CAP so one retry-inflated sample
+// cannot buy a second of input lag), and the router only lowers run-ahead
+// after the lower value has held for DECAY_TICKS metrics ticks (500ms each).
+// Short on purpose: a map-load or disconnect stall inflates every latency
+// sample taken during it, run-ahead jumps, and holding that for long is a
+// second of input lag for the rest of the match (T1-HOUSE4 sat at 38
+// frames for a whole soak with a slow 1-frame-per-10s decay).
+Int NET_RUNAHEAD_LAT_PERCENTILE = 95;
+Int NET_RUNAHEAD_JITTER_CAP_MS = 250;
+Int NET_RUNAHEAD_DECAY_TICKS = 6;
+
+// ReleaseLog telemetry: one NETSTAT line per interval while in-game, a
+// NETSTALL line for any single wait past STALL_LOG_MS (rate limited), and a
+// "hitch" counter for gaps between consecutive Network::update calls, which
+// is the main thread not turning at all (blocked call, frozen machine) as
+// opposed to a stall, which is the sim waiting on a peer's frame data.
+Int NET_STATS_INTERVAL_MS = 10000;
+Int NET_HITCH_MS = 200;
+Int NET_STALL_LOG_MS = 500;
+
 #ifdef DEBUG_LOGGING
 
 void dumpBufferToLog(const void *vBuf, Int len, const char *fname, Int line)

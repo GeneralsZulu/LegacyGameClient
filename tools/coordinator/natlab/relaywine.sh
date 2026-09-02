@@ -23,6 +23,20 @@
 #                      and no hairpin, so only the relay can carry it.
 #                      Regression cover for the same-public-IP registry
 #                      skip that broke same-network online play.
+#   T1-SYMGUEST        Reproduction attempt for the 2026-09-01 report: one
+#                      player on a symmetric NAT (like CDwg) cannot punch
+#                      anyone, so ALL of his links relay while everyone
+#                      else stays direct. Production showed the whole game
+#                      dropping from ~29 to ~26-27 effective fps whenever
+#                      that player was in it. Prints effective fps per
+#                      client; compare against T1-BASELINE (same 3 clients,
+#                      all prc, all direct).
+#   T1-PEER-LEAVE      3 clients, all prc, all direct. Mid match one GUEST
+#                      is killed outright, the way a player alt-F4s: no
+#                      leave message, the process just stops. The two
+#                      survivors must keep playing, must notice the peer is
+#                      gone, and must not keep spending relay flips trying
+#                      to reach a player who has left.
 #   T1-HOUSE4          The 4-player game that broke on 2026-08-31: three
 #                      clients behind ONE public IP (host + a same-subnet
 #                      neighbour + one on a second subnet) plus a fourth on
@@ -38,6 +52,17 @@
 #   T1-SAMELAN-HOSTPAIR 2 clients behind one router on separate subnets:
 #                      one public IP, distinct private IPs. Must connect
 #                      and play, carried by the relay.
+#   T1-LOSSY           3 clients, all prc, all direct, but carol's uplink is
+#                      impaired with netem (3% loss, 40ms +/-15ms jitter,
+#                      each direction): the "one player on a bad link"
+#                      shape behind the 2026-09-01 freeze reports. With a
+#                      fixed 2s retry every lost frame-data packet froze
+#                      the whole lockstep. Asserts the sim keeps its rate
+#                      and no single stall exceeds a second, and reports
+#                      the NETSTAT telemetry (stalls, resends, run-ahead).
+#   T1-LOSSY-LEGACY    Same shape with -netlegacy on every client (retail
+#                      2s retry, mean-latency run-ahead). Measurement only:
+#                      the A/B reference for T1-LOSSY.
 #
 # Artifacts land in scratchpad/relaylab-runs/<stamp>-<scenario>/.
 set -uo pipefail
@@ -75,6 +100,15 @@ case "$SCEN" in
   T1-BASELINE)        N=3; NATTYPES=(prc prc prc);;
   T1-FORCED-HOSTPAIR) N=2; NATTYPES=(prc blk);;
   T1-MIDGAME-DEATH)   N=3; NATTYPES=(prc prc prc);;
+  T1-PEER-LEAVE)      N=3; NATTYPES=(prc prc prc);;
+  # carol's uplink is impaired after shaping (see below); everyone stays
+  # direct, so what is measured is the lockstep's tolerance of loss and
+  # jitter on one link, not the relay.
+  T1-LOSSY)           N=3; NATTYPES=(prc prc prc);;
+  T1-LOSSY-LEGACY)    N=3; NATTYPES=(prc prc prc); export FLEET_EXTRA="-netlegacy";;
+  # alice hosts (prc), bob is a normal guest (prc), carol is symmetric so
+  # every one of her links is relayed while alice<->bob stays direct.
+  T1-SYMGUEST)        N=3; NATTYPES=(prc prc sym);;
   # The T2-HOST-BAD reproduction: a fully relayed HOST with multiple
   # joiners. Cloud showed one joiner seating and the rest never landing.
   T1-HOST-RELAYED)    N=4; NATTYPES=(blk prc prc prc);;
@@ -145,6 +179,14 @@ fi
 for ((i=1; i<=NROUTERS; i++)); do
   "$NATLAB/nat-shape.sh" "$(fleet_letter $i)" "${NATTYPES[$((i-1))]}" $COORD_IP $COORD_UDP >> "$RUN/natlab.log"
 done
+if [ "$SCEN" = T1-LOSSY ] || [ "$SCEN" = T1-LOSSY-LEGACY ]; then
+  # Impair carol's uplink in both directions. 3% loss at ~10-15 pps is a
+  # lost packet every few seconds, the cadence of the field reports; the
+  # jitter is there so the run-ahead sizing gets exercised too.
+  say "impairing routerC uplink: netem 3% loss, 40ms +/-15ms, both directions"
+  sudo ip netns exec routerC tc qdisc replace dev wan0 root netem delay 40ms 15ms loss 3%
+  sudo ip netns exec routerC tc qdisc replace dev lan0 root netem delay 40ms 15ms loss 3%
+fi
 if [ "$SCEN" = T1-SAMEWAN-ISOLATED ]; then
   # Sever the two LAN subnets from each other; the WAN path is untouched,
   # so both still reach the coordinator and both still share one public IP.
@@ -222,7 +264,14 @@ say "match started; soaking ${SOAK}s"
 FWD_AT_START=$(status_field relay_forwarded)
 
 CHAOS_NOTE=""
-if [ "$SCEN" = T1-MIDGAME-DEATH ]; then
+if [ "$SCEN" = T1-PEER-LEAVE ]; then
+  sleep $(( SOAK / 3 ))
+  say "CHAOS: killing carol (client 3) outright - no leave message"
+  PEER_LEFT_AT=$(date +%s)
+  fleet_kill_one 3
+  CHAOS_NOTE="carol killed at +$((SOAK/3))s"
+  sleep $(( SOAK - SOAK / 3 ))
+elif [ "$SCEN" = T1-MIDGAME-DEATH ]; then
   sleep $(( SOAK / 3 ))
   say "CHAOS: killing the bob<->carol direct path (coordinator leg untouched)"
   CHAOS_NOTE="chaos injected at +$((SOAK/3))s"
@@ -240,6 +289,9 @@ fi
 
 say "collecting artifacts"
 status_json > "$RUN/status-final.json"
+if [ "$SCEN" = T1-LOSSY ] || [ "$SCEN" = T1-LOSSY-LEGACY ]; then
+  { sudo ip netns exec routerC tc -s qdisc show dev wan0; sudo ip netns exec routerC tc -s qdisc show dev lan0; } > "$RUN/netem.txt" 2>&1
+fi
 for ((i=1; i<=N; i++)); do
   cp "$(fleet_releaselog_i $i)" "$RUN/ReleaseLog.$i.txt" 2>/dev/null || true
   DISPLAY=:9$i import -window root "$RUN/client$i.png" 2>/dev/null || true
@@ -271,13 +323,84 @@ def netpath(i, ch="game"):
 def relay_lines(i):
     return [l for l in logs[i].splitlines() if "Relay:" in l or "using relay" in l]
 
+# Effective sim rate: frames divided by wall time between the LAST
+# "Match start" and the "Match end" that follows it. 30 is nominal; a game
+# gated by a slow peer shows up here and nowhere else.
+def effective_fps(i):
+    txt = logs[i]
+    k = txt.rfind("=== Match start")
+    if k < 0: return None
+    seg = txt[k:]
+    ms = re.search(r"\[(\d\d):(\d\d):(\d\d)\] === Match start", seg)
+    me = re.search(r"\[(\d\d):(\d\d):(\d\d)\] === Match end: frame=(\d+)", seg)
+    if not (ms and me): return None
+    t0 = int(ms.group(1))*3600 + int(ms.group(2))*60 + int(ms.group(3))
+    t1 = int(me.group(1))*3600 + int(me.group(2))*60 + int(me.group(3))
+    if t1 <= t0: return None
+    return (int(me.group(4)) / (t1 - t0), int(me.group(4)), t1 - t0)
+
+fps_report = []
+for i in range(1, n + 1):
+    r = effective_fps(i)
+    fps_report.append(f"client{i}=" + ("%.1f fps (%d frames / %ds)" % r if r else "n/a"))
+
+# Lockstep telemetry: one NETSTAT line per 10s while in-game.
+#   NETSTAT frame=F ra=R fps=P router=S lat=avg/hi links=[slot:resends/srtt ..]
+#           stall=N/TOTALms/maxMAX on=[slot:n ..] hitch=N/maxM rreq=tx/rx peers=[..]
+# links carry retries+repeats: retries fired the adaptive timer (probable
+# loss), repeats are the deliberate per-packet frame-info redundancy.
+# The sim rate is frames per wall second between the first and last line,
+# which (unlike Match end) survives the harness killing the clients.
+NS = re.compile(r"\[(\d\d):(\d\d):(\d\d)\] NETSTAT frame=(\d+) ra=(\d+) fps=(\d+) router=\d+ lat=(\d+)/(\d+) links=\[([^\]]*)\] stall=(\d+)/(\d+)ms/max(\d+) on=\[([^\]]*)\] hitch=(\d+)/max(\d+) rreq=(\d+)/(\d+)")
+def netstat(i):
+    rows = []
+    for m in NS.finditer(logs[i]):
+        g = m.groups()
+        t = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2])
+        retries = repeats = 0
+        for x in g[8].split():
+            if ":" not in x:
+                continue
+            counts = x.split(":")[1].split("/")[0]
+            a, _, b = counts.partition("+")
+            retries += int(a)
+            repeats += int(b or 0)
+        rows.append(dict(t=t, frame=int(g[3]), ra=int(g[4]), fps=int(g[5]), lat=int(g[6]), lathi=int(g[7]),
+                         retries=retries, repeats=repeats, stalls=int(g[9]), stall_ms=int(g[10]), stall_max=int(g[11]),
+                         on=g[12], hitches=int(g[13]), hitch_max=int(g[14]), rreq_tx=int(g[15]), rreq_rx=int(g[16])))
+    return rows
+def netstat_summary(i):
+    rows = netstat(i)
+    if not rows:
+        return None
+    dt = rows[-1]["t"] - rows[0]["t"]
+    df = rows[-1]["frame"] - rows[0]["frame"]
+    return dict(lines=len(rows), sim_fps=(round(df / dt, 1) if dt > 0 else None),
+                stalls=sum(r["stalls"] for r in rows), stall_ms=sum(r["stall_ms"] for r in rows),
+                stall_max=max(r["stall_max"] for r in rows),
+                # Steady state: the first window holds the start-of-match wait
+                # for the slowest loader (frame 8, seconds long under wine).
+                stall_max_steady=max([r["stall_max"] for r in rows[1:]] or [0]),
+                hitches=sum(r["hitches"] for r in rows),
+                hitch_max=max(r["hitch_max"] for r in rows), retries=sum(r["retries"] for r in rows),
+                repeats=sum(r["repeats"] for r in rows),
+                ra_min=min(r["ra"] for r in rows), ra_max=max(r["ra"] for r in rows),
+                lat_last=f'{rows[-1]["lat"]}/{rows[-1]["lathi"]}', ra_changes=logs[i].count("NETRA "),
+                netstall_lines=logs[i].count("NETSTALL "))
+ns_report = {f"client{i}": netstat_summary(i) for i in range(1, n + 1)}
+
 for i in range(1, n + 1):
     np = netpath(i)
     if len(np) < 2:
         fails.append(f"client{i}: only {len(np)} NETPATH game lines (no sustained soak)")
     elif np[-1][3] == 0:
         fails.append(f"client{i}: final NETPATH in_pps=0 (traffic dead at soak end)")
-    if "DISCONNECT dropped" in logs[i]:
+    # Every client that reached the game must be emitting lockstep telemetry.
+    if np and ns_report[f"client{i}"] is None:
+        fails.append(f"client{i}: no NETSTAT lines (lockstep telemetry missing)")
+    # T1-PEER-LEAVE kills a player on purpose: there, dropping her is the
+    # correct outcome and is asserted positively below.
+    if scen != "T1-PEER-LEAVE" and "DISCONNECT dropped" in logs[i]:
         fails.append(f"client{i}: a player was DROPPED mid-game (DISCONNECT breadcrumb)")
 
 if scen == "T1-BASELINE":
@@ -340,6 +463,80 @@ elif scen == "T1-SAMEWAN-ISOLATED":
     # publishes to every player (production 2026-08-31: a host addressing
     # 172.16.232.135 got replies from the gateway 172.16.28.1, stamped that
     # into the slot, and the match died at frame 8).
+
+elif scen == "T1-SYMGUEST":
+    # Measurement, not a pass/fail contract: carol is symmetric so all her
+    # links relay by design. The only requirement is that everyone plays;
+    # the number that matters is effective_fps, compared against
+    # T1-BASELINE run on the same machine.
+    for i in range(1, n + 1):
+        if "Match start" not in logs[i]:
+            fails.append(f"client{i} never started the match")
+
+elif scen == "T1-PEER-LEAVE":
+    # carol (client3) is gone; only the survivors are judged.
+    #
+    # Three things matter. They must still be playing at the end -- losing
+    # one player must not take the match down. They must NOTICE she left,
+    # rather than waiting on her forever (the lobby-side version of this
+    # stranded a player for 70s in production). And they must not keep
+    # burning relay flips on her: a client cannot tell "peer left" from
+    # "path died", so the silence trigger fires for a departed player and
+    # routes traffic for her through the coordinator forever. That last one
+    # is the graceful-handling gap this scenario exists to measure.
+    for i in (1, 2):
+        np = netpath(i)
+        if not np:
+            fails.append(f"client{i}: no NETPATH game lines")
+        elif np[-1][3] == 0:
+            fails.append(f"client{i}: traffic dead at soak end after a peer left")
+        if "Match end" in logs[i] and "DISCONNECT" not in logs[i]:
+            fails.append(f"client{i}: match ended without ever noticing the departure")
+    for i in (1, 2):
+        if "DISCONNECT" not in logs[i]:
+            fails.append(f"client{i}: never registered carol's departure")
+    # A client cannot tell "peer left" from "path died" inside the silence
+    # window, so a flip toward carol while she is still on probation is
+    # fair. Once she is DROPPED, though, the relay layer must forget her:
+    # no flips and no keepalives chase a player who has left.
+    for i in (1, 2):
+        lines = logs[i].splitlines()
+        forgot = [k for k, l in enumerate(lines) if "Relay: forgot departed peer carol" in l]
+        if not forgot:
+            fails.append(f"client{i}: never forgot the departed peer (no 'Relay: forgot departed peer carol')")
+            continue
+        late = [l for l in lines[forgot[-1] + 1:]
+                if "Relay: game traffic to carol" in l and "back to DIRECT" not in l]
+        if late:
+            fails.append(f"client{i}: relayed to carol after forgetting her ({len(late)} flip(s)): {late[-1][:90]}")
+
+elif scen == "T1-LOSSY":
+    # carol (slot 2) is on the impaired link. The lockstep must absorb her
+    # loss and jitter: the sim rate stays near nominal for everyone and no
+    # single wait is long enough to read as a freeze. Resends prove the
+    # impairment actually bit (otherwise this is just T1-BASELINE).
+    dropped = 0
+    try:
+        dropped = sum(int(x) for x in re.findall(r"dropped (\d+)", open(f"{run}/netem.txt").read()))
+    except OSError:
+        pass
+    if dropped == 0:
+        fails.append("netem reports zero dropped packets: the impairment never bit")
+    for i in range(1, n + 1):
+        r = ns_report[f"client{i}"]
+        if not r:
+            continue
+        if r["sim_fps"] is not None and r["sim_fps"] < 25.0:
+            fails.append(f"client{i}: sim rate {r['sim_fps']} fps under loss (want >= 25)")
+        if r["stall_max_steady"] >= 1000:
+            fails.append(f"client{i}: a single steady-state stall of {r['stall_max_steady']}ms under 3% loss (want < 1000)")
+    if fwd != 0:
+        fails.append(f"relay forwarded {fwd} packets in an all-direct scenario")
+
+elif scen == "T1-LOSSY-LEGACY":
+    # Measurement only: same shape, retail timing. Compare ns_report with
+    # T1-LOSSY on the same machine.
+    pass
 
 elif scen == "T1-HOUSE4":
     # The outsider (client4) is the one that broke. It reached the lobby
@@ -460,7 +657,7 @@ elif scen == "T1-MIDGAME-DEATH":
             fails.append(f"client{i}: final NETPATH relayed={np[-1][1] if np else 'none'} after path kill")
 
 verdict = "PASS" if not fails else "FAIL"
-result = {"scenario": scen, "verdict": verdict, "relay_forwarded_delta": fwd, "failures": fails}
+result = {"scenario": scen, "verdict": verdict, "effective_fps": fps_report, "netstat": ns_report, "relay_forwarded_delta": fwd, "failures": fails}
 print(json.dumps(result, indent=2))
 open(f"{run}/verdict.json", "w").write(json.dumps(result, indent=2))
 sys.exit(0 if verdict == "PASS" else 1)

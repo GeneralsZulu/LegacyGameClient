@@ -1202,6 +1202,14 @@ Int parseCoordNoRelay(char *args[], int num)
 	return 1;
 }
 
+// Retail lockstep timing (2s fixed retry, mean-latency run-ahead) for A/B
+// runs in the lab. See NetworkUtil.cpp.
+Int parseNetLegacy(char *args[], int num)
+{
+	NET_LEGACY_TIMING = TRUE;
+	return 1;
+}
+
 Int parsePlayStats(char *args[], int num)
 {
 	if (num > 1)
@@ -1566,6 +1574,7 @@ static CommandLineParam paramsForEngineInit[] =
 	{ "-coordautostart", parseCoordAutoStart },
 	{ "-coordpunchttl", parseCoordPunchTTL },
 	{ "-norelay", parseCoordNoRelay },
+	{ "-netlegacy", parseNetLegacy },
 	{ "-useWaveEditor", parseUseWaveEditor },
 
 	// TheSuperHackers @feature xezon 03/08/2025 Force full viewport for 'Control Bar Pro' Addons like GenTool did it.

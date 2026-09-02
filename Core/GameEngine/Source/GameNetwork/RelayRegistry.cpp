@@ -301,6 +301,27 @@ void RelayRegistry::forceRelayChannel(UnsignedInt relayID, Int channel)
 	logFlip(e, "granted");
 }
 
+void RelayRegistry::forgetPeerByAddr(UnsignedInt ipHost, UnsignedShort portHost)
+{
+	if (!s_active)
+		return;
+	RelayPeerEntry* e = findByAddr(ipHost, portHost);
+	if (e == NULL)
+		return;
+	const UnsignedInt relayID = e->relayID;
+	AsciiString nick = e->nick;
+	size_t i = 0;
+	while (i < s_peers.size())
+	{
+		if (s_peers[i].relayID == relayID)
+			s_peers.erase(s_peers.begin() + i);
+		else
+			++i;
+	}
+	ReleaseLog("Relay: forgot departed peer %s (id %u)",
+		nick.isEmpty() ? "peer" : nick.str(), relayID);
+}
+
 void RelayRegistry::forceRelay(UnsignedInt relayID)
 {
 	forceRelayChannel(relayID, CHANNEL_LOBBY);
