@@ -52,6 +52,18 @@
 #   T1-SAMELAN-HOSTPAIR 2 clients behind one router on separate subnets:
 #                      one public IP, distinct private IPs. Must connect
 #                      and play, carried by the relay.
+#   T1-SIBLING-GUESTS  The 2026-09-02 online-night death: alice hosts on her
+#                      own ISP, bob and carol are TWO GUESTS behind one
+#                      router (carol on a second subnet, so the SNAT gives
+#                      her remapped ports once bob holds 8086/8088), and
+#                      dave is an outsider on a third ISP. dave's per-peer
+#                      game-port re-stamp keys by (ip, lobby port) but a
+#                      guest never learns other guests' lobby ports, so the
+#                      IP-only fallback hands carol's slot bob's game port and
+#                      dave sends carol's traffic to bob. Live: Syn+Pancake
+#                      behind one IP, everyone else re-addressed Pancake to
+#                      Syn's port, both dropped at frame 8. Pass = no
+#                      cross-peer re-stamp, all four in-game, no drops.
 #   T1-LOSSY           3 clients, all prc, all direct, but carol's uplink is
 #                      impaired with netem (3% loss, 40ms +/-15ms jitter,
 #                      each direction): the "one player on a bad link"
@@ -148,6 +160,10 @@ case "$SCEN" in
   # alice(host) + bob share routerA's LAN; carol is on a second subnet
   # behind the same router; dave is on routerB, another ISP entirely.
   T1-HOUSE4)          N=4; NATTYPES=(prc prc);;
+  # Host alone on routerA, bob + carol(sibling subnet) behind routerB, dave
+  # alone on routerC: two guests share a public IP and a third guest must
+  # address both of them.
+  T1-SIBLING-GUESTS)  N=4; NATTYPES=(prc prc prc);;
   *) echo "unknown scenario $SCEN"; exit 1;;
 esac
 
@@ -164,6 +180,7 @@ NROUTERS=$N
 [ "$SCEN" = T1-MIXED-WAN ] && NROUTERS=2
 [ "$SCEN" = T1-HOUSE4 ] && NROUTERS=2
 [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] && NROUTERS=1
+[ "$SCEN" = T1-SIBLING-GUESTS ] && NROUTERS=3
 if [ "$SCEN" = T1-HOUSE4 ]; then
   # SIBLING_SNAT reproduces VMware's inter-vmnet NAT: carol's packets reach
   # alice wearing the gateway's address, not carol's. That is what turned a
@@ -173,6 +190,9 @@ if [ "$SCEN" = T1-HOUSE4 ]; then
 elif [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] || [ "$SCEN" = T1-SAMEWAN-ISOLATED ] \
    || [ "$SCEN" = T1-MIXED-WAN ]; then
   SIBLING_ROUTER=A NCLIENTS=$NROUTERS "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
+elif [ "$SCEN" = T1-SIBLING-GUESTS ]; then
+  # carol = clientB2, a second subnet behind bob's router.
+  SIBLING_ROUTER=B NCLIENTS=$NROUTERS "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
 else
   NCLIENTS=$NROUTERS "$NATLAB/natlab-up.sh" > "$RUN/natlab.log"
 fi
@@ -229,6 +249,15 @@ for ((i=2; i<=N; i++)); do
     # because this scenario brings up only two routers, so the default
     # netns for client 3 (clientC) is not part of this lab.
     FLEET_NETNS_OVERRIDE=B fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-SIBLING-GUESTS ] && [ $i -eq 3 ]; then
+    # carol: sibling subnet behind bob's router. bob joined first and holds
+    # 8086/8088 on the shared public IP, so her SNAT ports are remapped --
+    # the live Syn/Pancake shape (5130/5131 vs 5272/5273).
+    FLEET_NETNS_OVERRIDE=B2 fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
+  elif [ "$SCEN" = T1-SIBLING-GUESTS ] && [ $i -eq 4 ]; then
+    # dave: the outsider on routerC (only three routers exist, so the
+    # default netns for client 4 is not part of this lab).
+    FLEET_NETNS_OVERRIDE=C fleet_launch $i "${NICKS[$((i-1))]}" -coordautojoin "$GAME" -coordautostart $N
   elif [ "$SCEN" = T1-SAMELAN-HOSTPAIR ] && [ $i -eq 2 ]; then
     # bob is the sibling netns off the host's router: one public IP, its
     # own private subnet, so a local candidate genuinely routes.
@@ -402,6 +431,17 @@ for i in range(1, n + 1):
     # correct outcome and is asserted positively below.
     if scen != "T1-PEER-LEAVE" and "DISCONNECT dropped" in logs[i]:
         fails.append(f"client{i}: a player was DROPPED mid-game (DISCONNECT breadcrumb)")
+    # Chat delivery: with -coordautostart every client says one line once
+    # the room is full, so each client must log exactly n-1 MSG_CHAT
+    # receipts (type=10). More = duplicates (the 2026-09-02 double chat:
+    # guest mesh broadcast + host relay), fewer = chat lost. Skipped on the
+    # lossy shapes, where a dropped chat datagram is legitimate. The host
+    # (client1) never logs "dc RECV" (that diagnostic is joiner-side only)
+    # and cannot see a duplicate anyway, so joiners only.
+    if not scen.startswith("T1-LOSSY") and i != 1:
+        got = len(re.findall(r"LAN dc RECV type=10 from ", logs[i]))
+        if logs[i] and got != n - 1:
+            fails.append(f"client{i}: saw {got} chat lines, want {n - 1} (one per other player)")
 
 if scen == "T1-BASELINE":
     if fwd != 0:
@@ -574,6 +614,37 @@ elif scen == "T1-MIXED-WAN":
         ip = m.group(1)
         if ip.startswith("10.99.1.") or ip.startswith("10.99.101."):
             fails.append(f"client3 (other ISP) was given a peer address inside the shared NAT: {ip}")
+
+elif scen == "T1-SIBLING-GUESTS":
+    # bob and carol share routerB's public IP with different ports. Every
+    # guest re-stamps the other guests' game ports from the coordinator
+    # peer_info map on each options broadcast; the host's options string
+    # already carries the right punched port, so on a guest that knows BOTH
+    # siblings any re-stamp that moves one sibling onto the other's
+    # advertised game port is the bug. Cross-check the breadcrumb against
+    # the peer_info lines in the same log.
+    import re as _re
+    for i in range(1, n + 1):
+        peers = {}   # (ip, gameport) -> nick
+        for m in _re.finditer(r"Options pump: (?:mesh peer|new joiner) (\S+) lobby=\S+ game=(\d+\.\d+\.\d+\.\d+):(\d+)", logs[i]):
+            peers[(m.group(2), int(m.group(3)))] = m.group(1)
+        seen = set()
+        for m in _re.finditer(r"LAN dc: peer slot (\d+) game port (\d+) -> (\d+) \(ip=(\d+\.\d+\.\d+\.\d+)\)", logs[i]):
+            slot, was, now, ip = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+            key = (slot, was, now, ip)
+            if key in seen:
+                continue
+            seen.add(key)
+            victim = peers.get((ip, was))
+            other = peers.get((ip, now))
+            if victim and other and victim != other:
+                fails.append(f"client{i}: re-addressed {victim}'s slot {slot} from port {was} to {other}'s port {now} on {ip} (same-IP siblings confused)")
+    for i in range(1, n + 1):
+        np = netpath(i)
+        if not np:
+            fails.append(f"client{i}: no NETPATH game lines (never reached the game)")
+        elif np[-1][0] < 3:
+            fails.append(f"client{i}: only {np[-1][0]} game peers (want 3)")
 
 elif scen == "T1-SAMELAN-HOSTPAIR":
     # Two players on one network must be able to play. They do it over the

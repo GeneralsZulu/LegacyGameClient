@@ -1564,17 +1564,6 @@ static void updateCoordAutoStart(void)
 	if (nowMs < nextActionMs) return;
 	nextActionMs = nowMs + 1000;
 
-	if (!TheLAN->AmIHost())
-	{
-		const GameSlot* slot = myGame->getConstSlot(myGame->getLocalSlotNum());
-		if (slot && slot->isHuman() && !slot->isAccepted())
-		{
-			DEBUG_LOG(("updateCoordAutoStart: joiner auto-accepting"));
-			TheLAN->RequestAccept();
-		}
-		return;
-	}
-
 	Int humans = 0;
 	Bool allAccepted = TRUE;
 	Int i;
@@ -1587,6 +1576,33 @@ static void updateCoordAutoStart(void)
 			if (i != 0 && !slot->isAccepted())
 				allAccepted = FALSE;
 		}
+	}
+
+	// Once the room is full, every client (host included) says one line of
+	// chat, exactly once. The lab verifier counts the MSG_CHAT receipts in
+	// each ReleaseLog (LAN dc RECV type=10): each client must see exactly
+	// N-1 of them, one per other player. That is how the double-delivery
+	// of joiner chat (guest mesh broadcast + host relay) is kept from
+	// coming back.
+	static Bool s_autoChatSent = FALSE;
+	if (!s_autoChatSent && humans >= TheGlobalData->m_coordAutoStart)
+	{
+		s_autoChatSent = TRUE;
+		UnicodeString line;
+		line.format(L"autochat from slot %d", myGame->getLocalSlotNum());
+		ReleaseLog("Coord auto-chat: sending one line");
+		TheLAN->RequestChat(line, LANAPI::LANCHAT_NORMAL);
+	}
+
+	if (!TheLAN->AmIHost())
+	{
+		const GameSlot* slot = myGame->getConstSlot(myGame->getLocalSlotNum());
+		if (slot && slot->isHuman() && !slot->isAccepted())
+		{
+			DEBUG_LOG(("updateCoordAutoStart: joiner auto-accepting"));
+			TheLAN->RequestAccept();
+		}
+		return;
 	}
 	if (humans >= TheGlobalData->m_coordAutoStart && allAccepted)
 	{
@@ -1654,7 +1670,9 @@ void LanGameOptionsMenuUpdate( WindowLayout * layout, void *userData)
 			{
 				if (p.gamePunchedPort != 0)
 				{
-					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.punchedPort, p.gamePunchedPort);
+					UnicodeString peerNick;
+					peerNick.translate(p.nick);
+					TheLAN->setDirectConnectGamePortForPeer(p.punchedIP, p.punchedPort, p.gamePunchedPort, peerNick);
 				}
 				// TTL-limited probe NOW (opens our lobby mapping before the
 				// peer's first packet can poison it, without reaching the

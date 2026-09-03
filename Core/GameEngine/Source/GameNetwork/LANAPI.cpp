@@ -282,8 +282,13 @@ Int LANAPI::findSlotForSender(UnsignedInt senderIP) const
 	return -1;
 }
 
-void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */)
+void LANAPI::sendMessage(LANMessage *msg, UnsignedInt ip /* = 0 */, UnsignedShort explicitPort /* = 0 */)
 {
+	if (ip != 0 && explicitPort != 0)
+	{
+		m_transport->queueSend(ip, explicitPort, (unsigned char *)msg, sizeof(LANMessage));
+		return;
+	}
 	if (ip != 0)
 	{
 		// Joiner side of a direct-connect game: rewrite the host's LAN-local
@@ -1128,7 +1133,19 @@ void LANAPI::RequestChat( UnicodeString message, ChatType format )
 	msg.messageType = LANMessage::MSG_CHAT;
 	msg.Chat.chatType = format;
 	wcslcpy(msg.Chat.message, message.str(), ARRAY_SIZE(msg.Chat.message));
-	sendMessage(&msg);
+	if (!m_inLobby && m_currentGame != nullptr && m_currentGame->getIsDirectConnect() && !AmIHost())
+	{
+		// Online game room, joiner side: send to the HOST only. The host
+		// relays every joiner's chat to the other joiners (handleChat), and
+		// since the guest mesh joiners can also reach each other directly, a
+		// broadcast here made every other joiner see the line twice: once
+		// from us, once relayed (2026-09-02 online night, every guest log).
+		sendMessage(&msg, m_currentGame->getIP(0));
+	}
+	else
+	{
+		sendMessage(&msg);
+	}
 
 	OnChat(m_name, m_localIP, message, format);
 }
