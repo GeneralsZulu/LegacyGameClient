@@ -359,13 +359,16 @@ public:
 	/// as the coordinator delivers peer_info for each new joiner;
 	/// handleRequestJoin looks the joiner up here (by the source port of the
 	/// join request) before falling back to the single-value setter above.
-	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort lobbyPort, UnsignedShort gamePort )
+	void setDirectConnectGamePortForPeer( UnsignedInt ip, UnsignedShort lobbyPort, UnsignedShort gamePort,
+		const UnicodeString& nick = UnicodeString::TheEmptyString )
 	{
 		for (size_t i = 0; i < m_directConnectGamePorts.size(); ++i)
 		{
 			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
 			{
 				m_directConnectGamePorts[i].gamePort = gamePort;
+				if (!nick.isEmpty())
+					m_directConnectGamePorts[i].nick = nick;
 				return;
 			}
 		}
@@ -373,24 +376,53 @@ public:
 		entry.ip        = ip;
 		entry.lobbyPort = lobbyPort;
 		entry.gamePort  = gamePort;
+		entry.nick      = nick;
 		m_directConnectGamePorts.push_back(entry);
 	}
-	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip, UnsignedShort lobbyPort ) const
+	/// Resolve a peer's punched game port. Exact (ip, lobby port) first;
+	/// then (ip, nick) for callers that know the slot name but not the
+	/// peer's lobby port (a guest never learns other guests' lobby ports:
+	/// only the host stamps them, from the join request's source port).
+	/// The IP-only fallback is taken ONLY when a single peer lives behind
+	/// that IP. With two siblings behind one NAT it used to return the
+	/// first sibling's port for both, so every other guest sent one
+	/// sibling's in-game traffic to the other's socket and the match died
+	/// at frame 8 (2026-09-02, Syn + Pancake behind one VPN address).
+	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip, UnsignedShort lobbyPort,
+		const UnicodeString& nick ) const
 	{
 		size_t i;
-		// Exact (ip, lobby port) match first.
-		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+		if (lobbyPort != 0)
 		{
-			if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
-				return m_directConnectGamePorts[i].gamePort;
+			for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+			{
+				if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].lobbyPort == lobbyPort)
+					return m_directConnectGamePorts[i].gamePort;
+			}
 		}
-		// Fall back to IP-only (peer whose lobby port we never learned).
+		if (!nick.isEmpty())
+		{
+			for (i = 0; i < m_directConnectGamePorts.size(); ++i)
+			{
+				if (m_directConnectGamePorts[i].ip == ip && m_directConnectGamePorts[i].nick.compare(nick) == 0)
+					return m_directConnectGamePorts[i].gamePort;
+			}
+		}
+		UnsignedShort only = 0;
+		Int matches = 0;
 		for (i = 0; i < m_directConnectGamePorts.size(); ++i)
 		{
 			if (m_directConnectGamePorts[i].ip == ip)
-				return m_directConnectGamePorts[i].gamePort;
+			{
+				only = m_directConnectGamePorts[i].gamePort;
+				++matches;
+			}
 		}
-		return (UnsignedShort)0;
+		return (matches == 1) ? only : (UnsignedShort)0;
+	}
+	UnsignedShort lookupDirectConnectGamePort( UnsignedInt ip, UnsignedShort lobbyPort ) const
+	{
+		return lookupDirectConnectGamePort(ip, lobbyPort, UnicodeString::TheEmptyString);
 	}
 
 	/// Send a tiny fill-in-style LOBBY_ANNOUNCE packet directly to (ip:port)
@@ -509,6 +541,7 @@ protected:
 		UnsignedInt   ip;         ///< peer's external IP
 		UnsignedShort lobbyPort;  ///< peer's external lobby port (tells same-IP peers apart)
 		UnsignedShort gamePort;   ///< peer's punched external game-data port
+		UnicodeString nick;       ///< peer's lobby name (tells same-IP peers apart when the lobby port is unknown)
 	};
 	std::vector<DirectConnectPeerPorts> m_directConnectGamePorts; ///< Per-peer punched game-data ports from coordinator peer_info (N-player coord).
 	UnsignedInt					m_dispatchSenderIP;  ///< Source IP of the LAN message currently being dispatched (transient).
@@ -608,7 +641,10 @@ protected:
 	Bool ensureObserverMapAvailable(AsciiString relReplayPath);
 
 protected:
-	void sendMessage(LANMessage *msg, UnsignedInt ip = 0); // Convenience function
+	/// ip=0 broadcasts. A non-zero port pins the destination exactly and
+	/// skips the IP-keyed port guesses (reply-to-sender, slot scan), which
+	/// pick the wrong player when two joiners share one public IP.
+	void sendMessage(LANMessage *msg, UnsignedInt ip = 0, UnsignedShort port = 0); // Convenience function
 	void removePlayer(LANPlayer *player);
 	void removeGame(LANGameInfo *game);
 	void addPlayer(LANPlayer *player);

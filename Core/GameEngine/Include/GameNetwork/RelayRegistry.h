@@ -92,6 +92,11 @@ public:
 
 	static void forceRelay(UnsignedInt relayID);                 // both channels
 	static void forceRelayChannel(UnsignedInt relayID, Int channel);
+	// Start a channel relayed WITHOUT marking it granted: an AUTO flip, so
+	// direct-upgrade probing can still pull the pair back to direct if the
+	// direct path turns out to work. For pairs known in advance to need
+	// hairpin (same public IP).
+	static void startRelayedChannel(UnsignedInt relayID, Int channel, const char* why);
 	static Bool hasPeer(UnsignedInt relayID);
 
 	// --- Transport send path ---

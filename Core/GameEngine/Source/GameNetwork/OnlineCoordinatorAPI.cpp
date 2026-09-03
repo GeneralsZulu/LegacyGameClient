@@ -1957,6 +1957,29 @@ void OnlineCoordinatorAPI::onTcpMessage(const char* msgType, const char* obj)
 				p.punchedIP, p.punchedPort, p.nick);
 			RelayRegistry::addPeer(p.relayID, RelayRegistry::CHANNEL_GAME,
 				p.gamePunchedIP, p.gamePunchedPort, p.nick);
+
+			// A mesh peer behind OUR public IP: the only address we can send
+			// to is our own NAT's outside, which needs hairpin, and neither
+			// consumer routers nor VPN endpoints reliably do it. Left to the
+			// silence trigger, the pair sits quiet through the 45s map-load
+			// grace while both of us wait in the load-complete barrier for
+			// each other, the host stalls on both of us, and the disconnect
+			// vote drops us first (2026-09-02: Syn + Pancake behind one VPN
+			// address, both gone at frame 8). Start the pair relayed instead.
+			// It is an AUTO flip, so direct-upgrade probing still pulls it
+			// back to direct where hairpin does work.
+			if (p.role.compare("peer") == 0 && p.gamePunchedIP != 0)
+			{
+				UnsignedInt ourPublicIP = 0;
+				parseHostOrderIpPort(m_publicAddrGame, &ourPublicIP, NULL);
+				if (ourPublicIP != 0 && p.gamePunchedIP == ourPublicIP)
+				{
+					RelayRegistry::startRelayedChannel(p.relayID, RelayRegistry::CHANNEL_GAME,
+						"same public IP, hairpin not assumed");
+					RelayRegistry::startRelayedChannel(p.relayID, RelayRegistry::CHANNEL_LOBBY,
+						"same public IP, hairpin not assumed");
+				}
+			}
 		}
 
 		// Guest<->guest mesh notification: another guest in the game we

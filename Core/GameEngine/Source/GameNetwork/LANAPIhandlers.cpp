@@ -610,8 +610,12 @@ void LANAPI::handleRequestGameLeave( LANMessage *msg, UnsignedInt senderIP )
 {
 	if (!m_inLobby && m_currentGame && !m_currentGame->isGameInProgress())
 	{
-		int player;
-		for (player = 0; player < MAX_SLOTS; ++player)
+		// (IP, source port) match: with two players behind one NAT an IP-only
+		// scan would remove the wrong sibling when one of them leaves.
+		int player = findSlotForSender(senderIP);
+		if (player < 0)
+			player = MAX_SLOTS;
+		for (; player < MAX_SLOTS; ++player)
 		{
 			if (m_currentGame->getIP(player) == senderIP)
 			{
@@ -755,14 +759,17 @@ void LANAPI::handleChat( LANMessage *msg, UnsignedInt senderIP )
 			return;
 		}
 
-		int player;
-		for (player = 0; player < MAX_SLOTS; ++player)
+		// Resolve the sender by (IP, source port), not IP alone: with two
+		// joiners behind one public IP the IP-only scan credited the second
+		// sibling's chat to the first, so the relay below skipped the wrong
+		// slot -- the real sender got its own line back and the sibling
+		// never saw it (lab T1-SIBLING-GUESTS).
+		int player = findSlotForSender(senderIP);
+		if (player < 0)
+			player = MAX_SLOTS;
+		if (player < MAX_SLOTS)
 		{
-			if (m_currentGame && m_currentGame->getIP(player) == senderIP)
-			{
-				OnChat(UnicodeString(msg->name), m_currentGame->getIP(player), UnicodeString(msg->Chat.message), msg->Chat.chatType);
-				break;
-			}
+			OnChat(UnicodeString(msg->name), m_currentGame->getIP(player), UnicodeString(msg->Chat.message), msg->Chat.chatType);
 		}
 
 		// Direct-connect games: joiners have punched mappings only to the
@@ -782,7 +789,14 @@ void LANAPI::handleChat( LANMessage *msg, UnsignedInt senderIP )
 				LANGameSlot *slot = m_currentGame->getLANSlot(relayTo);
 				if (slot != nullptr && slot->isHuman() && slot->getIP() != 0)
 				{
-					sendMessage(msg, slot->getIP());
+					// Pin the port. sendMessage's IP-keyed guesses (reply to
+					// the dispatch sender, first slot with this IP) both
+					// resolve to the SAME sibling when two joiners share a
+					// public IP, so one of them got every relayed line twice
+					// and the other none (lab T1-SIBLING-GUESTS). The host
+					// stamped each joiner's lobby port at join time (0 = plain
+					// LAN, where sendMessage's default port is right).
+					sendMessage(msg, slot->getIP(), slot->getLobbyPort());
 				}
 			}
 		}

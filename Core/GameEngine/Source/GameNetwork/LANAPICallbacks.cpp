@@ -536,8 +536,11 @@ void LANAPI::OnGameOptions( UnsignedInt playerIP, Int playerSlot, AsciiString op
 						continue;
 					if (peerSlot->getIP() == m_localIP)
 						continue;   // ourselves; our own slot port stays local
+					// Pass the slot name: a guest has no lobby port for other
+					// guests, and two siblings behind one NAT share the IP,
+					// so the name is what tells them apart (see the lookup).
 					UnsignedShort peerGamePort =
-						lookupDirectConnectGamePort(peerSlot->getIP(), peerSlot->getLobbyPort());
+						lookupDirectConnectGamePort(peerSlot->getIP(), peerSlot->getLobbyPort(), peerSlot->getName());
 					if (peerGamePort != 0 && peerSlot->getPort() != peerGamePort)
 					{
 						ReleaseLog("LAN dc: peer slot %d game port %d -> %d (ip=%d.%d.%d.%d)",

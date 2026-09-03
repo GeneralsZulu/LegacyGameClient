@@ -301,6 +301,15 @@ void RelayRegistry::forceRelayChannel(UnsignedInt relayID, Int channel)
 	logFlip(e, "granted");
 }
 
+void RelayRegistry::startRelayedChannel(UnsignedInt relayID, Int channel, const char* why)
+{
+	RelayPeerEntry* e = findByID(relayID, channel);
+	if (e == NULL || e->sendViaRelay)
+		return;
+	e->sendViaRelay = TRUE;
+	logFlip(e, why);
+}
+
 void RelayRegistry::forgetPeerByAddr(UnsignedInt ipHost, UnsignedShort portHost)
 {
 	if (!s_active)
