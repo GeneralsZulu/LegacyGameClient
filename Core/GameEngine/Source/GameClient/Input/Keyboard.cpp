@@ -243,8 +243,15 @@ Bool Keyboard::checkKeyRepeat()
 				for( index = 0; index< NUM_KEYS; index++ )
 					m_keyStatus[ index ].keyDownTimeMsec = now;
 
-				// Set repeated key so it will repeat again after the interval
-				m_keyStatus[ key ].keyDownTimeMsec = now - (Keyboard::KEY_REPEAT_DELAY_MSEC + Keyboard::KEY_REPEAT_INTERVAL_MSEC);
+				// Re-seed the held key so its NEXT repeat fires once
+				// KEY_REPEAT_INTERVAL_MSEC of wall time has passed. This used
+				// to seed now - (DELAY + INTERVAL), which is already past the
+				// delay on the very next poll, so a held key repeated on EVERY
+				// keyboard poll: the repeat rate was the render frame rate.
+				// Retail hid that behind its 30fps menu cap; with the render
+				// uncapped (in-game multiplayer always was) a held backspace
+				// erased 60-200+ characters a second.
+				m_keyStatus[ key ].keyDownTimeMsec = now - Keyboard::KEY_REPEAT_DELAY_MSEC + Keyboard::KEY_REPEAT_INTERVAL_MSEC;
 
 				retVal = TRUE;
 				break;  // exit for key
