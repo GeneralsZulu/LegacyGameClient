@@ -65,6 +65,9 @@ This is a developer-facing inventory, not a player-facing changelog.
 - [installer-build.md](installer-build.md) — `make installer-release`
   pipeline, `BuildVersion.h` plumbing, replay header version from
   `APPVERSION`, RC dependency tracking.
+- [code-signing.md](code-signing.md) — Authenticode signing of the
+  installer, uninstaller, exe and launcher with Azure Trusted Signing via
+  jsign; one-time Azure setup and `~/.config/zulu/signing.env`.
 
 ## Backwards compatibility ground rules
 

@@ -103,6 +103,34 @@ RequestExecutionLevel admin
 
 !insertmacro MUI_LANGUAGE "English"
 
+; Version resource. Without one the installer carries no publisher or
+; product metadata at all, which SmartScreen and Defender heuristics both
+; score against. VIProductVersion insists on four dotted numbers, so the
+; three-part APPVERSION gets a trailing .0 (same as the launcher's .rc).
+!define VIVERSION "${APPVERSION}.0"
+VIProductVersion "${VIVERSION}"
+VIFileVersion    "${VIVERSION}"
+VIAddVersionKey "ProductName"      "${APPNAME}"
+VIAddVersionKey "ProductVersion"   "${APPVERSION}"
+VIAddVersionKey "FileVersion"      "${APPVERSION}"
+VIAddVersionKey "FileDescription"  "${APPNAME} installer for Command & Conquer: Generals Zero Hour"
+VIAddVersionKey "CompanyName"      "Bill Rich"
+VIAddVersionKey "LegalCopyright"   "Bill Rich"
+VIAddVersionKey "OriginalFilename" "Zulu_Setup.exe"
+
+; Authenticode signing. The Makefile passes /DSIGN_CMD=<abs path to
+; scripts/sign.sh>; the script decides for itself whether signing is
+; configured (Azure Artifact Signing via jsign) and is a no-op otherwise.
+; The uninstaller has to be signed here rather than after the fact: NSIS
+; generates it during this compile and embeds it in the installer, so
+; !uninstfinalize is the only point where the bare file exists. The game
+; exe and launcher are signed by the Makefile before they are packed.
+; "= 0" makes a non-zero exit from the signer fail the build.
+!ifdef SIGN_CMD
+    !uninstfinalize '"${SIGN_CMD}" "%1"' = 0
+    !finalize       '"${SIGN_CMD}" "%1"' = 0
+!endif
+
 ; ---------------------------------------------------------------------------
 ; Finding the Zero Hour install
 ;

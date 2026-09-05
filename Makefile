@@ -13,12 +13,21 @@
 #   make zulu-exe-log        build a Release exe with DEBUG_LOGGING + DEBUG_CRASHING
 #                            (no debug CRT; same DLL deps as the shipping exe)
 #   make clean-installer     remove the staged tmp dir and the built setup exe
+#   make sign-status         show whether Authenticode signing is configured
+#
+# Every PE that ships (installer, uninstaller, game exe, launcher) is signed
+# with Azure Artifact Signing when ~/.config/zulu/signing.env is present;
+# see scripts/sign.sh. `make installer-release` refuses to run unsigned.
 
 BIG          ?= big
 NSIS         ?= makensis
 DOCKER_BUILD ?= ./scripts/docker-build.sh
 GCLOUD       ?= gcloud
 GCS_BUCKET   ?= zulu-installer
+# Authenticode signer (Azure Artifact Signing via jsign). Given to NSIS as an
+# absolute path because !finalize runs from makensis's cwd, not the .nsi dir.
+# The script is a no-op when signing is not configured; see scripts/sign.sh.
+SIGN         ?= $(abspath scripts/sign.sh)
 
 ASSETS_DIR := assets
 TMP_DIR    := build/installer-tmp
@@ -104,7 +113,10 @@ ASSET_FILES := $(shell find $(ASSETS_DIR) -type f 2>/dev/null)
 # big-endian first-data offset = 16.
 EMPTY_BIG_BYTES := 'BIGF\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10'
 
-.PHONY: installer installer-release installer-dev zulu-big replay-bigs zulu-exe zulu-exe-log zulu-launcher clean-installer
+.PHONY: installer installer-release installer-dev zulu-big replay-bigs zulu-exe zulu-exe-log zulu-launcher clean-installer sign-status
+
+sign-status:
+	@$(SIGN) --status
 
 # Target-specific variables that propagate down the prereq chain so the
 # docker-build-* recipes pick the right Discord webhook secret and bake
@@ -115,6 +127,9 @@ installer:         DISCORD_WEBHOOK_SECRET := discord_webhook
 installer:         ZULU_BUILD_VARIANT     := release
 installer-release: DISCORD_WEBHOOK_SECRET := discord_webhook
 installer-release: ZULU_BUILD_VARIANT     := release
+# A release must never ship unsigned by accident: with this set, sign.sh
+# fails the build instead of skipping when signing is not configured.
+installer-release: export ZULU_SIGN_REQUIRED := 1
 installer-dev:     DISCORD_WEBHOOK_SECRET := debug_discord_webhook
 installer-dev:     ZULU_BUILD_VARIANT     := dev
 
@@ -188,8 +203,11 @@ docker-build-z_generals:
 	ZULU_BUILD_VARIANT=$(ZULU_BUILD_VARIANT) \
 	$(DOCKER_BUILD) --cmake --target z_generals
 
+# Sign the staged copy, not the build output, so the docker build dir stays
+# pristine and a re-run never double-signs.
 $(TMP_EXE): docker-build-z_generals | $(TMP_DIR)
 	cp "$(SOURCE_EXE)" "$@"
+	$(SIGN) "$@"
 
 # Logging variant: same Release build (no debug CRT, same DLL deps as the
 # shipping exe), but with DEBUG_LOGGING + DEBUG_CRASHING compiled in. Writes
@@ -223,6 +241,7 @@ docker-build-z_generals-log:
 
 $(TMP_EXE_LOG): docker-build-z_generals-log | $(TMP_DIR)
 	cp "$(SOURCE_EXE_LOG)" "$@"
+	$(SIGN) "$@"
 	@echo
 	@echo "Logging exe ready: $@"
 	@echo "Ship this to the rejoiner VM; DebugLogFile.txt will land next to the .exe."
@@ -239,6 +258,7 @@ docker-build-z_launcher:
 
 $(TMP_LAUNCHER): docker-build-z_launcher | $(TMP_DIR)
 	cp "$(SOURCE_LAUNCHER)" "$@"
+	$(SIGN) "$@"
 
 # Hand the staged paths to NSIS via /D overrides (paths are relative to the
 # .nsi file's directory, i.e. installer/). After packaging, drop the staged
@@ -250,6 +270,7 @@ $(INSTALLER_OUT): $(TMP_BIG) $(TMP_EXE) $(TMP_LAUNCHER) $(REPLAY_DATA_STAMP) $(N
 		-DEXE_SOURCE="../$(TMP_EXE)" \
 		-DLAUNCHER_SOURCE="../$(TMP_LAUNCHER)" \
 		-DREPLAYDATA_SOURCE="../$(REPLAY_DATA_DIR)" \
+		-DSIGN_CMD="$(SIGN)" \
 		$(NSI)
 	@rm -f "$(TMP_BIG)" "$(TMP_EXE)" "$(TMP_LAUNCHER)"
 
@@ -276,6 +297,7 @@ installer-dev: $(TMP_BIG) $(TMP_EXE_LOG) $(TMP_LAUNCHER) $(REPLAY_DATA_STAMP) $(
 		-DEXE_SOURCE="../$(TMP_EXE_LOG)" \
 		-DLAUNCHER_SOURCE="../$(TMP_LAUNCHER)" \
 		-DREPLAYDATA_SOURCE="../$(REPLAY_DATA_DIR)" \
+		-DSIGN_CMD="$(SIGN)" \
 		$(NSI)
 	@# The dev update gate compares the game exe on disk against the game exe
 	@# this installer carries, so the manifest needs that hash -- take it while
